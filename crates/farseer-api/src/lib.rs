@@ -38,6 +38,7 @@ use farseer_manager::{LivenessHandle, RunSink, SteerHandle};
 use farseer_runner::spawn::CancelToken;
 use farseer_store::{RunRow, ScanFilter, Store, StoreError, UI_STATE_CAP_BYTES};
 
+mod mcp;
 pub mod security;
 
 pub use security::{RuntimeToken, runtime_file_path, write_runtime_file};
@@ -224,6 +225,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/v1/analytics/intervention", get(analytics_intervention))
         .route("/v1/analytics/rework", get(analytics_rework))
         .route("/v1/analytics/lessons", get(analytics_lessons))
+        .nest_service("/v1/mcp", mcp::service(state.clone()))
         .layer(middleware::from_fn_with_state(state.clone(), guard))
         .with_state(state)
 }
@@ -1546,5 +1548,140 @@ runner = "claude-code"
             depths.contains(&2),
             "two chains of depth 2 (original -> rerun, original -> rescope) should be visible: {rework}"
         );
+    }
+
+    /// Real `rmcp` client, real TCP, real MCP handshake - not a hand-rolled
+    /// JSON-RPC request, per the project's own rule against guessing a
+    /// wire-format fact. Covers the whole face `02` section 8 describes:
+    /// write, read-back, the run-attributed `memory_consulted` edge, and the
+    /// global tier's refusal.
+    #[tokio::test]
+    async fn the_mcp_face_writes_reads_back_and_refuses_the_global_tier() {
+        use rmcp::ServiceExt;
+        use rmcp::model::{CallToolRequestParams, ClientCapabilities, ClientInfo, Implementation};
+        use rmcp::transport::StreamableHttpClientTransport;
+        use rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig;
+
+        let h = harness();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let router = h.router.clone();
+        tokio::spawn(async move {
+            axum::serve(listener, router).await.unwrap();
+        });
+
+        let transport = StreamableHttpClientTransport::<reqwest::Client>::from_config(
+            StreamableHttpClientTransportConfig::with_uri(format!(
+                "http://127.0.0.1:{port}/v1/mcp"
+            ))
+            .auth_header(h.token.as_str().to_string()),
+        );
+        let client = ClientInfo::new(
+            ClientCapabilities::default(),
+            Implementation::new("farseer-api test client", "0.0.1"),
+        )
+        .serve(transport)
+        .await
+        .unwrap();
+
+        let tools = client.list_tools(Default::default()).await.unwrap();
+        let names: Vec<&str> = tools.tools.iter().map(|t| t.name.as_ref()).collect();
+        assert!(names.contains(&"read_memory"));
+        assert!(names.contains(&"write_memory"));
+
+        let write = client
+            .call_tool(
+                CallToolRequestParams::new("write_memory").with_arguments(
+                    json!({ "cell_id": "zero", "body": "prefer MSVC" })
+                        .as_object()
+                        .cloned()
+                        .unwrap(),
+                ),
+            )
+            .await
+            .unwrap();
+        assert_ne!(
+            write.is_error,
+            Some(true),
+            "a plain cell-local write should not be refused: {write:?}"
+        );
+
+        let read = client
+            .call_tool(
+                CallToolRequestParams::new("read_memory")
+                    .with_arguments(json!({ "cell_id": "zero" }).as_object().cloned().unwrap()),
+            )
+            .await
+            .unwrap();
+        let read_text = format!("{read:?}");
+        assert!(
+            read_text.contains("prefer MSVC"),
+            "the claim just written should read back: {read_text}"
+        );
+
+        // `02`'s "Carried from 11": a run-scoped read marks each returned
+        // claim consulted - the `consulted` edge `11`'s lessons-against-
+        // outcome query joins on, not a separate event. A bare `RunRow`,
+        // upserted directly the way `farseer_manager::RunSink` does it, is
+        // enough to give that join a real run to find - no process needed.
+        let run_id = farseer_core::RunId::new();
+        h.state
+            .store()
+            .upsert_run(&RunRow {
+                run_id,
+                task_id: farseer_core::TaskId::new(),
+                cell_id: CellId::new("zero"),
+                runner: "claude-code".into(),
+                model: String::new(),
+                outcome: Some("ok".into()),
+                usd_micros: 0,
+                tokens: 0,
+                operator_touched: false,
+                started_ts: 1,
+                finished_ts: Some(2),
+            })
+            .unwrap();
+        client
+            .call_tool(
+                CallToolRequestParams::new("read_memory").with_arguments(
+                    json!({ "cell_id": "zero", "run_id": run_id.to_string() })
+                        .as_object()
+                        .cloned()
+                        .unwrap(),
+                ),
+            )
+            .await
+            .unwrap();
+        let (_, lessons) = h.get("/v1/analytics/lessons").await;
+        assert!(
+            lessons
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|row| row["body"] == "prefer MSVC" && row["consulted_by"].as_i64() == Some(1)),
+            "the claim consulted through MCP should show up against this run: {lessons}"
+        );
+
+        // `25`: the global tier is gated on the operator, and this face does
+        // not offer that promotion. `write_memory` returns `Err(McpError)`
+        // for this, which the client surfaces as a JSON-RPC error from the
+        // call itself rather than a successful `CallToolResult` with
+        // `is_error: true`.
+        let global_attempt = client
+            .call_tool(
+                CallToolRequestParams::new("write_memory").with_arguments(
+                    json!({ "cell_id": "zero", "body": "should not land", "tier": "global" })
+                        .as_object()
+                        .cloned()
+                        .unwrap(),
+                ),
+            )
+            .await;
+        assert!(
+            global_attempt.is_err(),
+            "writing the global tier through MCP must be refused: {global_attempt:?}"
+        );
+
+        client.cancel().await.unwrap();
     }
 }

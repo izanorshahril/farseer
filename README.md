@@ -4,7 +4,7 @@ A local-first agent orchestration runtime for Windows.
 One operator, one Rust binary, no required external services.
 
 **Status: the foundation is built, and farseer can now execute and steer a real instruction.**
-Twenty-seven decision tickets are closed, and the domain model, the record, the local API, two native runners and three of `05`'s four manager verbs are implemented against them.
+Twenty-seven decision tickets are closed, and the domain model, the record, the local API, three native runners, all four of `05`'s manager verbs, and `02`'s MCP face are implemented against them.
 `POST /v1/cells/{id}/instruct` runs a cell's manager against a goal and returns a `run_id` immediately; `POST /v1/runs/{id}/cancel` ends it early; `POST /v1/runs/{id}/steer` sends a follow-up message into the same live process. All three are real, not stubs - the command half of the API is no longer absent.
 See [What runs today](#what-runs-today).
 
@@ -38,7 +38,9 @@ graph TD
   M0 -->|cell call, in-process| MS
   M0 -.->|ACP| RUN[foreign agent as runner]
   M0 -.->|A2A, off by default| PEER[foreign orchestrator as peer cell]
-  M0 -.->|MCP| TOOL[tools]
+  M0 -.->|MCP, tools not yet called| TOOL[tools]
+  W0 -.->|MCP, read_memory / write_memory| MCPFACE[farseer's own MCP face]
+  MCPFACE --> REC
 
   M0 --> REC[(append-only record<br/>SQLite)]
   MS --> REC
@@ -47,7 +49,7 @@ graph TD
 
   classDef core fill:#1a3a5c,stroke:#4a90d9,color:#fff
   classDef ext fill:#3a3a3a,stroke:#777,color:#ccc
-  class M0,MS,W0,WS,REC core
+  class M0,MS,W0,WS,REC,MCPFACE core
   class RUN,PEER,TOOL ext
 ```
 
@@ -60,7 +62,7 @@ The operator attaches to any run at any depth, bypassing every manager, because 
 | --- | --- | --- |
 | Foreign agent driven by a farseer manager | **ACP** (Zed) | a **runner** |
 | Foreign orchestrator making its own decisions | **A2A** (Linux Foundation) | a **peer cell**, off by default |
-| Tools | **MCP** | query and memory-write, never raw event append |
+| Tools | **MCP** | query and memory-write, never raw event append. Farseer's own memory face is built (`/v1/mcp`); calling *out* to third-party MCP tool servers is not |
 
 An external protocol is spoken at a boundary, never shaped into internals.
 
@@ -71,8 +73,8 @@ An external protocol is spoken at a boundary, never shaped into internals.
 ├─ crates/
 │  ├─ farseer-core/    domain model: cells, policy, run state, scrubbing. Pure, no I/O
 │  ├─ farseer-store/   the record: one append-only SQLite log, memory, UI state
-│  ├─ farseer-api/     local HTTP plus SSE on 127.0.0.1, token and loopback guard
-│  ├─ farseer-runner/  runners: Claude Code and Codex, PATHEXT resolution, Job-Object spawn, stream-json mapping, worktree lifecycle
+│  ├─ farseer-api/     local HTTP plus SSE on 127.0.0.1, token and loopback guard; nests the MCP face at /v1/mcp
+│  ├─ farseer-runner/  runners: Claude Code, Codex and cursor-agent, PATHEXT resolution, Job-Object spawn, stream-json mapping, worktree lifecycle
 │  ├─ farseer-manager/ runs one worker contract against a runner and records what happened. Called by `POST /v1/cells/{id}/instruct`
 │  └─ farseer/         the binary: runtime and CLI in one
 ├─ cells/              cell definitions, hand-written, in git
@@ -118,14 +120,16 @@ Binds `127.0.0.1` only, opens the record, loads the definitions, and writes its 
 | `POST /v1/runs/{id}/rescope` | a new run with a changed `goal`. `400` if `goal` is missing or unchanged from the original - that is `rerun`, not `rescope` |
 | `GET`/`PUT /v1/ui-state/{key}` | an opaque blob farseer never parses, so a canvas survives a restart. `413` above 1 MiB |
 | `GET /v1/analytics/{cost,intervention,rework,lessons}` | the four questions from [11 analytics questions](.scratch/farseer/issues/11-analytics-questions.md) |
+| `/v1/mcp` | `02` section 8's MCP face - streamable HTTP, nested into this same router and guard. Exactly two tools: `read_memory` and `write_memory`. No raw event append - "an agent that can forge events can rewrite its own history" |
 
 Every request must arrive on a loopback `Host` and carry the bearer token.
 A cross-site `Origin` is refused before the token is even looked at, because [16 local API surface](.scratch/farseer/issues/16-local-api-surface.md) found that a token alone does not stop DNS rebinding - the browser attaches it for the attacker.
 
 ### What is not built yet
 
-- **Delegation.** `instruct` runs the cell's own **manager** runner directly against the goal - there is no manager loop yet to plan and delegate to workers, so `22`'s "an instruction delegates to one owner" is true only in the trivial sense that the owner is whichever manager was asked. Two native runners are wired now - `claude-code` and `codex` - so a manager naming either can execute; a roster worker naming `cursor-agent` still cannot, and neither can any worker at all, since nothing yet calls `run_worker` for one.
+- **Delegation.** `instruct` runs the cell's own **manager** runner directly against the goal - there is no manager loop yet to plan and delegate to workers, so `22`'s "an instruction delegates to one owner" is true only in the trivial sense that the owner is whichever manager was asked. Three native runners are wired now - `claude-code`, `codex`, `cursor-agent` - so a manager naming any of them can execute; no roster worker can, since nothing yet calls `run_worker` for one.
 - Gated actions and cell calls.
+- **Farseer as an MCP client.** The MCP face built here is farseer as a *server* for its own memory; a manager reaching *out* to a third-party MCP tool server is still the `M0 -.->|MCP| TOOL` edge on the map above, and it is not implemented.
 - **The ACP server adapter** and the A2A endpoint, both decided and both later.
 
 The command half of the API is absent rather than stubbed: an endpoint that accepts an instruction nothing can execute would be a lie with a status code.

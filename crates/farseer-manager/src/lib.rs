@@ -313,10 +313,10 @@ impl StartedWorker {
     }
 }
 
-/// `contract.runner` picks the process and the stream-json dialect: `claude-code`
-/// or `codex`, the two native runners `10` and `20` measured. The ACP runner
-/// `20` chose as the default path is not implemented, so anything else is
-/// `UnsupportedRunner`.
+/// `contract.runner` picks the process and the stream-json dialect:
+/// `claude-code`, `codex`, or `cursor-agent` - the three native runners `10`
+/// measured. The ACP runner `20` chose as the default path is not
+/// implemented, so anything else is `UnsupportedRunner`.
 ///
 /// **Bootstraps here, before returning.** [`StartedWorker::bootstrap`]'s doc
 /// comment explains why: the goal has to be on stdin before this worker's
@@ -352,6 +352,21 @@ pub fn start_worker(
                 farseer_runner::codex::parse_line,
                 // Codex has no steering path: `codex exec resume` starts a
                 // new process rather than continuing this one, per `10`.
+                None,
+            )
+        }
+        "cursor-agent" => {
+            let exe = resolve("cursor-agent")
+                .ok_or_else(|| ManagerError::ExecutableNotFound("cursor-agent".into()))?;
+            StartedWorker::spawn(
+                &exe,
+                &farseer_runner::cursor_agent::build_args(contract),
+                cwd,
+                thresholds,
+                farseer_runner::cursor_agent::parse_line,
+                // No `--input-format` flag exists on this CLI at all, per
+                // `10` - `--resume`/`--continue` restart into a new process,
+                // same shape as Codex.
                 None,
             )
         }
