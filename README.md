@@ -3,9 +3,9 @@
 A local-first agent orchestration runtime for Windows.
 One operator, one Rust binary, no required external services.
 
-**Status: the foundation is built, and farseer can now execute a real instruction.**
-Twenty-seven decision tickets are closed, and the domain model, the record, the local API, the Claude Code runner and a first manager verb are implemented against them.
-`POST /v1/cells/{id}/instruct` runs a cell's manager against a goal and returns a `run_id` immediately; `POST /v1/runs/{id}/cancel` ends it early. Both are real, not stubs - the command half of the API is no longer absent.
+**Status: the foundation is built, and farseer can now execute and steer a real instruction.**
+Twenty-seven decision tickets are closed, and the domain model, the record, the local API, two native runners and three of `05`'s four manager verbs are implemented against them.
+`POST /v1/cells/{id}/instruct` runs a cell's manager against a goal and returns a `run_id` immediately; `POST /v1/runs/{id}/cancel` ends it early; `POST /v1/runs/{id}/steer` sends a follow-up message into the same live process. All three are real, not stubs - the command half of the API is no longer absent.
 See [What runs today](#what-runs-today).
 
 ## The one idea
@@ -113,6 +113,7 @@ Binds `127.0.0.1` only, opens the record, loads the definitions, and writes its 
 | `GET /v1/stream` | the same query as SSE, honouring `Last-Event-ID`. Attach and replay are one call with a different cursor |
 | `GET /v1/runs/{id}` | a run's row: lifecycle, outcome, cost, tokens, and `18`/`05`'s liveness - `live`/`stalled`/`likely_hung`, or `null` once nothing in memory can answer |
 | `POST /v1/runs/{id}/cancel` | end a run early, recorded as `05`'s `cancelled` outcome, never `failed`. `404` if it already finished or never existed - idempotent, not a silent no-op |
+| `POST /v1/runs/{id}/steer` | send a follow-up message into a run's live process. `400` if the runner has no steering path - Codex today - `404` if the run is unknown or already finished |
 | `POST /v1/runs/{id}/rerun` | same contract, fresh run, fresh workspace. `404` on an unknown run |
 | `POST /v1/runs/{id}/rescope` | a new run with a changed `goal`. `400` if `goal` is missing or unchanged from the original - that is `rerun`, not `rescope` |
 | `GET`/`PUT /v1/ui-state/{key}` | an opaque blob farseer never parses, so a canvas survives a restart. `413` above 1 MiB |
@@ -124,7 +125,6 @@ A cross-site `Origin` is refused before the token is even looked at, because [16
 ### What is not built yet
 
 - **Delegation.** `instruct` runs the cell's own **manager** runner directly against the goal - there is no manager loop yet to plan and delegate to workers, so `22`'s "an instruction delegates to one owner" is true only in the trivial sense that the owner is whichever manager was asked. Two native runners are wired now - `claude-code` and `codex` - so a manager naming either can execute; a roster worker naming `cursor-agent` still cannot, and neither can any worker at all, since nothing yet calls `run_worker` for one.
-- **Steer.** `05`'s remaining manager verb. The JSON envelope that blocked it is now verified directly against the installed `claude` 2.1.233 - see [`claude_code.rs`](crates/farseer-runner/src/claude_code.rs)'s doc comment - and a follow-up message really does continue the same session with the first turn's context intact. What is missing now is architecture, not a fact: `farseer-manager` spawns and blocks on a process synchronously, with no seam for a later HTTP request to reach that process's stdin.
 - Gated actions and cell calls.
 - **The ACP server adapter** and the A2A endpoint, both decided and both later.
 

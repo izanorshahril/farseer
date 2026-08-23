@@ -72,6 +72,23 @@ pub struct FinishedSignal {
 #[error("invalid stream-json line: {0}")]
 pub struct ParseError(pub String);
 
+/// The envelope this doc comment's 2026-08-23 probe verified: one
+/// stream-json line a process started with `--input-format stream-json`
+/// accepts as a user turn, whether it is the first message or a later steer.
+/// `serde_json::json!` rather than hand-built string interpolation so `text`
+/// containing a quote or newline serializes correctly instead of breaking
+/// the envelope.
+pub fn steer_envelope(text: &str) -> String {
+    serde_json::json!({
+        "type": "user",
+        "message": {
+            "role": "user",
+            "content": [{ "type": "text", "text": text }]
+        }
+    })
+    .to_string()
+}
+
 /// Parse one line. `Ok` always means "count this as activity"; the returned
 /// `Vec` is what, if anything, additionally belongs in the record.
 pub fn parse_line(line: &str) -> Result<Vec<RunnerSignal>, ParseError> {
@@ -181,6 +198,23 @@ fn stream_event_progress(event: &Value) -> Option<RunnerSignal> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn steer_envelope_matches_the_shape_the_2026_08_23_probe_verified() {
+        let line = steer_envelope("keep going");
+        let v: Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(v["type"], "user");
+        assert_eq!(v["message"]["role"], "user");
+        assert_eq!(v["message"]["content"][0]["type"], "text");
+        assert_eq!(v["message"]["content"][0]["text"], "keep going");
+    }
+
+    #[test]
+    fn steer_envelope_escapes_a_quote_in_the_message_rather_than_breaking_the_line() {
+        let line = steer_envelope(r#"say "hi" back"#);
+        let v: Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(v["message"]["content"][0]["text"], r#"say "hi" back"#);
+    }
 
     #[test]
     fn a_rate_limit_event_carries_the_reset_epoch_and_the_overage_state() {

@@ -29,8 +29,10 @@ use serde_json::Value;
 use crate::claude_code::{FinishedSignal, ParseError, RunnerSignal};
 
 /// `10`'s own tested invocation, plus `--json` for machine-readable output
-/// and the goal as the trailing prompt, matching `invocation::build_args`'s
-/// shape for the native Claude Code runner.
+/// and the goal as the trailing prompt. Unlike `invocation::build_args`,
+/// this keeps the positional goal: Codex has no steering path (`codex exec
+/// resume` starts a new process rather than continuing this one, per `10`),
+/// so there is no envelope for the goal to travel as instead.
 pub fn build_args(contract: &WorkerContractSpec) -> Vec<String> {
     vec![
         "exec".into(),

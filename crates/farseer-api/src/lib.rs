@@ -34,7 +34,7 @@ use serde::{Deserialize, Serialize};
 use farseer_core::policy::Budget;
 use farseer_core::run::{WorkerContract, WorkerContractSpec, WorkspaceStrategy};
 use farseer_core::{CellDefinition, CellId, LivenessThresholds, NewEvent, RunId, Seq, TaskId};
-use farseer_manager::{LivenessHandle, RunSink};
+use farseer_manager::{LivenessHandle, RunSink, SteerHandle};
 use farseer_runner::spawn::CancelToken;
 use farseer_store::{RunRow, ScanFilter, Store, StoreError, UI_STATE_CAP_BYTES};
 
@@ -83,6 +83,9 @@ pub struct AppState {
 struct RunHandle {
     cancel: CancelToken,
     liveness: LivenessHandle,
+    /// `None` when this run's runner has no steering path - Codex today,
+    /// per `farseer_manager::start_worker`.
+    steer: Option<SteerHandle>,
 }
 
 impl AppState {
@@ -213,6 +216,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/v1/stream", get(stream_events))
         .route("/v1/runs/{run_id}", get(get_run))
         .route("/v1/runs/{run_id}/cancel", post(cancel_run))
+        .route("/v1/runs/{run_id}/steer", post(steer_run))
         .route("/v1/runs/{run_id}/rerun", post(rerun_run))
         .route("/v1/runs/{run_id}/rescope", post(rescope_run))
         .route("/v1/ui-state/{key}", get(get_ui_state).put(put_ui_state))
@@ -279,6 +283,8 @@ enum ApiError {
     Workspace(String),
     #[error("record holds an unreadable {0}")]
     Corrupt(&'static str),
+    #[error("writing the steer message failed: {0}")]
+    Steer(String),
 }
 
 impl IntoResponse for ApiError {
@@ -293,6 +299,7 @@ impl IntoResponse for ApiError {
             Self::Store(_) => StatusCode::INTERNAL_SERVER_ERROR,
             Self::Workspace(_) => StatusCode::INTERNAL_SERVER_ERROR,
             Self::Corrupt(_) => StatusCode::INTERNAL_SERVER_ERROR,
+            Self::Steer(_) => StatusCode::INTERNAL_SERVER_ERROR,
         };
         (
             status,
@@ -451,10 +458,15 @@ fn spawn_run(state: &Arc<AppState>, contract: WorkerContract) -> ApiResult<RunId
             &cwd,
             thresholds,
             now_ms,
-            |cancel, liveness| {
-                background_state
-                    .runs()
-                    .insert(run_id, RunHandle { cancel, liveness });
+            |cancel, liveness, steer| {
+                background_state.runs().insert(
+                    run_id,
+                    RunHandle {
+                        cancel,
+                        liveness,
+                        steer,
+                    },
+                );
             },
         );
         background_state.runs().remove(&run_id);
@@ -500,6 +512,44 @@ async fn cancel_run(
             Ok(StatusCode::ACCEPTED)
         }
         None => Err(ApiError::NotFound("run")),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SteerBody {
+    pub message: String,
+}
+
+/// `05`'s **steer**: a follow-up message into a run's live process, on the
+/// envelope `claude_code::steer_envelope`'s 2026-08-23 probe verified.
+/// `400` when the run's runner has no steering path (Codex today) rather
+/// than writing a line nothing reads; `404` when the run is unknown or
+/// already finished, same as `cancel`.
+async fn steer_run(
+    State(state): State<Arc<AppState>>,
+    UrlPath(run_id): UrlPath<String>,
+    Json(body): Json<SteerBody>,
+) -> ApiResult<StatusCode> {
+    if body.message.trim().is_empty() {
+        return Err(ApiError::BadRequest("message must not be empty"));
+    }
+    let run_id: RunId = run_id.parse().map_err(|_| ApiError::NotFound("run"))?;
+    let handle = state
+        .runs()
+        .get(&run_id)
+        .ok_or(ApiError::NotFound("run"))?
+        .steer
+        .clone();
+    match handle {
+        Some(steer) => {
+            steer
+                .steer(&body.message)
+                .map_err(|e| ApiError::Steer(e.to_string()))?;
+            Ok(StatusCode::ACCEPTED)
+        }
+        None => Err(ApiError::BadRequest(
+            "this run's runner has no steering path",
+        )),
     }
 }
 
@@ -1244,6 +1294,82 @@ runner = "claude-code"
             h.post("/v1/runs/not-a-uuid/cancel", json!({})).await.0,
             StatusCode::NOT_FOUND
         );
+    }
+
+    #[tokio::test]
+    async fn steering_an_unknown_run_is_a_404() {
+        let h = harness();
+        assert_eq!(
+            h.post(
+                &format!("/v1/runs/{}/steer", RunId::new()),
+                json!({ "message": "keep going" })
+            )
+            .await
+            .0,
+            StatusCode::NOT_FOUND
+        );
+    }
+
+    #[tokio::test]
+    async fn steering_with_an_empty_message_is_a_400() {
+        let h = harness();
+        let (_, body) = h
+            .post(
+                "/v1/cells/zero/instruct",
+                json!({ "goal": "reply with just the word ok" }),
+            )
+            .await;
+        let run_id = body["run_id"].as_str().unwrap().to_string();
+
+        assert_eq!(
+            h.post(
+                &format!("/v1/runs/{run_id}/steer"),
+                json!({ "message": "   " })
+            )
+            .await
+            .0,
+            StatusCode::BAD_REQUEST
+        );
+
+        h.cancel_and_wait_for_finished(&run_id).await;
+    }
+
+    #[tokio::test]
+    async fn steering_a_claude_code_run_reaches_its_live_stdin() {
+        // `claude_code::steer_envelope`'s 2026-08-23 probe verified the wire
+        // format; this proves the seam - a later HTTP request reaching a
+        // live process's stdin - actually exists end to end.
+        let h = harness();
+        let (_, body) = h
+            .post(
+                "/v1/cells/zero/instruct",
+                json!({ "goal": "reply with just the word ok" }),
+            )
+            .await;
+        let run_id = body["run_id"].as_str().unwrap().to_string();
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            let (status, _) = h
+                .post(
+                    &format!("/v1/runs/{run_id}/steer"),
+                    json!({ "message": "never mind, just say done" }),
+                )
+                .await;
+            if status == StatusCode::ACCEPTED {
+                break;
+            }
+            // `on_started` has not populated the registry yet - same race
+            // `a_running_run_reports_liveness_and_a_finished_one_reports_none`
+            // documents for `liveness`.
+            assert!(
+                std::time::Instant::now() < deadline,
+                "steer never became reachable for this run"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+
+        h.cancel_and_wait_for_finished(&run_id).await;
     }
 
     /// This is the one test in the suite that actually spawns a process - the

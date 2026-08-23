@@ -1,17 +1,12 @@
-//! Builds the argv for a one-shot Claude Code invocation from a worker
-//! contract's goal.
+//! Builds the argv for a Claude Code invocation.
 //!
-//! **Deliberately narrower than `10`'s full contract-test finding, but no
-//! longer for lack of a verified envelope.** `10` measured that
-//! `--input-format stream-json` accepts follow-up turns into a live process,
-//! session intact - the thing that makes Claude Code pass `20`'s corrected
-//! steering test. That flag is still **not** included here: this builds the
-//! one-shot form, goal as a positional prompt, because *this function* has
-//! no live process to steer - `farseer-manager` spawns and blocks on one
-//! synchronously today, with no seam for a later HTTP request to reach its
-//! stdin. The envelope itself is now observed (see
-//! [`crate::claude_code`]'s doc comment) and is not what is blocking steer
-//! anymore; the remaining work is that seam.
+//! **Now includes `--input-format stream-json`.** The goal no longer arrives
+//! as a positional prompt: `--input-format stream-json` puts Claude Code in
+//! the mode [`crate::claude_code::steer_envelope`]'s 2026-08-23 probe
+//! verified, so `farseer-manager` sends the goal as that same envelope's
+//! first line on stdin, then can send further envelopes as steer messages
+//! into the same live process - the seam this file's doc comment used to
+//! call the remaining blocker.
 //!
 //! Also not yet mapped: `tool_grants` onto whatever permission flags Claude
 //! Code exposes, and the workspace `cwd` trust prompt `10` found on two of
@@ -20,16 +15,18 @@
 
 use farseer_core::run::WorkerContractSpec;
 
-/// The flags `10` itself ran with to capture the payloads `claude_code`
-/// parses: `claude -p --output-format stream-json --verbose`, plus the
-/// documented `--print` long form and the goal as the trailing prompt.
-pub fn build_args(contract: &WorkerContractSpec) -> Vec<String> {
+/// `10`'s captured flags - `--output-format stream-json --verbose` - plus
+/// `--input-format stream-json` for the now-verified steer envelope. No
+/// positional prompt: the goal travels as that envelope's first line
+/// instead, written by whichever caller drives the spawned process.
+pub fn build_args(_contract: &WorkerContractSpec) -> Vec<String> {
     vec![
         "--print".into(),
         "--output-format".into(),
         "stream-json".into(),
+        "--input-format".into(),
+        "stream-json".into(),
         "--verbose".into(),
-        contract.goal.clone(),
     ]
 }
 
@@ -56,17 +53,25 @@ mod tests {
     }
 
     #[test]
-    fn the_goal_arrives_as_the_trailing_positional_prompt() {
+    fn the_goal_is_not_a_positional_argument() {
         let args = build_args(&contract("post a haiku about ferrous rust"));
-        assert_eq!(args.last().unwrap(), "post a haiku about ferrous rust");
+        assert!(
+            !args.contains(&"post a haiku about ferrous rust".to_string()),
+            "the goal travels as the first stdin envelope, not argv"
+        );
     }
 
     #[test]
-    fn the_output_format_flag_matches_what_10_actually_ran() {
+    fn the_stream_json_flags_match_what_10_actually_ran_plus_input_format() {
         let args = build_args(&contract("anything"));
         assert!(
             args.windows(2)
                 .any(|w| w == ["--output-format", "stream-json"])
+        );
+        assert!(
+            args.windows(2)
+                .any(|w| w == ["--input-format", "stream-json"]),
+            "steer needs the process listening on stdin, per claude_code::steer_envelope"
         );
         assert!(args.contains(&"--verbose".to_string()));
     }

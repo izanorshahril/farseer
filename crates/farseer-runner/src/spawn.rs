@@ -97,13 +97,34 @@ fn close(job: &Mutex<Option<RawJobHandle>>) {
     }
 }
 
+/// A cloneable handle to a child's stdin, independent of [`SupervisedProcess`]
+/// itself. Exists because `drive` holds `&mut SupervisedProcess` exclusively
+/// for the whole blocking read loop on one thread; a later write - a steer
+/// message arriving from an HTTP handler on another thread - needs its own
+/// handle, fetched *before* that loop starts, same as [`CancelToken`].
+#[derive(Clone)]
+pub struct StdinHandle(Arc<Mutex<ChildStdin>>);
+
+impl StdinHandle {
+    pub fn write_line(&self, line: &str) -> std::io::Result<()> {
+        let mut stdin = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        writeln!(stdin, "{line}")?;
+        stdin.flush()
+    }
+}
+
 /// A child process under a Job Object it cannot escape, with piped, line-
 /// buffered I/O.
 pub struct SupervisedProcess {
+    // Kept alive for its pid (tests only, via `child.id()`) and so its
+    // process handle stays open for the struct's lifetime; stdout/stdin are
+    // taken out of it at construction and read through their own fields.
+    #[allow(dead_code)]
     child: Child,
     job: Arc<Mutex<Option<RawJobHandle>>>,
     cancelled: Arc<AtomicBool>,
     stdout: BufReader<ChildStdout>,
+    stdin: Arc<Mutex<ChildStdin>>,
 }
 
 impl SupervisedProcess {
@@ -139,11 +160,13 @@ impl SupervisedProcess {
         }
 
         let stdout = child.stdout.take().expect("stdout was piped");
+        let stdin = child.stdin.take().expect("stdin was piped");
         Ok(Self {
             child,
             job: Arc::new(Mutex::new(Some(RawJobHandle(job.0 as isize)))),
             cancelled: Arc::new(AtomicBool::new(false)),
             stdout: BufReader::new(stdout),
+            stdin: Arc::new(Mutex::new(stdin)),
         })
     }
 
@@ -154,14 +177,15 @@ impl SupervisedProcess {
         CancelToken(Arc::clone(&self.job), Arc::clone(&self.cancelled))
     }
 
-    pub fn stdin(&mut self) -> &mut ChildStdin {
-        self.child.stdin.as_mut().expect("stdin was piped")
+    /// A handle that can write to this process's stdin from another thread.
+    /// Fetch it before calling a blocking read, same reason as
+    /// [`Self::cancel_token`].
+    pub fn stdin_handle(&self) -> StdinHandle {
+        StdinHandle(Arc::clone(&self.stdin))
     }
 
-    pub fn write_line(&mut self, line: &str) -> std::io::Result<()> {
-        let stdin = self.stdin();
-        writeln!(stdin, "{line}")?;
-        stdin.flush()
+    pub fn write_line(&self, line: &str) -> std::io::Result<()> {
+        self.stdin_handle().write_line(line)
     }
 
     /// The next line, sans terminator. `Ok(None)` is end of stream - the
