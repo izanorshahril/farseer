@@ -49,9 +49,8 @@ use std::time::Instant;
 
 use farseer_core::run::{ActivityClock, Liveness, LivenessThresholds, WorkerContract};
 use farseer_core::{Actor, EventKind, NewEvent, Outcome, Seq};
-use farseer_runner::claude_code::RunnerSignal;
+use farseer_runner::claude_code::{ParseError, RunnerSignal};
 use farseer_runner::drive::drive;
-use farseer_runner::invocation::build_args;
 use farseer_runner::resolve::resolve;
 use farseer_runner::spawn::{CancelToken, SpawnError, SupervisedProcess};
 use farseer_store::{RunRow, Store, StoreError};
@@ -94,6 +93,7 @@ pub enum ManagerError {
     Cancelled,
 }
 
+#[derive(Debug)]
 pub struct RunReport {
     pub outcome: Outcome,
     pub cost_usd_micros: Option<i64>,
@@ -111,6 +111,10 @@ pub struct StartedWorker {
     activity: Arc<Mutex<ActivityClock>>,
     monotonic_start: Instant,
     thresholds: LivenessThresholds,
+    /// Which runner's stream-json dialect this process speaks - a plain
+    /// function pointer, not a trait, since every runner's `parse_line` is
+    /// already exactly this shape.
+    parse: fn(&str) -> Result<Vec<RunnerSignal>, ParseError>,
 }
 
 /// A cloneable, read-only view onto a run's liveness - `18`/`05`'s watchdog,
@@ -145,12 +149,14 @@ impl StartedWorker {
         args: &[String],
         cwd: &Path,
         thresholds: LivenessThresholds,
+        parse: fn(&str) -> Result<Vec<RunnerSignal>, ParseError>,
     ) -> Result<Self, ManagerError> {
         Ok(Self {
             proc: SupervisedProcess::spawn(exe, args, cwd)?,
             activity: Arc::new(Mutex::new(ActivityClock::started_at(0))),
             monotonic_start: Instant::now(),
             thresholds,
+            parse,
         })
     }
 
@@ -188,7 +194,7 @@ impl StartedWorker {
         let activity = Arc::clone(&self.activity);
         let monotonic_start = self.monotonic_start;
 
-        drive(&mut self.proc, |parsed| {
+        drive(&mut self.proc, self.parse, |parsed| {
             // `05`: any bytes at all is activity, parse failure or not - the
             // process is still there regardless of what the line meant.
             let now = monotonic_start.elapsed().as_secs();
@@ -253,8 +259,10 @@ impl StartedWorker {
     }
 }
 
-/// `20` chose two runner implementations for v1; only `claude-code` is wired
-/// to a process yet, so it is the only value `contract.runner` may hold here.
+/// `contract.runner` picks the process and the stream-json dialect: `claude-code`
+/// or `codex`, the two native runners `10` and `20` measured. The ACP runner
+/// `20` chose as the default path is not implemented, so anything else is
+/// `UnsupportedRunner`.
 pub fn start_worker(
     contract: &WorkerContract,
     cwd: &Path,
@@ -264,7 +272,24 @@ pub fn start_worker(
         "claude-code" => {
             let exe = resolve("claude")
                 .ok_or_else(|| ManagerError::ExecutableNotFound("claude".into()))?;
-            StartedWorker::spawn(&exe, &build_args(contract), cwd, thresholds)
+            StartedWorker::spawn(
+                &exe,
+                &farseer_runner::invocation::build_args(contract),
+                cwd,
+                thresholds,
+                farseer_runner::claude_code::parse_line,
+            )
+        }
+        "codex" => {
+            let exe =
+                resolve("codex").ok_or_else(|| ManagerError::ExecutableNotFound("codex".into()))?;
+            StartedWorker::spawn(
+                &exe,
+                &farseer_runner::codex::build_args(contract),
+                cwd,
+                thresholds,
+                farseer_runner::codex::parse_line,
+            )
         }
         other => Err(ManagerError::UnsupportedRunner(other.to_string())),
     }
@@ -404,6 +429,7 @@ mod tests {
             &["/c".into(), "type".into(), path.to_str().unwrap().into()],
             &std::env::current_dir().unwrap(),
             LivenessThresholds::default(),
+            farseer_runner::claude_code::parse_line,
         )
         .unwrap();
         (dir, started)
@@ -552,6 +578,7 @@ mod tests {
             &["/c".into(), "ping -n 30 127.0.0.1 >nul".into()],
             &std::env::current_dir().unwrap(),
             LivenessThresholds::default(),
+            farseer_runner::claude_code::parse_line,
         )
         .unwrap();
         let token = started.cancel_token();
@@ -568,6 +595,43 @@ mod tests {
     }
 
     #[test]
+    fn start_worker_dispatches_codex_rather_than_refusing_it_as_unsupported() {
+        // Whether `codex` actually resolves on this machine varies, but
+        // either way `start_worker` must not answer `UnsupportedRunner` -
+        // that would mean the dispatch itself is broken, not the
+        // environment. Cancelled almost immediately, bounding the cost of a
+        // real invocation if `codex` happens to be installed here.
+        let store = Store::open_in_memory().unwrap();
+        let spec = WorkerContractSpec {
+            run_id: RunId::new(),
+            task_id: TaskId::new(),
+            cell_id: CellId::new("zero"),
+            goal: "reply with just the word ok".into(),
+            workspace: WorkspaceStrategy::PlainDirectory,
+            runner: "codex".into(),
+            tool_grants: vec![],
+            autonomy_ceiling: Irreversibility::Reversible,
+            budget: Budget::default(),
+            definition_of_done: "".into(),
+        };
+        let contract = WorkerContract::seal(spec);
+
+        let result = run_worker(
+            &store,
+            &contract,
+            &std::env::temp_dir(),
+            LivenessThresholds::default(),
+            || 1,
+            |token, _liveness| token.cancel(),
+        );
+
+        assert!(
+            !matches!(result, Err(ManagerError::UnsupportedRunner(_))),
+            "codex must dispatch to a process, not fall through to the unsupported-runner error: {result:?}"
+        );
+    }
+
+    #[test]
     fn a_silent_process_goes_stalled_then_likely_hung_from_elapsed_time_alone() {
         // `ping`'s own output is redirected to `nul` inside the child, so
         // zero lines ever reach `drive` - this tests the handle purely
@@ -580,6 +644,7 @@ mod tests {
                 stalled_secs: 0,
                 likely_hung_secs: 1,
             },
+            farseer_runner::claude_code::parse_line,
         )
         .unwrap();
         let handle = started.liveness_handle();

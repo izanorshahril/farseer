@@ -1,0 +1,158 @@
+//! The Codex CLI runner: invocation and stream-json mapping.
+//!
+//! `20` scored `codex exec --json` against `05`'s contract: activity **pass**
+//! (`item.*` including reasoning), progress **pass** (`turn.*` and `item.*`
+//! including command execution, file changes, plan updates), follow-up
+//! **fail** (`codex exec resume` replays into a **new process**, per `10` -
+//! not steering), cancel **weak** (`turn.failed` does not distinguish a
+//! cancel from an error, which does not matter here since farseer's own Job
+//! Object kill never depended on Codex agreeing about why it died).
+//!
+//! `10`: **`codex exec` refuses a fresh directory** without
+//! `--skip-git-repo-check`, printing a trust-gate error and exiting. `04`
+//! gives every run a fresh worktree, so every run hits this without the flag,
+//! and the exact failure mode `10` warns reads as a hang to anything
+//! watching only for activity.
+//!
+//! **Progress mapping is intentionally shallow.** `20` names the `item.*`
+//! and `turn.*` families but no ticket captured a literal payload for
+//! anything but the terminal `turn.completed`/`turn.failed` and the four
+//! `usage` field names on it. Guessing the rest would break `10`'s own rule:
+//! what a runner exposes must be observed, not read off a page. Every
+//! `item.*` line - tool calls included - counts as activity only, same as
+//! an unrecognised Claude Code line, until a real payload is captured to map
+//! it properly.
+
+use farseer_core::run::{Outcome, WorkerContractSpec};
+use serde_json::Value;
+
+use crate::claude_code::{FinishedSignal, ParseError, RunnerSignal};
+
+/// `10`'s own tested invocation, plus `--json` for machine-readable output
+/// and the goal as the trailing prompt, matching `invocation::build_args`'s
+/// shape for the native Claude Code runner.
+pub fn build_args(contract: &WorkerContractSpec) -> Vec<String> {
+    vec![
+        "exec".into(),
+        "--json".into(),
+        "--skip-git-repo-check".into(),
+        contract.goal.clone(),
+    ]
+}
+
+pub fn parse_line(line: &str) -> Result<Vec<RunnerSignal>, ParseError> {
+    let v: Value = serde_json::from_str(line).map_err(|e| ParseError(e.to_string()))?;
+    let Some(kind) = v.get("type").and_then(Value::as_str) else {
+        return Ok(Vec::new());
+    };
+    let signal = match kind {
+        "turn.completed" => Some(RunnerSignal::Finished(finished(&v, Outcome::Ok))),
+        "turn.failed" => Some(RunnerSignal::Finished(finished(&v, Outcome::Failed))),
+        // `item.*`: activity only, per the module doc comment.
+        _ => None,
+    };
+    Ok(signal.into_iter().collect())
+}
+
+/// `10`: Codex reports tokens only, never cost - `total_cost_usd` has no
+/// equivalent here, so a Codex run's cost must be priced by farseer itself
+/// from these fields, not read off the wire.
+fn finished(v: &Value, outcome: Outcome) -> FinishedSignal {
+    let tokens = v.get("usage").map(|usage| {
+        [
+            "input_tokens",
+            "cached_input_tokens",
+            "output_tokens",
+            "reasoning_output_tokens",
+        ]
+        .iter()
+        .filter_map(|field| usage.get(*field).and_then(Value::as_i64))
+        .sum()
+    });
+    FinishedSignal {
+        outcome,
+        cost_usd_micros: None,
+        tokens,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use farseer_core::policy::{Budget, Irreversibility};
+    use farseer_core::run::WorkspaceStrategy;
+    use farseer_core::{CellId, RunId, TaskId};
+
+    fn contract(goal: &str) -> WorkerContractSpec {
+        WorkerContractSpec {
+            run_id: RunId::new(),
+            task_id: TaskId::new(),
+            cell_id: CellId::new("zero"),
+            goal: goal.into(),
+            workspace: WorkspaceStrategy::Worktree,
+            runner: "codex".into(),
+            tool_grants: vec![],
+            autonomy_ceiling: Irreversibility::Reversible,
+            budget: Budget::default(),
+            definition_of_done: "".into(),
+        }
+    }
+
+    #[test]
+    fn the_fresh_directory_trust_gate_is_always_disarmed() {
+        // `10`: without this flag, every run fails on a fresh worktree while
+        // looking like a hang to anything watching only for activity.
+        let args = build_args(&contract("anything"));
+        assert!(args.contains(&"--skip-git-repo-check".to_string()));
+    }
+
+    #[test]
+    fn the_goal_arrives_as_the_trailing_positional_prompt() {
+        let args = build_args(&contract("fix the failing test"));
+        assert_eq!(args.last().unwrap(), "fix the failing test");
+    }
+
+    #[test]
+    fn a_completed_turn_is_ok_with_summed_token_usage() {
+        let line = r#"{"type":"turn.completed","usage":{"input_tokens":10,"cached_input_tokens":2,"output_tokens":5,"reasoning_output_tokens":3}}"#;
+        let signals = parse_line(line).unwrap();
+        assert_eq!(
+            signals,
+            [RunnerSignal::Finished(FinishedSignal {
+                outcome: Outcome::Ok,
+                cost_usd_micros: None,
+                tokens: Some(20),
+            })]
+        );
+    }
+
+    #[test]
+    fn a_failed_turn_is_failed_not_cancelled() {
+        // `05`: only a human choosing not to proceed is `Cancelled`. Codex's
+        // own `turn.failed` cannot tell that apart from a real error - `20`
+        // scored this "weak" - so it must never be read as more than `Failed`.
+        let line = r#"{"type":"turn.failed"}"#;
+        let signals = parse_line(line).unwrap();
+        let [RunnerSignal::Finished(f)] = signals.as_slice() else {
+            panic!("expected one Finished signal, got {signals:?}");
+        };
+        assert_eq!(f.outcome, Outcome::Failed);
+        assert_eq!(
+            f.cost_usd_micros, None,
+            "Codex never reports cost, only tokens"
+        );
+    }
+
+    #[test]
+    fn an_item_line_is_activity_only_and_yields_no_signal() {
+        // The exact case the module doc comment names: no ticket captured a
+        // literal item.* payload, so this must not be guessed at.
+        let line = r#"{"type":"item.command_execution","command":"ls"}"#;
+        assert_eq!(parse_line(line).unwrap(), Vec::new());
+    }
+
+    #[test]
+    fn malformed_json_is_an_error_not_silence() {
+        assert!(parse_line("not json").is_err());
+    }
+}

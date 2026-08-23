@@ -72,7 +72,7 @@ An external protocol is spoken at a boundary, never shaped into internals.
 │  ├─ farseer-core/    domain model: cells, policy, run state, scrubbing. Pure, no I/O
 │  ├─ farseer-store/   the record: one append-only SQLite log, memory, UI state
 │  ├─ farseer-api/     local HTTP plus SSE on 127.0.0.1, token and loopback guard
-│  ├─ farseer-runner/  the Claude Code runner: invocation, PATHEXT resolution, Job-Object spawn, stream-json mapping, worktree lifecycle
+│  ├─ farseer-runner/  runners: Claude Code and Codex, PATHEXT resolution, Job-Object spawn, stream-json mapping, worktree lifecycle
 │  ├─ farseer-manager/ runs one worker contract against a runner and records what happened. Called by `POST /v1/cells/{id}/instruct`
 │  └─ farseer/         the binary: runtime and CLI in one
 ├─ cells/              cell definitions, hand-written, in git
@@ -122,7 +122,7 @@ A cross-site `Origin` is refused before the token is even looked at, because [16
 
 ### What is not built yet
 
-- **Delegation.** `instruct` runs the cell's own **manager** runner directly against the goal - there is no manager loop yet to plan and delegate to workers, so `22`'s "an instruction delegates to one owner" is true only in the trivial sense that the owner is whichever manager was asked. A roster worker naming `codex` or `cursor-agent` (both hand-written cells' workers do) cannot run yet; only `claude-code` is wired, so only the manager - which is always `claude-code` in both shipped definitions - can execute.
+- **Delegation.** `instruct` runs the cell's own **manager** runner directly against the goal - there is no manager loop yet to plan and delegate to workers, so `22`'s "an instruction delegates to one owner" is true only in the trivial sense that the owner is whichever manager was asked. Two native runners are wired now - `claude-code` and `codex` - so a manager naming either can execute; a roster worker naming `cursor-agent` still cannot, and neither can any worker at all, since nothing yet calls `run_worker` for one.
 - **Steer.** `05`'s remaining manager verb. Blocked on a real fact, not effort: `10` confirmed `--input-format stream-json` accepts a follow-up into a running Claude Code process, but no ticket captured the JSON envelope that follow-up takes, and guessing one would break `10`'s own rule - what a runner exposes must be observed, not read off a page. `rerun` and `rescope` needed no such guess, since both are just a fresh process with a reconstructed contract.
 - Gated actions and cell calls.
 - **A workspace's `repo`.** `13` deliberately keeps no git flag on `CellDefinition`, so a `Worktree`-strategy cell's runs are worktrees of whatever directory `farseer serve` was started in - the farseer checkout itself, in the common case, since cell zero is farseer's own builder harness. That is a stated assumption, not a config option yet.

@@ -1,5 +1,5 @@
 //! Reads a [`SupervisedProcess`]'s stdout line by line and hands each line's
-//! [`claude_code::parse_line`] result to a caller-supplied sink.
+//! parse result to a caller-supplied sink.
 //!
 //! **Every line reaches the sink, parse failure or not.** `05`'s activity
 //! signal is "any bytes", so a line this crate fails to parse is still
@@ -7,19 +7,27 @@
 //! evidence away. The sink decides what a parse failure means for its own
 //! record - most callers should still mark activity and move on, exactly as
 //! for an unrecognised-but-valid line.
+//!
+//! `parse` is a parameter, not a hardcoded call, because more than one
+//! runner speaks stream-json now: [`crate::claude_code::parse_line`] and
+//! [`crate::codex::parse_line`] both fit the same shape.
 
-use crate::claude_code::{ParseError, RunnerSignal, parse_line};
+use crate::claude_code::{ParseError, RunnerSignal};
 use crate::spawn::SupervisedProcess;
 
 /// Drains `proc` until it closes stdout (normally: exits), calling `on_line`
 /// once per line with that line's parse result. Returns once the process has
 /// gone quiet on stdout - it does not itself wait for exit or read stderr.
-pub fn drive<F>(proc: &mut SupervisedProcess, mut on_line: F) -> std::io::Result<()>
+pub fn drive<F>(
+    proc: &mut SupervisedProcess,
+    parse: impl Fn(&str) -> Result<Vec<RunnerSignal>, ParseError>,
+    mut on_line: F,
+) -> std::io::Result<()>
 where
     F: FnMut(Result<Vec<RunnerSignal>, ParseError>),
 {
     while let Some(line) = proc.read_line()? {
-        on_line(parse_line(&line));
+        on_line(parse(&line));
     }
     Ok(())
 }
@@ -63,7 +71,7 @@ mod tests {
         let mut lines_seen = 0;
         let mut parse_errors = 0;
         let mut finished_outcome = None;
-        drive(&mut proc, |result| {
+        drive(&mut proc, crate::claude_code::parse_line, |result| {
             lines_seen += 1;
             match result {
                 Ok(signals) => {
