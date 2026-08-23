@@ -4,8 +4,8 @@ A local-first agent orchestration runtime for Windows.
 One operator, one Rust binary, no required external services.
 
 **Status: the foundation is built and runs.**
-Twenty-seven decision tickets are closed, and the domain model, the record and the local API are implemented against them.
-What is not built yet is the part that drives a real agent: the runner adapters and the manager loop.
+Twenty-seven decision tickets are closed, and the domain model, the record, the local API and the Claude Code runner are implemented against them.
+`farseer-manager` can run one hand-built worker contract against it and land the result in the record, but nothing inside farseer's own runtime calls that path yet - no cell, no roster, no HTTP verb reaches it.
 See [What runs today](#what-runs-today).
 
 ## The one idea
@@ -73,6 +73,7 @@ An external protocol is spoken at a boundary, never shaped into internals.
 │  ├─ farseer-store/   the record: one append-only SQLite log, memory, UI state
 │  ├─ farseer-api/     local HTTP plus SSE on 127.0.0.1, token and loopback guard
 │  ├─ farseer-runner/  the Claude Code runner: invocation, PATHEXT resolution, Job-Object spawn, stream-json mapping
+│  ├─ farseer-manager/ runs one worker contract against a runner and records what happened. Not yet called by anything
 │  └─ farseer/         the binary: runtime and CLI in one
 ├─ cells/              cell definitions, hand-written, in git
 │  ├─ zero.toml        cell #0, the builder harness
@@ -116,9 +117,10 @@ A cross-site `Origin` is refused before the token is even looked at, because [16
 
 ### What is not built yet
 
-- **A runner that can execute one goal end to end, outside the runtime.** `farseer-runner` resolves `claude` through `PATHEXT`, builds its argv from a `WorkerContract`'s goal, spawns it under a Job Object it cannot escape, and drains every stdout line through the stream-json mapping - all four pieces unit-tested, three of them against a real child process. What is missing is the runtime around it: nothing yet calls this from a manager, turns its signals into `NewEvent`s in the record, or feeds `ActivityClock`. No run executes as part of farseer itself yet.
-- **The manager loop**, and with it the four manager verbs, gated actions, and cell calls.
-- **Workspace lifecycle**, the Job Object reap and worktree teardown that `jobspike` and `wsspike` proved out.
+- **Anything inside farseer calling the manager.** `farseer-manager::run_worker` takes a `WorkerContract`, spawns it against the Claude Code runner, appends every progress signal as an event, and finalizes the run row with its outcome and cost - proven against real spawned processes, cancellable from another thread mid-run. What is missing is everything that would hand it a contract in the first place: no cell, no roster entry, no HTTP verb constructs one. `CancelToken::cancel` also does not yet produce `05`'s `Cancelled` outcome - see the crate's doc comment.
+- **The other three manager verbs** (steer, re-scope, re-run), gated actions, and cell calls.
+- **The liveness watchdog wired to a real run.** `ActivityClock` and `CancelToken` both exist and both work; nothing yet polls the one to drive the other while a run is blocked mid-read.
+- **Workspace lifecycle**, the Job Object reap and worktree teardown that `jobspike` and `wsspike` proved out - `run_worker` currently runs against whatever `cwd` it is given, not a fresh worktree.
 - **The ACP server adapter** and the A2A endpoint, both decided and both later.
 
 The command half of the API is absent rather than stubbed: an endpoint that accepts an instruction nothing can execute would be a lie with a status code.

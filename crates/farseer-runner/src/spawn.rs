@@ -25,6 +25,7 @@ use std::os::windows::io::AsRawHandle;
 use std::os::windows::process::CommandExt;
 use std::path::Path;
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
+use std::sync::{Arc, Mutex};
 
 use windows::Win32::Foundation::{CloseHandle, HANDLE};
 use windows::Win32::System::JobObjects::{
@@ -43,11 +44,48 @@ pub enum SpawnError {
     Job(#[from] windows::core::Error),
 }
 
+/// A raw job handle, stored as `isize` rather than the `windows` crate's own
+/// `HANDLE` because that type is a bare pointer and is not `Send`. The value
+/// is opaque to the OS either way; only the bit pattern needs to cross a
+/// thread boundary.
+struct RawJobHandle(isize);
+
+/// A cloneable handle that can close the job's handle - and so kill the
+/// whole tree, per `jobspike` - from any thread, without needing ownership
+/// of the process's pipes. Exists because [`SupervisedProcess::run`]-style
+/// callers block on `read_line` on one thread; cancellation has to be able
+/// to reach in from another.
+///
+/// The handle lives behind a mutex-guarded `Option` shared with
+/// [`SupervisedProcess`] itself, so **closing happens at most once**: taking
+/// the value out and closing it is one atomic step, so a token cloned twice,
+/// or raced against the process's own `Drop`, cannot double-close a handle
+/// and risk closing a since-reused one instead.
+#[derive(Clone)]
+pub struct CancelToken(Arc<Mutex<Option<RawJobHandle>>>);
+
+impl CancelToken {
+    /// Idempotent: closing an empty slot - already cancelled, or the process
+    /// already finished and dropped - is a no-op, not an error.
+    pub fn cancel(&self) {
+        close(&self.0);
+    }
+}
+
+fn close(job: &Mutex<Option<RawJobHandle>>) {
+    let taken = job.lock().unwrap_or_else(|e| e.into_inner()).take();
+    if let Some(RawJobHandle(raw)) = taken {
+        unsafe {
+            let _ = CloseHandle(HANDLE(raw as *mut _));
+        }
+    }
+}
+
 /// A child process under a Job Object it cannot escape, with piped, line-
 /// buffered I/O.
 pub struct SupervisedProcess {
     child: Child,
-    job: HANDLE,
+    job: Arc<Mutex<Option<RawJobHandle>>>,
     stdout: BufReader<ChildStdout>,
 }
 
@@ -86,9 +124,16 @@ impl SupervisedProcess {
         let stdout = child.stdout.take().expect("stdout was piped");
         Ok(Self {
             child,
-            job,
+            job: Arc::new(Mutex::new(Some(RawJobHandle(job.0 as isize)))),
             stdout: BufReader::new(stdout),
         })
+    }
+
+    /// A handle that can kill this process's whole tree from another thread.
+    /// Fetch it before calling a blocking read - the token has to exist
+    /// before you might need it.
+    pub fn cancel_token(&self) -> CancelToken {
+        CancelToken(Arc::clone(&self.job))
     }
 
     pub fn stdin(&mut self) -> &mut ChildStdin {
@@ -120,8 +165,9 @@ impl SupervisedProcess {
     /// Kill-on-close: closing the job handle is a kernel guarantee that
     /// every process still assigned to it dies, transitively, no matter how
     /// deep the tree has grown since spawn. Equivalent to dropping this
-    /// value; spelled out because "cancel a run" should read as an action,
-    /// not an implicit side effect of scope exit.
+    /// value or calling [`CancelToken::cancel`]; spelled out because "cancel
+    /// a run" should read as an action, not an implicit side effect of scope
+    /// exit.
     pub fn kill(self) {
         drop(self);
     }
@@ -129,9 +175,7 @@ impl SupervisedProcess {
 
 impl Drop for SupervisedProcess {
     fn drop(&mut self) {
-        unsafe {
-            let _ = CloseHandle(self.job);
-        }
+        close(&self.job);
     }
 }
 
@@ -197,5 +241,46 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(20));
         }
         assert!(!alive(pid), "closing the job should have reaped the child");
+    }
+
+    #[test]
+    fn a_cancel_token_kills_the_process_from_another_thread_while_the_owner_blocks_on_read() {
+        let mut proc = SupervisedProcess::spawn(
+            Path::new(r"C:\Windows\System32\cmd.exe"),
+            &cmd(&["/c", "ping -n 30 127.0.0.1 >nul"]),
+            &std::env::current_dir().unwrap(),
+        )
+        .unwrap();
+        let pid = proc.child.id();
+        let token = proc.cancel_token();
+
+        let canceller = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(200));
+            token.cancel();
+        });
+
+        // Blocks until EOF, which only arrives once the job is closed and the
+        // child is gone - proving the token reached across the thread.
+        assert_eq!(proc.read_line().unwrap(), None);
+        canceller.join().unwrap();
+
+        assert!(
+            !alive(pid),
+            "the token's cancel should have reaped the child"
+        );
+    }
+
+    #[test]
+    fn cancelling_twice_and_then_dropping_does_not_double_close() {
+        let proc = SupervisedProcess::spawn(
+            Path::new(r"C:\Windows\System32\cmd.exe"),
+            &cmd(&["/c", "echo hi"]),
+            &std::env::current_dir().unwrap(),
+        )
+        .unwrap();
+        let token = proc.cancel_token();
+        token.cancel();
+        token.cancel();
+        drop(proc);
     }
 }

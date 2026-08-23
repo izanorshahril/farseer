@@ -267,6 +267,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "farseer-manager"
+version = "0.1.0"
+dependencies = [
+ "farseer-core",
+ "farseer-runner",
+ "farseer-store",
+ "tempfile",
+ "thiserror",
+]
+
+[[package]]
 name = "farseer-runner"
 version = "0.1.0"
 dependencies = [

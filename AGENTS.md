@@ -1,7 +1,7 @@
 # Working in this repository
 
 Twenty-seven decision tickets are closed, and the foundation is implemented against them: `farseer-core`, `farseer-store`, `farseer-api`, `farseer-runner`, and the `farseer` binary.
-`farseer-runner` can resolve `claude`, build its argv from a goal, spawn and reap it under a Job Object, and drain its stream-json output through the mapping - a runner that works standalone. The manager loop that calls it from inside farseer, turns its signals into record events, and drives the liveness clock is not built, so no run executes as part of the runtime yet.
+`farseer-runner` can resolve `claude`, build its argv from a goal, spawn and reap it under a Job Object, and drain its stream-json output through the mapping. `farseer-manager` calls all of that for one hand-built `WorkerContract`, appending its events and finalizing its run row - cancellable mid-run from another thread. Nothing inside farseer's own runtime calls `farseer-manager` yet: no cell, no roster, no HTTP verb reaches it, and the liveness watchdog is not wired to a real run.
 
 The spikes under `.scratch/farseer/spikes/` are **not** part of the workspace and are excluded from it.
 They are evidence, not a foundation to build on.
