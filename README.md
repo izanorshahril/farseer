@@ -110,7 +110,7 @@ Binds `127.0.0.1` only, opens the record, loads the definitions, and writes its 
 | `POST /v1/cells/{id}/instruct` | run the cell's manager against a goal. Fire-and-forget: `202` with a `run_id` the moment the process spawns, per `16` |
 | `GET /v1/events?cell=&run=&since=` | the cursor read. `since` is exclusive, so a client resumes with no gap and no duplicate |
 | `GET /v1/stream` | the same query as SSE, honouring `Last-Event-ID`. Attach and replay are one call with a different cursor |
-| `GET /v1/runs/{id}` | a run's row: lifecycle, outcome, cost, tokens |
+| `GET /v1/runs/{id}` | a run's row: lifecycle, outcome, cost, tokens, and `18`/`05`'s liveness - `live`/`stalled`/`likely_hung`, or `null` once nothing in memory can answer |
 | `POST /v1/runs/{id}/cancel` | end a run early, recorded as `05`'s `cancelled` outcome, never `failed`. `404` if it already finished or never existed - idempotent, not a silent no-op |
 | `POST /v1/runs/{id}/rerun` | same contract, fresh run, fresh workspace. `404` on an unknown run |
 | `POST /v1/runs/{id}/rescope` | a new run with a changed `goal`. `400` if `goal` is missing or unchanged from the original - that is `rerun`, not `rescope` |
@@ -126,7 +126,6 @@ A cross-site `Origin` is refused before the token is even looked at, because [16
 - **Steer.** `05`'s remaining manager verb. Blocked on a real fact, not effort: `10` confirmed `--input-format stream-json` accepts a follow-up into a running Claude Code process, but no ticket captured the JSON envelope that follow-up takes, and guessing one would break `10`'s own rule - what a runner exposes must be observed, not read off a page. `rerun` and `rescope` needed no such guess, since both are just a fresh process with a reconstructed contract.
 - Gated actions and cell calls.
 - **A workspace's `repo`.** `13` deliberately keeps no git flag on `CellDefinition`, so a `Worktree`-strategy cell's runs are worktrees of whatever directory `farseer serve` was started in - the farseer checkout itself, in the common case, since cell zero is farseer's own builder harness. That is a stated assumption, not a config option yet.
-- **A `LivenessHandle` reader.** `farseer-manager` exposes one per run; nothing in the API queries it yet, so `18`/`05`'s `stalled`/`likely-hung` state is not visible outside the process.
 - **The ACP server adapter** and the A2A endpoint, both decided and both later.
 
 The command half of the API is absent rather than stubbed: an endpoint that accepts an instruction nothing can execute would be a lie with a status code.

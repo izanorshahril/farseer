@@ -34,7 +34,7 @@ use serde::{Deserialize, Serialize};
 use farseer_core::policy::Budget;
 use farseer_core::run::{WorkerContract, WorkerContractSpec, WorkspaceStrategy};
 use farseer_core::{CellDefinition, CellId, LivenessThresholds, NewEvent, RunId, Seq, TaskId};
-use farseer_manager::RunSink;
+use farseer_manager::{LivenessHandle, RunSink};
 use farseer_runner::spawn::CancelToken;
 use farseer_store::{RunRow, ScanFilter, Store, StoreError, UI_STATE_CAP_BYTES};
 
@@ -71,9 +71,18 @@ pub struct AppState {
     /// practice this is the farseer checkout itself, which is exactly what
     /// cell zero - farseer's own builder harness - is for.
     repo_root: PathBuf,
-    /// In-flight runs' cancel tokens, keyed by run id. A run removes its own
-    /// entry when it finishes, successfully or not.
-    runs: Mutex<HashMap<RunId, CancelToken>>,
+    /// In-flight runs, keyed by run id. A run removes its own entry when it
+    /// finishes, successfully or not - so a lookup miss here means either
+    /// "already finished" or "farseer restarted since", and the run row is
+    /// what still answers which.
+    runs: Mutex<HashMap<RunId, RunHandle>>,
+}
+
+/// What `farseer_manager::run_worker`'s `on_started` callback hands back for
+/// one in-flight run: a way to end it, and a way to ask how it's doing.
+struct RunHandle {
+    cancel: CancelToken,
+    liveness: LivenessHandle,
 }
 
 impl AppState {
@@ -91,7 +100,7 @@ impl AppState {
         self.cells.lock().unwrap_or_else(|e| e.into_inner())
     }
 
-    fn runs(&self) -> std::sync::MutexGuard<'_, HashMap<RunId, CancelToken>> {
+    fn runs(&self) -> std::sync::MutexGuard<'_, HashMap<RunId, RunHandle>> {
         self.runs.lock().unwrap_or_else(|e| e.into_inner())
     }
 
@@ -442,8 +451,10 @@ fn spawn_run(state: &Arc<AppState>, contract: WorkerContract) -> ApiResult<RunId
             &cwd,
             thresholds,
             now_ms,
-            |token, _liveness| {
-                background_state.runs().insert(run_id, token);
+            |cancel, liveness| {
+                background_state
+                    .runs()
+                    .insert(run_id, RunHandle { cancel, liveness });
             },
         );
         background_state.runs().remove(&run_id);
@@ -482,7 +493,7 @@ async fn cancel_run(
     UrlPath(run_id): UrlPath<String>,
 ) -> ApiResult<StatusCode> {
     let run_id: RunId = run_id.parse().map_err(|_| ApiError::NotFound("run"))?;
-    let token = state.runs().get(&run_id).cloned();
+    let token = state.runs().get(&run_id).map(|h| h.cancel.clone());
     match token {
         Some(token) => {
             token.cancel();
@@ -708,6 +719,12 @@ pub struct RunView {
     pub finished_ts: Option<i64>,
     pub liveness_stalled_secs: u64,
     pub liveness_likely_hung_secs: u64,
+    /// `18`/`05`'s watchdog state - `"live"`, `"stalled"` or `"likely_hung"` -
+    /// or `None` when there is nothing in memory to ask: the run already
+    /// finished, or farseer restarted since it started. `17` chose no orphan
+    /// survival over run survival, so a restart losing this is the same
+    /// trade already made everywhere else, not a new gap.
+    pub liveness: Option<String>,
 }
 
 async fn get_run(
@@ -740,7 +757,19 @@ async fn get_run(
         finished_ts: row.finished_ts,
         liveness_stalled_secs: state.thresholds.stalled_secs,
         liveness_likely_hung_secs: state.thresholds.likely_hung_secs,
+        liveness: state
+            .runs()
+            .get(&run_id)
+            .map(|h| liveness_str(h.liveness.liveness()).to_string()),
     }))
+}
+
+fn liveness_str(liveness: farseer_core::Liveness) -> &'static str {
+    match liveness {
+        farseer_core::Liveness::Live => "live",
+        farseer_core::Liveness::Stalled => "stalled",
+        farseer_core::Liveness::LikelyHung => "likely_hung",
+    }
 }
 
 async fn get_ui_state(
@@ -1257,6 +1286,49 @@ runner = "claude-code"
             );
             tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         }
+    }
+
+    #[tokio::test]
+    async fn a_running_run_reports_liveness_and_a_finished_one_reports_none() {
+        let h = harness();
+        let (_, body) = h
+            .post(
+                "/v1/cells/zero/instruct",
+                json!({ "goal": "reply with just the word ok" }),
+            )
+            .await;
+        let run_id = body["run_id"].as_str().unwrap().to_string();
+
+        // The row is written before `start_worker` even resolves the
+        // executable, and `on_started` - the callback that populates the
+        // in-memory registry `liveness` reads from - only fires once a
+        // process actually spawns. So a run can genuinely be `running` with
+        // `liveness: null` for a moment before it becomes `"live"`, and it
+        // can also race straight to `finished` before either is observed.
+        // Poll until one of those three states is confirmed rather than
+        // asserting against a single, timing-dependent snapshot.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            let (_, row) = h.get(&format!("/v1/runs/{run_id}")).await;
+            if row["liveness"] == "live" {
+                break;
+            }
+            if row["lifecycle"] == "finished" {
+                assert!(row["liveness"].is_null());
+                return; // finished before ever being observed live - fine
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the run was never observed live nor finished: {row}"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+
+        let row = h.cancel_and_wait_for_finished(&run_id).await;
+        assert!(
+            row["liveness"].is_null(),
+            "a finished run has no in-memory liveness handle left: {row}"
+        );
     }
 
     #[tokio::test]
