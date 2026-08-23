@@ -72,7 +72,7 @@ An external protocol is spoken at a boundary, never shaped into internals.
 │  ├─ farseer-core/    domain model: cells, policy, run state, scrubbing. Pure, no I/O
 │  ├─ farseer-store/   the record: one append-only SQLite log, memory, UI state
 │  ├─ farseer-api/     local HTTP plus SSE on 127.0.0.1, token and loopback guard
-│  ├─ farseer-runner/  runner adapters: PATHEXT resolution, Job-Object-supervised spawn, stream-json mapping
+│  ├─ farseer-runner/  the Claude Code runner: invocation, PATHEXT resolution, Job-Object spawn, stream-json mapping
 │  └─ farseer/         the binary: runtime and CLI in one
 ├─ cells/              cell definitions, hand-written, in git
 │  ├─ zero.toml        cell #0, the builder harness
@@ -116,7 +116,7 @@ A cross-site `Origin` is refused before the token is even looked at, because [16
 
 ### What is not built yet
 
-- **A runner, wired up.** `farseer-runner` can now resolve an executable through `PATHEXT`, spawn it under a Job Object it cannot escape, read its stdout line by line, and map a Claude Code `stream-json` line onto `05`'s activity/progress contract - each piece unit-tested, the spawn and reap against a real child process. What is missing is the thing that calls all three in sequence: nothing yet constructs a `claude` invocation from a `WorkerContract`, drives `read_line` through `parse_line` into the record, or writes a steer instruction back. No run executes.
+- **A runner that can execute one goal end to end, outside the runtime.** `farseer-runner` resolves `claude` through `PATHEXT`, builds its argv from a `WorkerContract`'s goal, spawns it under a Job Object it cannot escape, and drains every stdout line through the stream-json mapping - all four pieces unit-tested, three of them against a real child process. What is missing is the runtime around it: nothing yet calls this from a manager, turns its signals into `NewEvent`s in the record, or feeds `ActivityClock`. No run executes as part of farseer itself yet.
 - **The manager loop**, and with it the four manager verbs, gated actions, and cell calls.
 - **Workspace lifecycle**, the Job Object reap and worktree teardown that `jobspike` and `wsspike` proved out.
 - **The ACP server adapter** and the A2A endpoint, both decided and both later.

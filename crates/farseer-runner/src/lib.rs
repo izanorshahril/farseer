@@ -20,7 +20,10 @@
 //! path.
 
 pub mod claude_code;
+pub mod invocation;
 pub mod resolve;
 
+#[cfg(windows)]
+pub mod drive;
 #[cfg(windows)]
 pub mod spawn;

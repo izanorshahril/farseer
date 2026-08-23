@@ -273,6 +273,7 @@ dependencies = [
  "farseer-core",
  "serde",
  "serde_json",
+ "tempfile",
  "thiserror",
  "windows",
 ]
