@@ -1,0 +1,14 @@
+[package]
+name = "farseer-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Farseer domain model: cells, runs, policy composition. Pure, no I/O."
+
+[dependencies]
+serde.workspace = true
+thiserror.workspace = true
+toml.workspace = true
+uuid.workspace = true
+serde_json.workspace = true

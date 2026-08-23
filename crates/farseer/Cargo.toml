@@ -1,0 +1,20 @@
+[package]
+name = "farseer"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Farseer: a local-first agent orchestration runtime. One binary, runtime and CLI."
+
+[[bin]]
+name = "farseer"
+path = "src/main.rs"
+
+[dependencies]
+farseer-api.workspace = true
+farseer-core.workspace = true
+farseer-store.workspace = true
+
+anyhow.workspace = true
+clap.workspace = true
+tokio.workspace = true
