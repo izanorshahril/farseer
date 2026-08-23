@@ -111,7 +111,7 @@ Binds `127.0.0.1` only, opens the record, loads the definitions, and writes its 
 | `GET /v1/events?cell=&run=&since=` | the cursor read. `since` is exclusive, so a client resumes with no gap and no duplicate |
 | `GET /v1/stream` | the same query as SSE, honouring `Last-Event-ID`. Attach and replay are one call with a different cursor |
 | `GET /v1/runs/{id}` | a run's row: lifecycle, outcome, cost, tokens |
-| `POST /v1/runs/{id}/cancel` | end a run early. `404` if it already finished or never existed - idempotent, not a silent no-op |
+| `POST /v1/runs/{id}/cancel` | end a run early, recorded as `05`'s `cancelled` outcome, never `failed`. `404` if it already finished or never existed - idempotent, not a silent no-op |
 | `GET`/`PUT /v1/ui-state/{key}` | an opaque blob farseer never parses, so a canvas survives a restart. `413` above 1 MiB |
 | `GET /v1/analytics/{cost,intervention,rework,lessons}` | the four questions from [11 analytics questions](.scratch/farseer/issues/11-analytics-questions.md) |
 
@@ -122,7 +122,6 @@ A cross-site `Origin` is refused before the token is even looked at, because [16
 
 - **Delegation.** `instruct` runs the cell's own **manager** runner directly against the goal - there is no manager loop yet to plan and delegate to workers, so `22`'s "an instruction delegates to one owner" is true only in the trivial sense that the owner is whichever manager was asked. A roster worker naming `codex` or `cursor-agent` (both hand-written cells' workers do) cannot run yet; only `claude-code` is wired, so only the manager - which is always `claude-code` in both shipped definitions - can execute.
 - **The other three manager verbs** (steer, re-scope, re-run), gated actions, and cell calls.
-- **`05`'s `Cancelled` outcome.** `POST /v1/runs/{id}/cancel` ends the process, but its terminal result never arrives to say what happened, so the row reads `failed` rather than `cancelled` - see `farseer-manager`'s own doc comment.
 - **A workspace's `repo`.** `13` deliberately keeps no git flag on `CellDefinition`, so a `Worktree`-strategy cell's runs are worktrees of whatever directory `farseer serve` was started in - the farseer checkout itself, in the common case, since cell zero is farseer's own builder harness. That is a stated assumption, not a config option yet.
 - **A `LivenessHandle` reader.** `farseer-manager` exposes one per run; nothing in the API queries it yet, so `18`/`05`'s `stalled`/`likely-hung` state is not visible outside the process.
 - **The ACP server adapter** and the A2A endpoint, both decided and both later.

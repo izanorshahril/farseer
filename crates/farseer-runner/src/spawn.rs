@@ -25,6 +25,7 @@ use std::os::windows::io::AsRawHandle;
 use std::os::windows::process::CommandExt;
 use std::path::Path;
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use windows::Win32::Foundation::{CloseHandle, HANDLE};
@@ -61,14 +62,29 @@ struct RawJobHandle(isize);
 /// the value out and closing it is one atomic step, so a token cloned twice,
 /// or raced against the process's own `Drop`, cannot double-close a handle
 /// and risk closing a since-reused one instead.
+///
+/// The `AtomicBool` alongside it is a second, independent piece of shared
+/// state: **whether a cancel was ever requested**, queryable through any
+/// clone regardless of which one called `cancel()`. `05`: `cancelled` must
+/// never read as `failed`, and the only way to tell the two apart once the
+/// process is gone and its own terminal result never arrived is to have
+/// asked, in band, whether ending it was deliberate.
 #[derive(Clone)]
-pub struct CancelToken(Arc<Mutex<Option<RawJobHandle>>>);
+pub struct CancelToken(Arc<Mutex<Option<RawJobHandle>>>, Arc<AtomicBool>);
 
 impl CancelToken {
     /// Idempotent: closing an empty slot - already cancelled, or the process
     /// already finished and dropped - is a no-op, not an error.
     pub fn cancel(&self) {
+        self.1.store(true, Ordering::SeqCst);
         close(&self.0);
+    }
+
+    /// Whether `cancel()` was ever called on this token or any clone of it -
+    /// true forever after, even once the job handle it also closed is long
+    /// gone.
+    pub fn was_cancelled(&self) -> bool {
+        self.1.load(Ordering::SeqCst)
     }
 }
 
@@ -86,6 +102,7 @@ fn close(job: &Mutex<Option<RawJobHandle>>) {
 pub struct SupervisedProcess {
     child: Child,
     job: Arc<Mutex<Option<RawJobHandle>>>,
+    cancelled: Arc<AtomicBool>,
     stdout: BufReader<ChildStdout>,
 }
 
@@ -125,6 +142,7 @@ impl SupervisedProcess {
         Ok(Self {
             child,
             job: Arc::new(Mutex::new(Some(RawJobHandle(job.0 as isize)))),
+            cancelled: Arc::new(AtomicBool::new(false)),
             stdout: BufReader::new(stdout),
         })
     }
@@ -133,7 +151,7 @@ impl SupervisedProcess {
     /// Fetch it before calling a blocking read - the token has to exist
     /// before you might need it.
     pub fn cancel_token(&self) -> CancelToken {
-        CancelToken(Arc::clone(&self.job))
+        CancelToken(Arc::clone(&self.job), Arc::clone(&self.cancelled))
     }
 
     pub fn stdin(&mut self) -> &mut ChildStdin {
@@ -282,5 +300,27 @@ mod tests {
         token.cancel();
         token.cancel();
         drop(proc);
+    }
+
+    #[test]
+    fn was_cancelled_is_true_through_any_clone_once_any_clone_cancels() {
+        let proc = SupervisedProcess::spawn(
+            Path::new(r"C:\Windows\System32\cmd.exe"),
+            &cmd(&["/c", "echo hi"]),
+            &std::env::current_dir().unwrap(),
+        )
+        .unwrap();
+        let a = proc.cancel_token();
+        let b = a.clone();
+        assert!(!a.was_cancelled());
+        assert!(!b.was_cancelled());
+
+        b.cancel();
+
+        assert!(a.was_cancelled(), "every clone shares the same flag");
+        // A fresh token, fetched after the fact, must also see it - this is
+        // exactly the query `farseer-manager` makes after the process has
+        // already exited.
+        assert!(proc.cancel_token().was_cancelled());
     }
 }

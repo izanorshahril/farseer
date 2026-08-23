@@ -15,15 +15,16 @@
 //! [`CancelToken`] on the watchdog's behalf. Only a human, through a manager
 //! verb this crate does not implement yet, does that.
 //!
-//! **`CancelToken::cancel` does not yet produce `05`'s `Cancelled` outcome.**
-//! Closing the job ends the process without its terminal `result` line ever
-//! arriving, so [`StartedWorker::run_to_completion`] sees end-of-stream with
-//! no [`RunnerSignal::Finished`] and returns [`ManagerError::NoResult`],
-//! which [`run_worker`] then records as `Failed`. `05` is explicit that
-//! `cancelled` is never `failed` - a human choosing not to proceed must not
-//! read as something having broken. Fixing this needs the caller of
-//! `cancel()` to tell `run_worker` a cancellation is in flight, which is
-//! exactly the manager-verb wiring this crate does not have yet.
+//! **`CancelToken::cancel` produces `05`'s `Cancelled` outcome, not `Failed`.**
+//! Closing the job ends the process before its terminal `result` line ever
+//! arrives, so [`StartedWorker::run_to_completion`] sees end-of-stream with
+//! no [`RunnerSignal::Finished`] - indistinguishable, on its own, from a
+//! crash. `CancelToken::was_cancelled` is the missing fact: every clone of a
+//! token shares one flag, so asking any of them - including a fresh one
+//! fetched after the process has already exited - answers whether ending it
+//! was deliberate. `05` is explicit that `cancelled` is never `failed`, and
+//! this is what makes the record honest about a human choosing not to
+//! proceed rather than something having broken.
 //!
 //! Windows only, like the runner it drives - `farseer-runner`'s `spawn` and
 //! `drive` modules are themselves `cfg(windows)`, so this crate would fail to
@@ -87,6 +88,10 @@ pub enum ManagerError {
     Store(#[from] StoreError),
     #[error("the process exited without ever emitting a terminal result")]
     NoResult,
+    /// `05`: never `Failed`. A human, via `CancelToken::cancel`, decided not
+    /// to proceed - nothing broke.
+    #[error("the run was cancelled")]
+    Cancelled,
 }
 
 pub struct RunReport {
@@ -237,7 +242,14 @@ impl StartedWorker {
         if let Some(e) = store_err {
             return Err(e.into());
         }
-        report.ok_or(ManagerError::NoResult)
+        match report {
+            Some(report) => Ok(report),
+            // A fresh token still answers correctly: the flag it reads is
+            // shared with every clone, including whichever one an API
+            // handler or another thread actually called `cancel()` on.
+            None if self.proc.cancel_token().was_cancelled() => Err(ManagerError::Cancelled),
+            None => Err(ManagerError::NoResult),
+        }
     }
 }
 
@@ -292,6 +304,7 @@ pub fn run_worker(
             report.cost_usd_micros.unwrap_or(0).max(0) as u64,
             report.tokens.unwrap_or(0).max(0) as u64,
         ),
+        Err(ManagerError::Cancelled) => (Outcome::Cancelled, 0, 0),
         Err(_) => (Outcome::Failed, 0, 0),
     };
     sink.upsert_run(&row(
@@ -470,7 +483,7 @@ mod tests {
     }
 
     #[test]
-    fn cancelling_ends_the_run_without_a_result_event_rather_than_hanging() {
+    fn cancelling_ends_the_run_as_cancelled_not_failed_and_not_hanging() {
         let store = Store::open_in_memory().unwrap();
         let contract = contract();
         let started = StartedWorker::spawn(
@@ -486,8 +499,11 @@ mod tests {
             token.cancel();
         });
 
+        // `05`: cancelled is never failed. Without the result line a crash
+        // and a deliberate cancel look identical on the wire; `Cancelled`
+        // proves the distinction survived rather than collapsing to `NoResult`.
         let result = started.run_to_completion(&store, &contract, || 1);
-        assert!(matches!(result, Err(ManagerError::NoResult)));
+        assert!(matches!(result, Err(ManagerError::Cancelled)));
     }
 
     #[test]
