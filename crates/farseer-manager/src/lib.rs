@@ -24,19 +24,54 @@
 //! read as something having broken. Fixing this needs the caller of
 //! `cancel()` to tell `run_worker` a cancellation is in flight, which is
 //! exactly the manager-verb wiring this crate does not have yet.
+//!
+//! Windows only, like the runner it drives - `farseer-runner`'s `spawn` and
+//! `drive` modules are themselves `cfg(windows)`, so this crate would fail to
+//! compile anywhere else regardless; the gate below makes that an intentional
+//! boundary rather than an accidental one.
+//!
+//! **This crate never holds `Store` itself.** [`run_worker`] runs for as long
+//! as the process it spawns, blocked on I/O the whole time; a caller sharing
+//! one `Store` behind a mutex across a whole API (`farseer-api` does exactly
+//! this) cannot afford to have that mutex held for a run's entire duration -
+//! every other request, including reading the very events this run is
+//! writing, would queue behind it. [`RunSink`] is the seam: a caller that
+//! owns locking policy implements it however it likes - `farseer-api` locks
+//! and releases per call - while a test can just hand over a bare `Store`,
+//! since `Store` implements it directly.
+
+#![cfg(windows)]
 
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use farseer_core::run::{ActivityClock, Liveness, LivenessThresholds, WorkerContract};
-use farseer_core::{Actor, NewEvent, Outcome};
+use farseer_core::{Actor, NewEvent, Outcome, Seq};
 use farseer_runner::claude_code::RunnerSignal;
 use farseer_runner::drive::drive;
 use farseer_runner::invocation::build_args;
 use farseer_runner::resolve::resolve;
 use farseer_runner::spawn::{CancelToken, SpawnError, SupervisedProcess};
 use farseer_store::{RunRow, Store, StoreError};
+
+/// Where a run's events and row land. One method per write `run_worker`
+/// makes - never a whole `Store`, so the caller decides how (or whether) to
+/// lock around each one.
+pub trait RunSink {
+    fn append(&self, event: &NewEvent) -> Result<Seq, StoreError>;
+    fn upsert_run(&self, row: &RunRow) -> Result<(), StoreError>;
+}
+
+impl RunSink for Store {
+    fn append(&self, event: &NewEvent) -> Result<Seq, StoreError> {
+        Store::append(self, event)
+    }
+
+    fn upsert_run(&self, row: &RunRow) -> Result<(), StoreError> {
+        Store::upsert_run(self, row)
+    }
+}
 
 #[derive(Debug, thiserror::Error)]
 pub enum ManagerError {
@@ -138,7 +173,7 @@ impl StartedWorker {
     /// record.
     pub fn run_to_completion(
         mut self,
-        store: &Store,
+        sink: &impl RunSink,
         contract: &WorkerContract,
         mut now_ms: impl FnMut() -> i64,
     ) -> Result<RunReport, ManagerError> {
@@ -177,7 +212,7 @@ impl StartedWorker {
                             now_ms(),
                             payload,
                         );
-                        if let Err(e) = store.append(&event) {
+                        if let Err(e) = sink.append(&event) {
                             store_err = Some(e);
                             // The record can no longer be trusted for this
                             // run; there is no point paying for more of it.
@@ -228,18 +263,27 @@ pub fn start_worker(
 /// process crashes mid-flight is left `running` forever rather than silently
 /// missing, matching `17`'s choice to surface an orphan rather than paper
 /// over it.
+///
+/// `on_started` fires once, after the process spawns but before the blocking
+/// read loop starts, with a [`CancelToken`] and [`LivenessHandle`] a caller
+/// can stash somewhere reachable from another thread - a registry an HTTP
+/// handler looks runs up in, for instance. It never fires if `start_worker`
+/// itself fails, since there is nothing to cancel or watch yet.
 pub fn run_worker(
-    store: &Store,
+    sink: &impl RunSink,
     contract: &WorkerContract,
     cwd: &Path,
     thresholds: LivenessThresholds,
     mut now_ms: impl FnMut() -> i64,
+    on_started: impl FnOnce(CancelToken, LivenessHandle),
 ) -> Result<RunReport, ManagerError> {
     let started_ts = now_ms();
-    store.upsert_run(&row(contract, None, 0, 0, started_ts, None))?;
+    sink.upsert_run(&row(contract, None, 0, 0, started_ts, None))?;
 
-    let result = start_worker(contract, cwd, thresholds)
-        .and_then(|started| started.run_to_completion(store, contract, &mut now_ms));
+    let result = start_worker(contract, cwd, thresholds).and_then(|started| {
+        on_started(started.cancel_token(), started.liveness_handle());
+        started.run_to_completion(sink, contract, &mut now_ms)
+    });
 
     let finished_ts = now_ms();
     let (outcome, usd_micros, tokens) = match &result {
@@ -250,7 +294,7 @@ pub fn run_worker(
         ),
         Err(_) => (Outcome::Failed, 0, 0),
     };
-    store.upsert_run(&row(
+    sink.upsert_run(&row(
         contract,
         Some(outcome),
         usd_micros,
@@ -415,6 +459,7 @@ mod tests {
                 tick += 1;
                 tick
             },
+            |_, _| panic!("on_started must not fire when start_worker itself fails"),
         );
 
         assert!(matches!(result, Err(ManagerError::UnsupportedRunner(_))));

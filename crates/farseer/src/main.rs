@@ -85,7 +85,18 @@ async fn run(cells: PathBuf, record: PathBuf, port: u16) -> Result<()> {
             .with_context(|| format!("creating {}", parent.display()))?;
     }
     let store = Store::open(&record).with_context(|| format!("opening {}", record.display()))?;
-    let state = Arc::new(AppState::new(store, &cells, RuntimeToken::generate()));
+    let runs_dir = record
+        .parent()
+        .context("record path has no parent directory")?
+        .join("runs");
+    std::fs::create_dir_all(&runs_dir)
+        .with_context(|| format!("creating {}", runs_dir.display()))?;
+    let state = Arc::new(AppState::new(
+        store,
+        &cells,
+        RuntimeToken::generate(),
+        runs_dir,
+    ));
 
     let report = state.reload();
     for error in &report.errors {

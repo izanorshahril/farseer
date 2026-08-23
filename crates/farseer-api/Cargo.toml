@@ -9,6 +9,8 @@ description = "Farseer's local API: bespoke HTTP plus SSE on 127.0.0.1, per tick
 [dependencies]
 farseer-core.workspace = true
 farseer-store.workspace = true
+farseer-runner.workspace = true
+farseer-manager.workspace = true
 
 axum = "0.8.6"
 serde.workspace = true

@@ -18,7 +18,7 @@
 //! may appear; existing fields never change meaning and never vanish; clients
 //! must ignore unknown fields.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -31,8 +31,12 @@ use axum::routing::{get, post};
 use axum::{Json, Router, middleware};
 use serde::{Deserialize, Serialize};
 
-use farseer_core::{CellDefinition, CellId, LivenessThresholds, RunId, Seq};
-use farseer_store::{ScanFilter, Store, StoreError, UI_STATE_CAP_BYTES};
+use farseer_core::policy::Budget;
+use farseer_core::run::{WorkerContract, WorkerContractSpec};
+use farseer_core::{CellDefinition, CellId, LivenessThresholds, NewEvent, RunId, Seq, TaskId};
+use farseer_manager::RunSink;
+use farseer_runner::spawn::CancelToken;
+use farseer_store::{RunRow, ScanFilter, Store, StoreError, UI_STATE_CAP_BYTES};
 
 pub mod security;
 
@@ -56,6 +60,14 @@ pub struct AppState {
     cells_dir: PathBuf,
     token: RuntimeToken,
     thresholds: LivenessThresholds,
+    /// Where a run's process is spawned. **Not a git worktree yet** - `04`'s
+    /// isolation strategy is proven in `wsspike` but not wired here, so every
+    /// run gets a fresh plain directory regardless of what the cell's own
+    /// `workspace_strategy` says. Documented rather than silently ignored.
+    runs_dir: PathBuf,
+    /// In-flight runs' cancel tokens, keyed by run id. A run removes its own
+    /// entry when it finishes, successfully or not.
+    runs: Mutex<HashMap<RunId, CancelToken>>,
 }
 
 impl AppState {
@@ -73,13 +85,24 @@ impl AppState {
         self.cells.lock().unwrap_or_else(|e| e.into_inner())
     }
 
-    pub fn new(store: Store, cells_dir: impl Into<PathBuf>, token: RuntimeToken) -> Self {
+    fn runs(&self) -> std::sync::MutexGuard<'_, HashMap<RunId, CancelToken>> {
+        self.runs.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    pub fn new(
+        store: Store,
+        cells_dir: impl Into<PathBuf>,
+        token: RuntimeToken,
+        runs_dir: impl Into<PathBuf>,
+    ) -> Self {
         Self {
             store: Mutex::new(store),
             cells: Mutex::new(BTreeMap::new()),
             cells_dir: cells_dir.into(),
             token,
             thresholds: LivenessThresholds::default(),
+            runs_dir: runs_dir.into(),
+            runs: Mutex::new(HashMap::new()),
         }
     }
 
@@ -134,6 +157,20 @@ impl AppState {
     }
 }
 
+/// `farseer-manager` never holds a `Store` across a whole run - see that
+/// crate's own doc comment for why - so `AppState` locks and releases the
+/// store mutex for each individual write instead of handing over one
+/// long-lived borrow.
+impl RunSink for AppState {
+    fn append(&self, event: &NewEvent) -> Result<Seq, StoreError> {
+        self.store().append(event)
+    }
+
+    fn upsert_run(&self, row: &RunRow) -> Result<(), StoreError> {
+        self.store().upsert_run(row)
+    }
+}
+
 #[derive(Debug, Default, Serialize)]
 pub struct ReloadReport {
     pub loaded: Vec<String>,
@@ -154,9 +191,11 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/v1/cells", get(list_cells))
         .route("/v1/cells/{cell_id}", get(get_cell))
         .route("/v1/cells/reload", post(reload_cells))
+        .route("/v1/cells/{cell_id}/instruct", post(instruct_cell))
         .route("/v1/events", get(read_events))
         .route("/v1/stream", get(stream_events))
         .route("/v1/runs/{run_id}", get(get_run))
+        .route("/v1/runs/{run_id}/cancel", post(cancel_run))
         .route("/v1/ui-state/{key}", get(get_ui_state).put(put_ui_state))
         .route("/v1/analytics/cost", get(analytics_cost))
         .route("/v1/analytics/intervention", get(analytics_intervention))
@@ -217,6 +256,8 @@ enum ApiError {
     BadRequest(&'static str),
     #[error(transparent)]
     Store(#[from] StoreError),
+    #[error("could not prepare a workspace for this run: {0}")]
+    Workspace(std::io::Error),
 }
 
 impl IntoResponse for ApiError {
@@ -229,6 +270,7 @@ impl IntoResponse for ApiError {
             // `24`: over 1 MiB per key, the answer is `413`.
             Self::Store(StoreError::UiStateTooLarge { .. }) => StatusCode::PAYLOAD_TOO_LARGE,
             Self::Store(_) => StatusCode::INTERNAL_SERVER_ERROR,
+            Self::Workspace(_) => StatusCode::INTERNAL_SERVER_ERROR,
         };
         (
             status,
@@ -286,6 +328,115 @@ async fn get_cell(
 
 async fn reload_cells(State(state): State<Arc<AppState>>) -> Json<ReloadReport> {
     Json(state.reload())
+}
+
+#[derive(Debug, Deserialize)]
+pub struct InstructBody {
+    pub goal: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct InstructResponse {
+    pub run_id: String,
+}
+
+/// **The command half of the API, no longer absent.** `16`: an instruction is
+/// fire-and-forget - this returns `202` with a `run_id` the moment a process
+/// is spawned, and the record is where the result shows up, via
+/// `/v1/runs/{run_id}` or `/v1/stream`.
+///
+/// **What this deliberately is not**, per `22`: an instruction *delegates* to
+/// exactly one owner, which `05`'s manager loop would decide by planning and
+/// calling workers. There is no manager loop yet, so this runs the cell's own
+/// **manager runner** directly against the goal - the only roster runner
+/// value guaranteed to be `claude-code`, the one runner this binary can
+/// execute. A worker roster entry naming `codex` or `cursor-agent` would fail
+/// with `UnsupportedRunner` today; that gap is `farseer-manager`'s, not
+/// hidden here.
+async fn instruct_cell(
+    State(state): State<Arc<AppState>>,
+    UrlPath(cell_id): UrlPath<String>,
+    Json(body): Json<InstructBody>,
+) -> ApiResult<(StatusCode, Json<InstructResponse>)> {
+    if body.goal.trim().is_empty() {
+        return Err(ApiError::BadRequest("goal must not be empty"));
+    }
+    let cell = state
+        .cells()
+        .get(&CellId::new(cell_id))
+        .cloned()
+        .ok_or(ApiError::NotFound("cell"))?;
+
+    let contract = WorkerContract::seal(WorkerContractSpec {
+        run_id: RunId::new(),
+        task_id: TaskId::new(),
+        cell_id: cell.cell_id.clone(),
+        goal: body.goal,
+        workspace: cell.workspace_strategy,
+        runner: cell.manager.runner.clone(),
+        tool_grants: cell.tool_grants(),
+        autonomy_ceiling: cell.policy.autonomy_ceiling,
+        // `23`'s three narrowing layers - definition, roster cap, caller's
+        // remaining pool - are not wired to this entry point, so a run
+        // started here is unbounded rather than silently capped at a guess.
+        budget: Budget::default(),
+        definition_of_done: String::new(),
+    });
+    let run_id = contract.run_id;
+
+    // `04`'s `worktree` strategy is proven but not wired here - every run
+    // gets a fresh **plain** directory regardless of what the cell asked for.
+    let cwd = state.runs_dir.join(run_id.to_string());
+    std::fs::create_dir_all(&cwd).map_err(ApiError::Workspace)?;
+
+    let thresholds = state.thresholds;
+    let background_state = Arc::clone(&state);
+    tokio::task::spawn_blocking(move || {
+        let result = farseer_manager::run_worker(
+            background_state.as_ref(),
+            &contract,
+            &cwd,
+            thresholds,
+            now_ms,
+            |token, _liveness| {
+                background_state.runs().insert(run_id, token);
+            },
+        );
+        background_state.runs().remove(&run_id);
+        // The outcome is already the run row's problem: `run_worker` writes
+        // `Failed` on any error before returning it, so there is nothing this
+        // background task needs to do with `result` beyond letting it drop.
+        drop(result);
+    });
+
+    Ok((
+        StatusCode::ACCEPTED,
+        Json(InstructResponse {
+            run_id: run_id.to_string(),
+        }),
+    ))
+}
+
+/// `05`'s simplest manager verb: end the process, no plan, no re-scope.
+/// Idempotent, and `404` rather than a silent no-op when there is nothing to
+/// cancel - a run that already finished, or one that never existed.
+///
+/// **Does not yet produce `05`'s `Cancelled` outcome** - see
+/// `farseer_manager`'s own doc comment. The run row this leaves behind reads
+/// `failed`.
+async fn cancel_run(
+    State(state): State<Arc<AppState>>,
+    UrlPath(run_id): UrlPath<String>,
+) -> ApiResult<StatusCode> {
+    let run_id: RunId = run_id.parse().map_err(|_| ApiError::NotFound("run"))?;
+    let token = state.runs().get(&run_id).cloned();
+    match token {
+        Some(token) => {
+            token.cancel();
+            Ok(StatusCode::ACCEPTED)
+        }
+        None => Err(ApiError::NotFound("run")),
+    }
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -522,6 +673,7 @@ pub fn validate_dir(dir: &Path) -> ReloadReport {
         Store::open_in_memory().expect("in-memory store"),
         dir,
         RuntimeToken::generate(),
+        std::env::temp_dir(),
     );
     state.reload()
 }
@@ -550,16 +702,19 @@ runner = "claude-code"
         token: RuntimeToken,
         state: Arc<AppState>,
         _dir: tempfile::TempDir,
+        _runs_dir: tempfile::TempDir,
     }
 
     fn harness() -> Harness {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("zero.toml"), CELL).unwrap();
+        let runs_dir = tempfile::tempdir().unwrap();
         let token = RuntimeToken::generate();
         let state = Arc::new(AppState::new(
             Store::open_in_memory().unwrap(),
             dir.path(),
             token.clone(),
+            runs_dir.path(),
         ));
         state.reload();
         Harness {
@@ -567,6 +722,7 @@ runner = "claude-code"
             token,
             state,
             _dir: dir,
+            _runs_dir: runs_dir,
         }
     }
 
@@ -594,6 +750,19 @@ runner = "claude-code"
 
         async fn get(&self, uri: &str) -> (StatusCode, serde_json::Value) {
             self.send(self.request("GET", uri)).await
+        }
+
+        async fn post(
+            &self,
+            uri: &str,
+            body: serde_json::Value,
+        ) -> (StatusCode, serde_json::Value) {
+            let mut request = self.request("POST", uri);
+            *request.body_mut() = Body::from(body.to_string());
+            request
+                .headers_mut()
+                .insert(header::CONTENT_TYPE, "application/json".parse().unwrap());
+            self.send(request).await
         }
     }
 
@@ -819,5 +988,84 @@ runner = "claude-code"
             h.get(&format!("/v1/runs/{}", RunId::new())).await.0,
             StatusCode::NOT_FOUND
         );
+    }
+
+    #[tokio::test]
+    async fn instructing_an_unknown_cell_is_a_404() {
+        let h = harness();
+        let (status, _) = h
+            .post("/v1/cells/nope/instruct", json!({ "goal": "do the thing" }))
+            .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn an_empty_goal_is_refused_rather_than_spawning_nothing() {
+        let h = harness();
+        let (status, _) = h
+            .post("/v1/cells/zero/instruct", json!({ "goal": "   " }))
+            .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn cancelling_an_unknown_run_is_a_404() {
+        let h = harness();
+        assert_eq!(
+            h.post(&format!("/v1/runs/{}/cancel", RunId::new()), json!({}))
+                .await
+                .0,
+            StatusCode::NOT_FOUND
+        );
+        assert_eq!(
+            h.post("/v1/runs/not-a-uuid/cancel", json!({})).await.0,
+            StatusCode::NOT_FOUND
+        );
+    }
+
+    /// This is the one test in the suite that actually spawns a process - the
+    /// mechanics of spawning, reaping and mapping stream-json are already
+    /// proven against `cmd.exe` fixtures in `farseer-runner` and
+    /// `farseer-manager`'s own tests, so this only needs to prove the HTTP
+    /// wiring around them: fire-and-forget returns a `run_id` before the run
+    /// finishes, the record picks it up, and a workspace directory exists.
+    /// Whether `claude` is actually installed on the machine running this
+    /// test is deliberately not asserted either way - `10` confirms it is on
+    /// the dev machine, but the row this test waits for reaches a terminal
+    /// state either way: `ok`/`failed` if it ran, `failed` immediately via
+    /// `ExecutableNotFound` if it did not.
+    #[tokio::test]
+    async fn instructing_a_cell_returns_a_run_id_that_becomes_a_real_queryable_run() {
+        let h = harness();
+        let (status, body) = h
+            .post(
+                "/v1/cells/zero/instruct",
+                json!({ "goal": "reply with just the word ok" }),
+            )
+            .await;
+        assert_eq!(status, StatusCode::ACCEPTED);
+        let run_id = body["run_id"].as_str().unwrap().to_string();
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        let row = loop {
+            let (status, row) = h.get(&format!("/v1/runs/{run_id}")).await;
+            if status == StatusCode::OK {
+                break row;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the run row never became queryable"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        };
+        assert_eq!(row["cell_id"], "zero");
+        assert_eq!(row["runner"], "claude-code");
+        assert!(
+            h.state.runs_dir.join(&run_id).is_dir(),
+            "a workspace directory should have been created for the run"
+        );
+
+        h.post(&format!("/v1/runs/{run_id}/cancel"), json!({}))
+            .await;
     }
 }

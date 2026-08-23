@@ -3,9 +3,9 @@
 A local-first agent orchestration runtime for Windows.
 One operator, one Rust binary, no required external services.
 
-**Status: the foundation is built and runs.**
-Twenty-seven decision tickets are closed, and the domain model, the record, the local API and the Claude Code runner are implemented against them.
-`farseer-manager` can run one hand-built worker contract against it and land the result in the record, but nothing inside farseer's own runtime calls that path yet - no cell, no roster, no HTTP verb reaches it.
+**Status: the foundation is built, and farseer can now execute a real instruction.**
+Twenty-seven decision tickets are closed, and the domain model, the record, the local API, the Claude Code runner and a first manager verb are implemented against them.
+`POST /v1/cells/{id}/instruct` runs a cell's manager against a goal and returns a `run_id` immediately; `POST /v1/runs/{id}/cancel` ends it early. Both are real, not stubs - the command half of the API is no longer absent.
 See [What runs today](#what-runs-today).
 
 ## The one idea
@@ -73,7 +73,7 @@ An external protocol is spoken at a boundary, never shaped into internals.
 │  ├─ farseer-store/   the record: one append-only SQLite log, memory, UI state
 │  ├─ farseer-api/     local HTTP plus SSE on 127.0.0.1, token and loopback guard
 │  ├─ farseer-runner/  the Claude Code runner: invocation, PATHEXT resolution, Job-Object spawn, stream-json mapping
-│  ├─ farseer-manager/ runs one worker contract against a runner and records what happened. Not yet called by anything
+│  ├─ farseer-manager/ runs one worker contract against a runner and records what happened. Called by `POST /v1/cells/{id}/instruct`
 │  └─ farseer/         the binary: runtime and CLI in one
 ├─ cells/              cell definitions, hand-written, in git
 │  ├─ zero.toml        cell #0, the builder harness
@@ -107,8 +107,11 @@ Binds `127.0.0.1` only, opens the record, loads the definitions, and writes its 
 | --- | --- |
 | `GET /v1/cells`, `/v1/cells/{id}` | read definitions. There is deliberately **no edit path** - they are files in git |
 | `POST /v1/cells/reload` | re-read from disk, reporting broken files rather than dying on them |
+| `POST /v1/cells/{id}/instruct` | run the cell's manager against a goal. Fire-and-forget: `202` with a `run_id` the moment the process spawns, per `16` |
 | `GET /v1/events?cell=&run=&since=` | the cursor read. `since` is exclusive, so a client resumes with no gap and no duplicate |
 | `GET /v1/stream` | the same query as SSE, honouring `Last-Event-ID`. Attach and replay are one call with a different cursor |
+| `GET /v1/runs/{id}` | a run's row: lifecycle, outcome, cost, tokens |
+| `POST /v1/runs/{id}/cancel` | end a run early. `404` if it already finished or never existed - idempotent, not a silent no-op |
 | `GET`/`PUT /v1/ui-state/{key}` | an opaque blob farseer never parses, so a canvas survives a restart. `413` above 1 MiB |
 | `GET /v1/analytics/{cost,intervention,rework,lessons}` | the four questions from [11 analytics questions](.scratch/farseer/issues/11-analytics-questions.md) |
 
@@ -117,9 +120,11 @@ A cross-site `Origin` is refused before the token is even looked at, because [16
 
 ### What is not built yet
 
-- **Anything inside farseer calling the manager.** `farseer-manager::run_worker` takes a `WorkerContract`, spawns it against the Claude Code runner, appends every progress signal as an event, finalizes the run row, and exposes a `LivenessHandle` any thread can poll for `18`/`05`'s `stalled`/`likely-hung` state while the run blocks - the watchdog only ever reports, per `05`; nothing auto-kills. What is missing is everything that would hand it a contract in the first place: no cell, no roster entry, no HTTP verb constructs one, and nothing reads a `LivenessHandle` yet either. `CancelToken::cancel` also does not yet produce `05`'s `Cancelled` outcome - see the crate's doc comment.
+- **Delegation.** `instruct` runs the cell's own **manager** runner directly against the goal - there is no manager loop yet to plan and delegate to workers, so `22`'s "an instruction delegates to one owner" is true only in the trivial sense that the owner is whichever manager was asked. A roster worker naming `codex` or `cursor-agent` (both hand-written cells' workers do) cannot run yet; only `claude-code` is wired, so only the manager - which is always `claude-code` in both shipped definitions - can execute.
 - **The other three manager verbs** (steer, re-scope, re-run), gated actions, and cell calls.
-- **Workspace lifecycle**, the Job Object reap and worktree teardown that `jobspike` and `wsspike` proved out - `run_worker` currently runs against whatever `cwd` it is given, not a fresh worktree.
+- **`05`'s `Cancelled` outcome.** `POST /v1/runs/{id}/cancel` ends the process, but its terminal result never arrives to say what happened, so the row reads `failed` rather than `cancelled` - see `farseer-manager`'s own doc comment.
+- **Workspace lifecycle**, the Job Object reap and worktree teardown that `jobspike` and `wsspike` proved out. `instruct` creates a fresh **plain directory** per run under `<record>/runs/`, regardless of what the cell's `workspace_strategy` says, and nothing tears it down afterward.
+- **A `LivenessHandle` reader.** `farseer-manager` exposes one per run; nothing in the API queries it yet, so `18`/`05`'s `stalled`/`likely-hung` state is not visible outside the process.
 - **The ACP server adapter** and the A2A endpoint, both decided and both later.
 
 The command half of the API is absent rather than stubbed: an endpoint that accepts an instruction nothing can execute would be a lie with a status code.

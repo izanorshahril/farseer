@@ -242,6 +242,8 @@ version = "0.1.0"
 dependencies = [
  "axum",
  "farseer-core",
+ "farseer-manager",
+ "farseer-runner",
  "farseer-store",
  "http-body-util",
  "serde",
