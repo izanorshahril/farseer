@@ -1,7 +1,7 @@
 # Working in this repository
 
 Twenty-seven decision tickets are closed, and the foundation is implemented against them: `farseer-core`, `farseer-store`, `farseer-api`, `farseer-runner`, and the `farseer` binary.
-`farseer-runner` currently holds only the pure pieces - stream-json mapping and `PATHEXT` resolution. Process spawning, the Job Object reap, and the manager loop are not built, so no run executes yet.
+`farseer-runner` can resolve, spawn and reap a Job-Object-supervised process and map its stream-json output, each proven independently. The manager loop that calls all three in sequence to actually drive a runner is not built, so no run executes yet.
 
 The spikes under `.scratch/farseer/spikes/` are **not** part of the workspace and are excluded from it.
 They are evidence, not a foundation to build on.

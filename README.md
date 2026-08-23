@@ -72,7 +72,7 @@ An external protocol is spoken at a boundary, never shaped into internals.
 │  ├─ farseer-core/    domain model: cells, policy, run state, scrubbing. Pure, no I/O
 │  ├─ farseer-store/   the record: one append-only SQLite log, memory, UI state
 │  ├─ farseer-api/     local HTTP plus SSE on 127.0.0.1, token and loopback guard
-│  ├─ farseer-runner/  runner adapters: stream-json mapping, PATHEXT resolution. Not yet wired to a process
+│  ├─ farseer-runner/  runner adapters: PATHEXT resolution, Job-Object-supervised spawn, stream-json mapping
 │  └─ farseer/         the binary: runtime and CLI in one
 ├─ cells/              cell definitions, hand-written, in git
 │  ├─ zero.toml        cell #0, the builder harness
@@ -116,7 +116,7 @@ A cross-site `Origin` is refused before the token is even looked at, because [16
 
 ### What is not built yet
 
-- **A runner adapter that spawns anything.** `farseer-runner` maps Claude Code's `stream-json` lines onto `05`'s activity/progress contract and resolves executables through `PATHEXT`, both pure and unit-tested - but nothing yet spawns the process, holds it in a Job Object, or feeds a line into the record. No run executes.
+- **A runner, wired up.** `farseer-runner` can now resolve an executable through `PATHEXT`, spawn it under a Job Object it cannot escape, read its stdout line by line, and map a Claude Code `stream-json` line onto `05`'s activity/progress contract - each piece unit-tested, the spawn and reap against a real child process. What is missing is the thing that calls all three in sequence: nothing yet constructs a `claude` invocation from a `WorkerContract`, drives `read_line` through `parse_line` into the record, or writes a steer instruction back. No run executes.
 - **The manager loop**, and with it the four manager verbs, gated actions, and cell calls.
 - **Workspace lifecycle**, the Job Object reap and worktree teardown that `jobspike` and `wsspike` proved out.
 - **The ACP server adapter** and the A2A endpoint, both decided and both later.

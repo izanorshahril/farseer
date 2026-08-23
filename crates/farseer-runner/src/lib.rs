@@ -7,12 +7,20 @@
 //! `05` wrote: activity and progress both pass, quota and cost arrive in band,
 //! and it is the operator's primary harness.
 //!
-//! What ships here: the line-by-line mapping from Claude Code's stream-json
-//! onto the contract, and `PATHEXT`-safe executable resolution. Both are pure
-//! and unit-tested. **Not yet built**: the Job Object process spawn itself and
-//! the ACP runner - `jobspike` proved the reap mechanism works, but wiring a
-//! live child process, a manager loop to drive it, and the record writes on
-//! the other end of [`claude_code::parse_line`] is a separate, larger seam.
+//! What ships here: `PATHEXT`-safe executable resolution
+//! ([`resolve`]), the line-by-line mapping from Claude Code's stream-json
+//! onto the contract ([`claude_code`]), and a Job-Object-supervised child
+//! process with piped, line-buffered I/O ([`spawn`], Windows only). Together
+//! these can run and reap one process and read its lines - the primitive a
+//! runner needs, not yet a runner. **Not yet built**: anything that actually
+//! drives one - the manager loop that constructs a `claude` invocation from a
+//! `WorkerContract`, feeds `spawn::SupervisedProcess::read_line` through
+//! `claude_code::parse_line` into the record, and writes steer instructions
+//! back through `write_line` - plus the ACP runner `20` chose as the default
+//! path.
 
 pub mod claude_code;
 pub mod resolve;
+
+#[cfg(windows)]
+pub mod spawn;
