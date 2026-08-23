@@ -204,6 +204,8 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/v1/stream", get(stream_events))
         .route("/v1/runs/{run_id}", get(get_run))
         .route("/v1/runs/{run_id}/cancel", post(cancel_run))
+        .route("/v1/runs/{run_id}/rerun", post(rerun_run))
+        .route("/v1/runs/{run_id}/rescope", post(rescope_run))
         .route("/v1/ui-state/{key}", get(get_ui_state).put(put_ui_state))
         .route("/v1/analytics/cost", get(analytics_cost))
         .route("/v1/analytics/intervention", get(analytics_intervention))
@@ -266,6 +268,8 @@ enum ApiError {
     Store(#[from] StoreError),
     #[error("could not prepare a workspace for this run: {0}")]
     Workspace(String),
+    #[error("record holds an unreadable {0}")]
+    Corrupt(&'static str),
 }
 
 impl IntoResponse for ApiError {
@@ -279,6 +283,7 @@ impl IntoResponse for ApiError {
             Self::Store(StoreError::UiStateTooLarge { .. }) => StatusCode::PAYLOAD_TOO_LARGE,
             Self::Store(_) => StatusCode::INTERNAL_SERVER_ERROR,
             Self::Workspace(_) => StatusCode::INTERNAL_SERVER_ERROR,
+            Self::Corrupt(_) => StatusCode::INTERNAL_SERVER_ERROR,
         };
         (
             status,
@@ -390,6 +395,21 @@ async fn instruct_cell(
         budget: Budget::default(),
         definition_of_done: String::new(),
     });
+    let run_id = spawn_run(&state, contract)?;
+
+    Ok((
+        StatusCode::ACCEPTED,
+        Json(InstructResponse {
+            run_id: run_id.to_string(),
+        }),
+    ))
+}
+
+/// Shared by `instruct`, `rerun` and `rescope`: create the workspace
+/// synchronously (so a failure is a `500` before the caller ever gets a
+/// `run_id` to poll), then hand `contract` to `run_worker` on a blocking
+/// task and tear the workspace down once it returns.
+fn spawn_run(state: &Arc<AppState>, contract: WorkerContract) -> ApiResult<RunId> {
     let run_id = contract.run_id;
     let name = run_id.to_string();
 
@@ -397,11 +417,11 @@ async fn instruct_cell(
     // `PlainDirectory` cell gets exactly that. Both are created synchronously
     // here, before the `202` goes out, so a workspace failure is a `500`
     // rather than a run that silently never starts.
-    let repo_for_teardown = match cell.workspace_strategy {
+    let repo_for_teardown = match contract.workspace {
         WorkspaceStrategy::Worktree => Some(state.repo_root.clone()),
         WorkspaceStrategy::PlainDirectory => None,
     };
-    let cwd = match cell.workspace_strategy {
+    let cwd = match contract.workspace {
         WorkspaceStrategy::Worktree => {
             farseer_runner::workspace::create_worktree(&state.repo_root, &state.runs_dir, &name)
                 .map_err(|e| ApiError::Workspace(e.to_string()))?
@@ -414,7 +434,7 @@ async fn instruct_cell(
     };
 
     let thresholds = state.thresholds;
-    let background_state = Arc::clone(&state);
+    let background_state = Arc::clone(state);
     tokio::task::spawn_blocking(move || {
         let result = farseer_manager::run_worker(
             background_state.as_ref(),
@@ -447,12 +467,7 @@ async fn instruct_cell(
         }
     });
 
-    Ok((
-        StatusCode::ACCEPTED,
-        Json(InstructResponse {
-            run_id: run_id.to_string(),
-        }),
-    ))
+    Ok(run_id)
 }
 
 /// `05`'s simplest manager verb: end the process, no plan, no re-scope.
@@ -475,6 +490,99 @@ async fn cancel_run(
         }
         None => Err(ApiError::NotFound("run")),
     }
+}
+
+#[derive(Debug, Default, Deserialize)]
+pub struct RescopeBody {
+    /// The field being changed. `05`: re-scope is a new run because a
+    /// contract field changed; a run's own goal is the one an operator can
+    /// actually reach here today. Omit to leave it as it was - that is
+    /// `rerun`, not `rescope`, so this endpoint refuses an unchanged goal.
+    pub goal: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct RespawnResponse {
+    pub run_id: String,
+    pub parent_run_id: String,
+}
+
+/// Reconstructs the `WorkerContractSpec` a past run was sealed with, from the
+/// `run_queued` event `farseer_manager::run_worker` writes before spawning
+/// anything. `05`: immutability is what makes this answer one answer - the
+/// run row itself never carried the goal or the grants, so this event is the
+/// only place a re-run or re-scope can read them back from.
+fn original_contract(state: &AppState, run_id: RunId) -> ApiResult<WorkerContractSpec> {
+    let events = {
+        let store = state.store();
+        store.scan(0, 5_000, &ScanFilter::run(run_id))?
+    };
+    let queued = events
+        .iter()
+        .find(|e| e.kind.as_str() == farseer_core::EventKind::RUN_QUEUED)
+        .ok_or(ApiError::NotFound("run"))?;
+    serde_json::from_value(queued.payload.clone())
+        .map_err(|_| ApiError::Corrupt("run_queued event"))
+}
+
+/// `05`'s **re-run**: same contract, fresh run, fresh workspace. `16`:
+/// operator-initiated re-run leaves an event behind - here, the
+/// `rescoped_from` edge `11`'s rework-depth query already walks, so a chain
+/// of re-runs reads exactly like a chain of re-scopes to that analytics query.
+async fn rerun_run(
+    State(state): State<Arc<AppState>>,
+    UrlPath(run_id): UrlPath<String>,
+) -> ApiResult<(StatusCode, Json<RespawnResponse>)> {
+    let parent_run_id: RunId = run_id.parse().map_err(|_| ApiError::NotFound("run"))?;
+    let mut spec = original_contract(&state, parent_run_id)?;
+    spec.run_id = RunId::new();
+    respawn(&state, spec, parent_run_id).await
+}
+
+/// `05`'s **re-scope**: a new run against the same task, with a changed
+/// contract field. Only `goal` is reachable here today - `tool_grants`,
+/// `autonomy_ceiling` and the rest come from the cell definition at
+/// `instruct` time, not from anything an operator can override per run yet.
+async fn rescope_run(
+    State(state): State<Arc<AppState>>,
+    UrlPath(run_id): UrlPath<String>,
+    Json(body): Json<RescopeBody>,
+) -> ApiResult<(StatusCode, Json<RespawnResponse>)> {
+    let parent_run_id: RunId = run_id.parse().map_err(|_| ApiError::NotFound("run"))?;
+    let mut spec = original_contract(&state, parent_run_id)?;
+    let Some(goal) = body.goal else {
+        return Err(ApiError::BadRequest(
+            "rescope needs a changed field - pass goal, or use rerun to repeat the same contract",
+        ));
+    };
+    if goal.trim().is_empty() {
+        return Err(ApiError::BadRequest("goal must not be empty"));
+    }
+    if goal == spec.goal {
+        return Err(ApiError::BadRequest(
+            "goal is unchanged - use rerun, not rescope, to repeat the same contract",
+        ));
+    }
+    spec.run_id = RunId::new();
+    spec.goal = goal;
+    respawn(&state, spec, parent_run_id).await
+}
+
+async fn respawn(
+    state: &Arc<AppState>,
+    spec: WorkerContractSpec,
+    parent_run_id: RunId,
+) -> ApiResult<(StatusCode, Json<RespawnResponse>)> {
+    let run_id = spec.run_id;
+    state.store().record_rescope(run_id, parent_run_id)?;
+    let run_id = spawn_run(state, WorkerContract::seal(spec))?;
+    Ok((
+        StatusCode::ACCEPTED,
+        Json(RespawnResponse {
+            run_id: run_id.to_string(),
+            parent_run_id: parent_run_id.to_string(),
+        }),
+    ))
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -829,6 +937,27 @@ runner = "claude-code"
                 .insert(header::CONTENT_TYPE, "application/json".parse().unwrap());
             self.send(request).await
         }
+
+        /// Cancels immediately, then polls until the run row reads
+        /// `finished` - bounding how long a real `claude` invocation (if
+        /// installed) gets to run before a test asserts against a terminal
+        /// row.
+        async fn cancel_and_wait_for_finished(&self, run_id: &str) -> serde_json::Value {
+            self.post(&format!("/v1/runs/{run_id}/cancel"), json!({}))
+                .await;
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+            loop {
+                let (status, row) = self.get(&format!("/v1/runs/{run_id}")).await;
+                if status == StatusCode::OK && row["lifecycle"] == "finished" {
+                    return row;
+                }
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "the run never reached a terminal state"
+                );
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            }
+        }
     }
 
     #[tokio::test]
@@ -1111,25 +1240,7 @@ runner = "claude-code"
         assert_eq!(status, StatusCode::ACCEPTED);
         let run_id = body["run_id"].as_str().unwrap().to_string();
 
-        // Cancel immediately, before polling for anything - this bounds how
-        // long a real `claude` invocation (if `claude` happens to be
-        // installed) gets to run, and it means the row this test waits for
-        // is guaranteed to reach a terminal state quickly either way.
-        h.post(&format!("/v1/runs/{run_id}/cancel"), json!({}))
-            .await;
-
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
-        let row = loop {
-            let (status, row) = h.get(&format!("/v1/runs/{run_id}")).await;
-            if status == StatusCode::OK && row["lifecycle"] == "finished" {
-                break row;
-            }
-            assert!(
-                std::time::Instant::now() < deadline,
-                "the run never reached a terminal state"
-            );
-            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-        };
+        let row = h.cancel_and_wait_for_finished(&run_id).await;
         assert_eq!(row["cell_id"], "zero");
         assert_eq!(row["runner"], "claude-code");
 
@@ -1146,5 +1257,96 @@ runner = "claude-code"
             );
             tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         }
+    }
+
+    #[tokio::test]
+    async fn rerunning_an_unknown_run_is_a_404() {
+        let h = harness();
+        assert_eq!(
+            h.post(&format!("/v1/runs/{}/rerun", RunId::new()), json!({}))
+                .await
+                .0,
+            StatusCode::NOT_FOUND
+        );
+    }
+
+    #[tokio::test]
+    async fn rescoping_without_a_goal_is_refused() {
+        let h = harness();
+        let (_, body) = h
+            .post("/v1/cells/zero/instruct", json!({ "goal": "first goal" }))
+            .await;
+        let run_id = body["run_id"].as_str().unwrap();
+        h.cancel_and_wait_for_finished(run_id).await;
+
+        let (status, _) = h
+            .post(&format!("/v1/runs/{run_id}/rescope"), json!({}))
+            .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn rescoping_with_the_unchanged_goal_is_refused() {
+        let h = harness();
+        let (_, body) = h
+            .post("/v1/cells/zero/instruct", json!({ "goal": "same goal" }))
+            .await;
+        let run_id = body["run_id"].as_str().unwrap();
+        h.cancel_and_wait_for_finished(run_id).await;
+
+        let (status, _) = h
+            .post(
+                &format!("/v1/runs/{run_id}/rescope"),
+                json!({ "goal": "same goal" }),
+            )
+            .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn rerun_and_rescope_start_a_fresh_run_linked_to_the_original() {
+        let h = harness();
+        let (_, body) = h
+            .post(
+                "/v1/cells/zero/instruct",
+                json!({ "goal": "original goal" }),
+            )
+            .await;
+        let original_id = body["run_id"].as_str().unwrap().to_string();
+        h.cancel_and_wait_for_finished(&original_id).await;
+
+        let (status, body) = h
+            .post(&format!("/v1/runs/{original_id}/rerun"), json!({}))
+            .await;
+        assert_eq!(status, StatusCode::ACCEPTED);
+        let rerun_id = body["run_id"].as_str().unwrap().to_string();
+        assert_ne!(rerun_id, original_id, "rerun mints a fresh run id");
+        assert_eq!(body["parent_run_id"], original_id);
+        h.cancel_and_wait_for_finished(&rerun_id).await;
+
+        let (status, body) = h
+            .post(
+                &format!("/v1/runs/{original_id}/rescope"),
+                json!({ "goal": "a genuinely different goal" }),
+            )
+            .await;
+        assert_eq!(status, StatusCode::ACCEPTED);
+        let rescope_id = body["run_id"].as_str().unwrap().to_string();
+        h.cancel_and_wait_for_finished(&rescope_id).await;
+
+        // `11`'s rework-depth query walks the same `rescoped_from` edge both
+        // verbs write - proof the link landed where analytics already reads
+        // from, not a parallel record only this endpoint understands.
+        let (_, rework) = h.get("/v1/analytics/rework").await;
+        let depths: Vec<i64> = rework
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|row| row["depth"].as_i64().unwrap())
+            .collect();
+        assert!(
+            depths.contains(&2),
+            "two chains of depth 2 (original -> rerun, original -> rescope) should be visible: {rework}"
+        );
     }
 }

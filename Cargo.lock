@@ -275,6 +275,7 @@ dependencies = [
  "farseer-core",
  "farseer-runner",
  "farseer-store",
+ "serde_json",
  "tempfile",
  "thiserror",
 ]

@@ -48,7 +48,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use farseer_core::run::{ActivityClock, Liveness, LivenessThresholds, WorkerContract};
-use farseer_core::{Actor, NewEvent, Outcome, Seq};
+use farseer_core::{Actor, EventKind, NewEvent, Outcome, Seq};
 use farseer_runner::claude_code::RunnerSignal;
 use farseer_runner::drive::drive;
 use farseer_runner::invocation::build_args;
@@ -291,6 +291,21 @@ pub fn run_worker(
 ) -> Result<RunReport, ManagerError> {
     let started_ts = now_ms();
     sink.upsert_run(&row(contract, None, 0, 0, started_ts, None))?;
+    // `05`: immutability is what makes "what was this worker allowed to do"
+    // have one answer after the fact. The run row does not carry the goal or
+    // the grants, so this event is the only place that answer survives the
+    // process exiting - and it is what a re-run or re-scope reads back to
+    // reconstruct the contract. Actor is `Operator` because every caller
+    // today is HTTP-instructed; this hardcodes the current truth rather than
+    // guessing at a manager-attributed one that does not exist yet.
+    sink.append(&NewEvent::new(
+        contract.cell_id.clone(),
+        contract.run_id,
+        EventKind::new(EventKind::RUN_QUEUED),
+        Actor::Operator,
+        started_ts,
+        serde_json::to_value(contract).unwrap_or(serde_json::Value::Null),
+    ))?;
 
     let result = start_worker(contract, cwd, thresholds).and_then(|started| {
         on_started(started.cancel_token(), started.liveness_handle());
@@ -480,6 +495,52 @@ mod tests {
         assert_eq!(row.outcome.as_deref(), Some("failed"));
         assert!(row.finished_ts.is_some());
         assert!(row.started_ts < row.finished_ts.unwrap());
+    }
+
+    #[test]
+    fn run_worker_records_the_sealed_contract_as_a_run_queued_event_even_on_failure() {
+        // `05`: immutability is what makes "what was this worker allowed to
+        // do" answerable after the fact - but nothing durable carried the
+        // goal or the grants until this event. Written even on a failure
+        // path, since the record should say what was attempted regardless
+        // of what happened next.
+        let store = Store::open_in_memory().unwrap();
+        let spec = WorkerContractSpec {
+            run_id: RunId::new(),
+            task_id: TaskId::new(),
+            cell_id: CellId::new("zero"),
+            goal: "reconstruct me later".into(),
+            workspace: WorkspaceStrategy::PlainDirectory,
+            runner: "not-a-real-runner".into(),
+            tool_grants: vec!["shell".into()],
+            autonomy_ceiling: Irreversibility::Reversible,
+            budget: Budget::default(),
+            definition_of_done: "done".into(),
+        };
+        let run_id = spec.run_id;
+        let contract = WorkerContract::seal(spec);
+
+        let _ = run_worker(
+            &store,
+            &contract,
+            &std::env::temp_dir(),
+            LivenessThresholds::default(),
+            || 1,
+            |_, _| {},
+        );
+
+        let events = store
+            .scan(0, 10, &farseer_store::ScanFilter::run(run_id))
+            .unwrap();
+        let queued = events
+            .iter()
+            .find(|e| e.kind.as_str() == EventKind::RUN_QUEUED)
+            .expect("a run_queued event should have been written");
+        assert_eq!(queued.payload["goal"], "reconstruct me later");
+        assert_eq!(queued.payload["tool_grants"][0], "shell");
+        let rebuilt: WorkerContractSpec = serde_json::from_value(queued.payload.clone()).unwrap();
+        assert_eq!(rebuilt.goal, contract.goal);
+        assert_eq!(rebuilt.definition_of_done, contract.definition_of_done);
     }
 
     #[test]

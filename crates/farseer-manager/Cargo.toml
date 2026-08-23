@@ -10,6 +10,7 @@ description = "The manager loop's first slice: run one worker contract against t
 farseer-core = { workspace = true }
 farseer-store = { workspace = true }
 farseer-runner = { workspace = true }
+serde_json = { workspace = true }
 thiserror = { workspace = true }
 
 [dev-dependencies]
