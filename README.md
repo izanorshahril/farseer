@@ -117,9 +117,8 @@ A cross-site `Origin` is refused before the token is even looked at, because [16
 
 ### What is not built yet
 
-- **Anything inside farseer calling the manager.** `farseer-manager::run_worker` takes a `WorkerContract`, spawns it against the Claude Code runner, appends every progress signal as an event, and finalizes the run row with its outcome and cost - proven against real spawned processes, cancellable from another thread mid-run. What is missing is everything that would hand it a contract in the first place: no cell, no roster entry, no HTTP verb constructs one. `CancelToken::cancel` also does not yet produce `05`'s `Cancelled` outcome - see the crate's doc comment.
+- **Anything inside farseer calling the manager.** `farseer-manager::run_worker` takes a `WorkerContract`, spawns it against the Claude Code runner, appends every progress signal as an event, finalizes the run row, and exposes a `LivenessHandle` any thread can poll for `18`/`05`'s `stalled`/`likely-hung` state while the run blocks - the watchdog only ever reports, per `05`; nothing auto-kills. What is missing is everything that would hand it a contract in the first place: no cell, no roster entry, no HTTP verb constructs one, and nothing reads a `LivenessHandle` yet either. `CancelToken::cancel` also does not yet produce `05`'s `Cancelled` outcome - see the crate's doc comment.
 - **The other three manager verbs** (steer, re-scope, re-run), gated actions, and cell calls.
-- **The liveness watchdog wired to a real run.** `ActivityClock` and `CancelToken` both exist and both work; nothing yet polls the one to drive the other while a run is blocked mid-read.
 - **Workspace lifecycle**, the Job Object reap and worktree teardown that `jobspike` and `wsspike` proved out - `run_worker` currently runs against whatever `cwd` it is given, not a fresh worktree.
 - **The ACP server adapter** and the A2A endpoint, both decided and both later.
 

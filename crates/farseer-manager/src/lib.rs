@@ -4,14 +4,16 @@
 //!
 //! **What this is not.** `05`'s four manager verbs - steer, re-scope, cancel,
 //! re-run - are not implemented here; this is the synchronous execution path
-//! one of them will eventually call. There is no watchdog thread either:
-//! [`StartedWorker::run_to_completion`] blocks inside `read_line`, so nothing
-//! can notice a stall *while blocked* without a second thread polling
-//! wall-clock time against the last-activity timestamp this crate does not
-//! yet keep anywhere durable. [`farseer_runner::spawn::CancelToken`] is the
-//! seam that watchdog would call into - it already works from another
-//! thread, proven in `farseer-runner`'s own tests - so adding the watchdog
-//! is wiring, not new mechanism.
+//! one of them will eventually call.
+//!
+//! **The watchdog only reports.** `18` and `05` are explicit: `120s` marks a
+//! run `stalled`, `600s` flags `likely-hung`, and there is **no auto-kill** -
+//! a run reasoning for twenty minutes is not a bug to correct by force. So
+//! [`LivenessHandle`] answers "how long has this run been silent", queryable
+//! from any thread while [`StartedWorker::run_to_completion`] blocks inside
+//! `read_line` on another one; nothing in this crate ever calls
+//! [`CancelToken`] on the watchdog's behalf. Only a human, through a manager
+//! verb this crate does not implement yet, does that.
 //!
 //! **`CancelToken::cancel` does not yet produce `05`'s `Cancelled` outcome.**
 //! Closing the job ends the process without its terminal `result` line ever
@@ -24,8 +26,11 @@
 //! exactly the manager-verb wiring this crate does not have yet.
 
 use std::path::Path;
+use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
-use farseer_core::{Actor, NewEvent, Outcome, run::WorkerContract};
+use farseer_core::run::{ActivityClock, Liveness, LivenessThresholds, WorkerContract};
+use farseer_core::{Actor, NewEvent, Outcome};
 use farseer_runner::claude_code::RunnerSignal;
 use farseer_runner::drive::drive;
 use farseer_runner::invocation::build_args;
@@ -63,17 +68,66 @@ pub struct RunReport {
 /// value precisely so it cannot be called twice on the same process.
 pub struct StartedWorker {
     proc: SupervisedProcess,
+    activity: Arc<Mutex<ActivityClock>>,
+    monotonic_start: Instant,
+    thresholds: LivenessThresholds,
+}
+
+/// A cloneable, read-only view onto a run's liveness - `18`/`05`'s watchdog,
+/// minus the kill. Queryable from any thread: the clock behind it is shared
+/// with whichever thread is inside [`StartedWorker::run_to_completion`], so a
+/// caller does not need to wait for that call to return to ask how it's
+/// doing.
+#[derive(Clone)]
+pub struct LivenessHandle {
+    activity: Arc<Mutex<ActivityClock>>,
+    monotonic_start: Instant,
+    thresholds: LivenessThresholds,
+}
+
+impl LivenessHandle {
+    pub fn liveness(&self) -> Liveness {
+        let now = self.monotonic_start.elapsed().as_secs();
+        self.activity
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .liveness(now, &self.thresholds)
+    }
 }
 
 impl StartedWorker {
-    pub fn spawn(exe: &Path, args: &[String], cwd: &Path) -> Result<Self, ManagerError> {
+    /// `thresholds` per `05`: "both configurable, and neither kills
+    /// anything" - the second half is enforced by this crate never calling
+    /// [`CancelToken`] on the watchdog's own initiative, not by anything in
+    /// the type here.
+    pub fn spawn(
+        exe: &Path,
+        args: &[String],
+        cwd: &Path,
+        thresholds: LivenessThresholds,
+    ) -> Result<Self, ManagerError> {
         Ok(Self {
             proc: SupervisedProcess::spawn(exe, args, cwd)?,
+            activity: Arc::new(Mutex::new(ActivityClock::started_at(0))),
+            monotonic_start: Instant::now(),
+            thresholds,
         })
     }
 
     pub fn cancel_token(&self) -> CancelToken {
         self.proc.cancel_token()
+    }
+
+    /// Fetch before calling the blocking `run_to_completion` - the handle
+    /// has to exist before it might be queried, and it keeps working after
+    /// `run_to_completion` consumes `self`, since the clock behind it is
+    /// shared rather than owned.
+    pub fn liveness_handle(&self) -> LivenessHandle {
+        LivenessHandle {
+            activity: Arc::clone(&self.activity),
+            monotonic_start: self.monotonic_start,
+            thresholds: self.thresholds,
+        }
     }
 
     /// Blocks until the process closes stdout. Every progress signal becomes
@@ -91,8 +145,18 @@ impl StartedWorker {
         let mut report = None;
         let mut store_err = None;
         let cancel_on_store_failure = self.proc.cancel_token();
+        let activity = Arc::clone(&self.activity);
+        let monotonic_start = self.monotonic_start;
 
         drive(&mut self.proc, |parsed| {
+            // `05`: any bytes at all is activity, parse failure or not - the
+            // process is still there regardless of what the line meant.
+            let now = monotonic_start.elapsed().as_secs();
+            activity
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .observe_activity(now);
+
             if store_err.is_some() {
                 // Already failing the record; let the cancel below end the
                 // child rather than spending more of its run on output
@@ -144,12 +208,16 @@ impl StartedWorker {
 
 /// `20` chose two runner implementations for v1; only `claude-code` is wired
 /// to a process yet, so it is the only value `contract.runner` may hold here.
-pub fn start_worker(contract: &WorkerContract, cwd: &Path) -> Result<StartedWorker, ManagerError> {
+pub fn start_worker(
+    contract: &WorkerContract,
+    cwd: &Path,
+    thresholds: LivenessThresholds,
+) -> Result<StartedWorker, ManagerError> {
     match contract.runner.as_str() {
         "claude-code" => {
             let exe = resolve("claude")
                 .ok_or_else(|| ManagerError::ExecutableNotFound("claude".into()))?;
-            StartedWorker::spawn(&exe, &build_args(contract), cwd)
+            StartedWorker::spawn(&exe, &build_args(contract), cwd, thresholds)
         }
         other => Err(ManagerError::UnsupportedRunner(other.to_string())),
     }
@@ -164,12 +232,13 @@ pub fn run_worker(
     store: &Store,
     contract: &WorkerContract,
     cwd: &Path,
+    thresholds: LivenessThresholds,
     mut now_ms: impl FnMut() -> i64,
 ) -> Result<RunReport, ManagerError> {
     let started_ts = now_ms();
     store.upsert_run(&row(contract, None, 0, 0, started_ts, None))?;
 
-    let result = start_worker(contract, cwd)
+    let result = start_worker(contract, cwd, thresholds)
         .and_then(|started| started.run_to_completion(store, contract, &mut now_ms));
 
     let finished_ts = now_ms();
@@ -262,6 +331,7 @@ mod tests {
             Path::new(r"C:\Windows\System32\cmd.exe"),
             &["/c".into(), "type".into(), path.to_str().unwrap().into()],
             &std::env::current_dir().unwrap(),
+            LivenessThresholds::default(),
         )
         .unwrap();
         (dir, started)
@@ -336,10 +406,16 @@ mod tests {
         let contract = WorkerContract::seal(spec);
 
         let mut tick = 100i64;
-        let result = run_worker(&store, &contract, &std::env::temp_dir(), || {
-            tick += 1;
-            tick
-        });
+        let result = run_worker(
+            &store,
+            &contract,
+            &std::env::temp_dir(),
+            LivenessThresholds::default(),
+            || {
+                tick += 1;
+                tick
+            },
+        );
 
         assert!(matches!(result, Err(ManagerError::UnsupportedRunner(_))));
         let row = store.run(run_id).unwrap().unwrap();
@@ -356,6 +432,7 @@ mod tests {
             Path::new(r"C:\Windows\System32\cmd.exe"),
             &["/c".into(), "ping -n 30 127.0.0.1 >nul".into()],
             &std::env::current_dir().unwrap(),
+            LivenessThresholds::default(),
         )
         .unwrap();
         let token = started.cancel_token();
@@ -366,5 +443,49 @@ mod tests {
 
         let result = started.run_to_completion(&store, &contract, || 1);
         assert!(matches!(result, Err(ManagerError::NoResult)));
+    }
+
+    #[test]
+    fn a_silent_process_goes_stalled_then_likely_hung_from_elapsed_time_alone() {
+        // `ping`'s own output is redirected to `nul` inside the child, so
+        // zero lines ever reach `drive` - this tests the handle purely
+        // against wall-clock time, with `run_to_completion` never called.
+        let started = StartedWorker::spawn(
+            Path::new(r"C:\Windows\System32\cmd.exe"),
+            &["/c".into(), "ping -n 30 127.0.0.1 >nul".into()],
+            &std::env::current_dir().unwrap(),
+            LivenessThresholds {
+                stalled_secs: 0,
+                likely_hung_secs: 1,
+            },
+        )
+        .unwrap();
+        let handle = started.liveness_handle();
+
+        assert_eq!(
+            handle.liveness(),
+            Liveness::Stalled,
+            "0s: past the stalled threshold immediately, not yet likely-hung"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+        assert_eq!(handle.liveness(), Liveness::LikelyHung);
+
+        started.cancel_token().cancel();
+    }
+
+    #[test]
+    fn a_real_line_keeps_the_handle_live_after_the_run_finishes() {
+        let store = Store::open_in_memory().unwrap();
+        let contract = contract();
+        let (_dir, started) = fixture_process(&[r#"{"type":"result","subtype":"success"}"#]);
+        let handle = started.liveness_handle();
+
+        started.run_to_completion(&store, &contract, || 1).unwrap();
+
+        assert_eq!(
+            handle.liveness(),
+            Liveness::Live,
+            "the result line was activity moments ago, well inside the default 120s threshold"
+        );
     }
 }
