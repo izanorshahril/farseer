@@ -267,6 +267,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "farseer-runner"
+version = "0.1.0"
+dependencies = [
+ "farseer-core",
+ "serde",
+ "serde_json",
+ "thiserror",
+]
+
+[[package]]
 name = "farseer-store"
 version = "0.1.0"
 dependencies = [

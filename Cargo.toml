@@ -13,6 +13,7 @@ license = "MIT"
 farseer-core = { path = "crates/farseer-core" }
 farseer-store = { path = "crates/farseer-store" }
 farseer-api = { path = "crates/farseer-api" }
+farseer-runner = { path = "crates/farseer-runner" }
 
 anyhow = "1.0.100"
 axum = "0.8.6"
