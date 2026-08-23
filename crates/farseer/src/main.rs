@@ -91,11 +91,13 @@ async fn run(cells: PathBuf, record: PathBuf, port: u16) -> Result<()> {
         .join("runs");
     std::fs::create_dir_all(&runs_dir)
         .with_context(|| format!("creating {}", runs_dir.display()))?;
+    let repo_root = std::env::current_dir().context("reading the current directory")?;
     let state = Arc::new(AppState::new(
         store,
         &cells,
         RuntimeToken::generate(),
         runs_dir,
+        repo_root,
     ));
 
     let report = state.reload();

@@ -32,7 +32,7 @@ use axum::{Json, Router, middleware};
 use serde::{Deserialize, Serialize};
 
 use farseer_core::policy::Budget;
-use farseer_core::run::{WorkerContract, WorkerContractSpec};
+use farseer_core::run::{WorkerContract, WorkerContractSpec, WorkspaceStrategy};
 use farseer_core::{CellDefinition, CellId, LivenessThresholds, NewEvent, RunId, Seq, TaskId};
 use farseer_manager::RunSink;
 use farseer_runner::spawn::CancelToken;
@@ -60,11 +60,17 @@ pub struct AppState {
     cells_dir: PathBuf,
     token: RuntimeToken,
     thresholds: LivenessThresholds,
-    /// Where a run's process is spawned. **Not a git worktree yet** - `04`'s
-    /// isolation strategy is proven in `wsspike` but not wired here, so every
-    /// run gets a fresh plain directory regardless of what the cell's own
-    /// `workspace_strategy` says. Documented rather than silently ignored.
+    /// Where a run's workspace is created - a plain directory under here for
+    /// `WorkspaceStrategy::PlainDirectory`, a `git worktree` under here for
+    /// `Worktree`.
     runs_dir: PathBuf,
+    /// The git repository a `Worktree`-strategy cell's runs are worktrees
+    /// *of*. `13` deliberately keeps no git flag on `CellDefinition`, so this
+    /// has to come from somewhere else - the runtime's own working directory
+    /// is the only unambiguous repo available without inventing a field. In
+    /// practice this is the farseer checkout itself, which is exactly what
+    /// cell zero - farseer's own builder harness - is for.
+    repo_root: PathBuf,
     /// In-flight runs' cancel tokens, keyed by run id. A run removes its own
     /// entry when it finishes, successfully or not.
     runs: Mutex<HashMap<RunId, CancelToken>>,
@@ -94,6 +100,7 @@ impl AppState {
         cells_dir: impl Into<PathBuf>,
         token: RuntimeToken,
         runs_dir: impl Into<PathBuf>,
+        repo_root: impl Into<PathBuf>,
     ) -> Self {
         Self {
             store: Mutex::new(store),
@@ -102,6 +109,7 @@ impl AppState {
             token,
             thresholds: LivenessThresholds::default(),
             runs_dir: runs_dir.into(),
+            repo_root: repo_root.into(),
             runs: Mutex::new(HashMap::new()),
         }
     }
@@ -257,7 +265,7 @@ enum ApiError {
     #[error(transparent)]
     Store(#[from] StoreError),
     #[error("could not prepare a workspace for this run: {0}")]
-    Workspace(std::io::Error),
+    Workspace(String),
 }
 
 impl IntoResponse for ApiError {
@@ -383,11 +391,27 @@ async fn instruct_cell(
         definition_of_done: String::new(),
     });
     let run_id = contract.run_id;
+    let name = run_id.to_string();
 
-    // `04`'s `worktree` strategy is proven but not wired here - every run
-    // gets a fresh **plain** directory regardless of what the cell asked for.
-    let cwd = state.runs_dir.join(run_id.to_string());
-    std::fs::create_dir_all(&cwd).map_err(ApiError::Workspace)?;
+    // `04`: a `Worktree` cell gets a real `git worktree`, off `repo_root`; a
+    // `PlainDirectory` cell gets exactly that. Both are created synchronously
+    // here, before the `202` goes out, so a workspace failure is a `500`
+    // rather than a run that silently never starts.
+    let repo_for_teardown = match cell.workspace_strategy {
+        WorkspaceStrategy::Worktree => Some(state.repo_root.clone()),
+        WorkspaceStrategy::PlainDirectory => None,
+    };
+    let cwd = match cell.workspace_strategy {
+        WorkspaceStrategy::Worktree => {
+            farseer_runner::workspace::create_worktree(&state.repo_root, &state.runs_dir, &name)
+                .map_err(|e| ApiError::Workspace(e.to_string()))?
+        }
+        WorkspaceStrategy::PlainDirectory => {
+            let dir = state.runs_dir.join(&name);
+            std::fs::create_dir_all(&dir).map_err(|e| ApiError::Workspace(e.to_string()))?;
+            dir
+        }
+    };
 
     let thresholds = state.thresholds;
     let background_state = Arc::clone(&state);
@@ -407,6 +431,20 @@ async fn instruct_cell(
         // `Failed` on any error before returning it, so there is nothing this
         // background task needs to do with `result` beyond letting it drop.
         drop(result);
+
+        // `04`'s ordering constraint is already satisfied here: `run_worker`
+        // has returned, which only happens once the process's stdout pipe
+        // closed, which happens at or after process exit - the cwd handle
+        // that blocks a delete is gone by construction, not by a race this
+        // code has to win.
+        if let Err(e) =
+            farseer_runner::workspace::teardown_workspace(&cwd, repo_for_teardown.as_deref())
+        {
+            // `04`: a workspace that survives the backoff is the operator's
+            // problem to see, not this task's to keep retrying forever. No
+            // record surface for it yet - see the README's open gaps.
+            eprintln!("workspace teardown for run {run_id} did not complete: {e}");
+        }
     });
 
     Ok((
@@ -674,6 +712,7 @@ pub fn validate_dir(dir: &Path) -> ReloadReport {
         dir,
         RuntimeToken::generate(),
         std::env::temp_dir(),
+        std::env::temp_dir(),
     );
     state.reload()
 }
@@ -703,18 +742,43 @@ runner = "claude-code"
         state: Arc<AppState>,
         _dir: tempfile::TempDir,
         _runs_dir: tempfile::TempDir,
+        _repo: tempfile::TempDir,
+    }
+
+    /// A repo with one commit, exactly as `farseer-runner`'s own `workspace`
+    /// tests need one - `git worktree add` needs a valid ref to detach at.
+    fn git_repo_with_a_commit() -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        let git = |args: &[&str]| {
+            let status = std::process::Command::new("git")
+                .arg("-C")
+                .arg(dir.path())
+                .args(args)
+                .status()
+                .unwrap();
+            assert!(status.success(), "git {args:?} failed");
+        };
+        git(&["init", "--quiet"]);
+        git(&["config", "user.email", "test@example.invalid"]);
+        git(&["config", "user.name", "test"]);
+        std::fs::write(dir.path().join("README.md"), "fixture\n").unwrap();
+        git(&["add", "README.md"]);
+        git(&["commit", "--quiet", "-m", "initial"]);
+        dir
     }
 
     fn harness() -> Harness {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("zero.toml"), CELL).unwrap();
         let runs_dir = tempfile::tempdir().unwrap();
+        let repo = git_repo_with_a_commit();
         let token = RuntimeToken::generate();
         let state = Arc::new(AppState::new(
             Store::open_in_memory().unwrap(),
             dir.path(),
             token.clone(),
             runs_dir.path(),
+            repo.path(),
         ));
         state.reload();
         Harness {
@@ -723,6 +787,7 @@ runner = "claude-code"
             state,
             _dir: dir,
             _runs_dir: runs_dir,
+            _repo: repo,
         }
     }
 
@@ -1046,26 +1111,40 @@ runner = "claude-code"
         assert_eq!(status, StatusCode::ACCEPTED);
         let run_id = body["run_id"].as_str().unwrap().to_string();
 
+        // Cancel immediately, before polling for anything - this bounds how
+        // long a real `claude` invocation (if `claude` happens to be
+        // installed) gets to run, and it means the row this test waits for
+        // is guaranteed to reach a terminal state quickly either way.
+        h.post(&format!("/v1/runs/{run_id}/cancel"), json!({}))
+            .await;
+
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
         let row = loop {
             let (status, row) = h.get(&format!("/v1/runs/{run_id}")).await;
-            if status == StatusCode::OK {
+            if status == StatusCode::OK && row["lifecycle"] == "finished" {
                 break row;
             }
             assert!(
                 std::time::Instant::now() < deadline,
-                "the run row never became queryable"
+                "the run never reached a terminal state"
             );
             tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         };
         assert_eq!(row["cell_id"], "zero");
         assert_eq!(row["runner"], "claude-code");
-        assert!(
-            h.state.runs_dir.join(&run_id).is_dir(),
-            "a workspace directory should have been created for the run"
-        );
 
-        h.post(&format!("/v1/runs/{run_id}/cancel"), json!({}))
-            .await;
+        // `04`'s ordering constraint, proven end to end: the workspace this
+        // run's `git worktree add` created is gone by the time this test's
+        // own bounded wait ends - teardown ran, and it ran only after the
+        // process that held the directory as its cwd had already exited.
+        let workspace = h.state.runs_dir.join(&run_id);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while workspace.exists() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the workspace was never torn down"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
     }
 }

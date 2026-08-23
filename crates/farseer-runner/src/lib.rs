@@ -27,3 +27,5 @@ pub mod resolve;
 pub mod drive;
 #[cfg(windows)]
 pub mod spawn;
+#[cfg(windows)]
+pub mod workspace;
