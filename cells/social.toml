@@ -1,0 +1,47 @@
+# The second definition, hand-written per `13` section 6.
+#
+# `08` found the social cell is *thinner* than the coding cell - two worker kinds
+# rather than many. That is a fact about the domain, not a smell, and nothing
+# here pads the roster to look substantial.
+#
+# Note what makes it differ from `zero.toml`: roster, tools and policy values.
+# Nothing else. That is `08`'s falsification test, in the repository.
+
+cell_id = "social"
+name = "Social"
+description = "Writes and publishes posts."
+version = "1"
+workspace_strategy = "plain_directory"
+
+[manager]
+runner = "claude-code"
+prompt = "You are the manager of the social cell. You plan posts and delegate."
+
+[[roster]]
+kind = "worker"
+name = "writer"
+runner = "codex"
+
+[[roster]]
+kind = "worker"
+name = "media"
+runner = "codex"
+
+[[roster]]
+kind = "tool"
+name = "draft-file"
+irreversibility = "reversible"
+
+# `12`: "post to X" is `undoable` - embarrassing but fixable. The cell is not
+# stricter than the coding cell; its tools are more dangerous.
+[[roster]]
+kind = "tool"
+name = "post"
+irreversibility = "undoable"
+
+[policy]
+autonomy_ceiling = "reversible"
+worker_cap = 2
+
+[record_scope]
+also_read = []

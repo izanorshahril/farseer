@@ -3,9 +3,10 @@
 A local-first agent orchestration runtime for Windows.
 One operator, one Rust binary, no required external services.
 
-**Status: specification locked, implementation not started.**
-Twenty-seven decision tickets are closed and no architectural question remains open.
-The only code in this repository is three throwaway spikes that exist to answer platform questions, not to become the product.
+**Status: the foundation is built and runs.**
+Twenty-seven decision tickets are closed, and the domain model, the record and the local API are implemented against them.
+What is not built yet is the part that drives a real agent: the runner adapters and the manager loop.
+See [What runs today](#what-runs-today).
 
 ## The one idea
 
@@ -67,6 +68,14 @@ An external protocol is spoken at a boundary, never shaped into internals.
 
 ```
 .
+├─ crates/
+│  ├─ farseer-core/    domain model: cells, policy, run state, scrubbing. Pure, no I/O
+│  ├─ farseer-store/   the record: one append-only SQLite log, memory, UI state
+│  ├─ farseer-api/     local HTTP plus SSE on 127.0.0.1, token and loopback guard
+│  └─ farseer/         the binary: runtime and CLI in one
+├─ cells/              cell definitions, hand-written, in git
+│  ├─ zero.toml        cell #0, the builder harness
+│  └─ social.toml      the second cell, thinner on purpose
 ├─ BRIEF.md            landscape research, Windows failure catalogue, operator questions
 ├─ ARCHITECTURE.md     the cell model this map decided on
 ├─ AGENTS.md           conventions for agents working here (CLAUDE.md points at it)
@@ -77,6 +86,41 @@ An external protocol is spoken at a boundary, never shaped into internals.
    ├─ prototypes/      one operator turn, end to end
    └─ spikes/          jobspike, wsspike, storebench
 ```
+
+## What runs today
+
+```bash
+cargo run --bin farseer -- validate
+```
+
+Parses every definition in `cells/`, prints one line each, and exits non-zero if any is broken.
+
+```bash
+cargo run --bin farseer -- serve --port 8787
+```
+
+Binds `127.0.0.1` only, opens the record, loads the definitions, and writes its port and a fresh token to a file whose DACL grants nobody but the current user.
+
+| Surface | What it does |
+| --- | --- |
+| `GET /v1/cells`, `/v1/cells/{id}` | read definitions. There is deliberately **no edit path** - they are files in git |
+| `POST /v1/cells/reload` | re-read from disk, reporting broken files rather than dying on them |
+| `GET /v1/events?cell=&run=&since=` | the cursor read. `since` is exclusive, so a client resumes with no gap and no duplicate |
+| `GET /v1/stream` | the same query as SSE, honouring `Last-Event-ID`. Attach and replay are one call with a different cursor |
+| `GET`/`PUT /v1/ui-state/{key}` | an opaque blob farseer never parses, so a canvas survives a restart. `413` above 1 MiB |
+| `GET /v1/analytics/{cost,intervention,rework,lessons}` | the four questions from [11 analytics questions](.scratch/farseer/issues/11-analytics-questions.md) |
+
+Every request must arrive on a loopback `Host` and carry the bearer token.
+A cross-site `Origin` is refused before the token is even looked at, because [16 local API surface](.scratch/farseer/issues/16-local-api-surface.md) found that a token alone does not stop DNS rebinding - the browser attaches it for the attacker.
+
+### What is not built yet
+
+- **Runner adapters.** Nothing spawns Claude Code, Codex or cursor-agent yet, so no run executes.
+- **The manager loop**, and with it the four manager verbs, gated actions, and cell calls.
+- **Workspace lifecycle**, the Job Object reap and worktree teardown that `jobspike` and `wsspike` proved out.
+- **The ACP server adapter** and the A2A endpoint, both decided and both later.
+
+The command half of the API is absent rather than stubbed: an endpoint that accepts an instruction nothing can execute would be a lie with a status code.
 
 ## The spikes
 

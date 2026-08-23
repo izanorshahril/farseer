@@ -1,8 +1,10 @@
 # Working in this repository
 
-Farseer is at **specification, not implementation**.
-Twenty-seven decision tickets are closed and the runtime does not exist yet.
-The only code is three throwaway spikes under `.scratch/farseer/spikes/`.
+Twenty-seven decision tickets are closed, and the foundation is implemented against them: `farseer-core`, `farseer-store`, `farseer-api`, and the `farseer` binary.
+Runner adapters and the manager loop are not built, so no run executes yet.
+
+The spikes under `.scratch/farseer/spikes/` are **not** part of the workspace and are excluded from it.
+They are evidence, not a foundation to build on.
 
 ## Read the map before proposing architecture
 
@@ -42,6 +44,21 @@ Two platform facts the spikes established the hard way:
 
 - **Process identity is `(pid, creation_time)` or job membership, never a pid alone.** Windows recycles pids aggressively, and parent-pid tree reconstruction terminated an unrelated application during `jobspike`.
 - **Resolve a bare command against `PATHEXT` before accepting it.** An extension-less `npm` on PATH is a POSIX shell script, not the `npm.cmd` you wanted.
+
+## Building
+
+```bash
+cargo test --workspace
+```
+
+`cargo clippy --workspace --all-targets` is expected to be silent, and `cargo fmt --all` is applied before every commit.
+
+Two conventions the code follows and a reader should keep:
+
+- **Cite the ticket in the doc comment.** Every non-obvious rule in the code says which ticket decided it and why, so the reasoning is one grep away rather than one archaeology session away.
+- **Name a test after the behaviour, not the function.** `a_rebound_host_is_refused_before_the_token_is_even_checked` states a decision; `test_guard` states nothing.
+
+`farseer-core` is pure: no clock, no filesystem, no network. Anything needing those takes them as arguments, which is why the liveness rules are testable without waiting ten minutes.
 
 ## Running a spike
 

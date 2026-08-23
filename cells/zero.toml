@@ -1,0 +1,56 @@
+# Cell #0 - the builder harness.
+#
+# `01` made this the operator's default address, not the sole one. It is a cell
+# like any other: the runtime knows nothing about it that it does not know about
+# `social.toml` next door.
+
+cell_id = "zero"
+name = "Cell Zero"
+description = "The builder harness. Builds and maintains other cells."
+version = "1"
+workspace_strategy = "worktree"
+
+[manager]
+runner = "claude-code"
+prompt = """
+You are the manager of cell zero.
+You plan, delegate to workers, and call other cells that appear in your roster.
+You never do the work yourself when a worker can.
+"""
+
+[[roster]]
+kind = "worker"
+name = "coder"
+runner = "codex"
+
+[[roster]]
+kind = "worker"
+name = "reviewer"
+runner = "cursor-agent"
+
+[[roster]]
+kind = "tool"
+name = "shell"
+irreversibility = "irreversible"
+grants_shell = true
+
+[[roster]]
+kind = "tool"
+name = "cargo-test"
+irreversibility = "reversible"
+
+[[roster]]
+kind = "cell"
+name = "social"
+cell_id = "social"
+max_autonomy_ceiling = "undoable"
+
+[policy]
+# `12`: the workspace boundary is the autonomy boundary. Writes inside a
+# worktree are fully reversible; push is the first act that escapes it.
+autonomy_ceiling = "reversible"
+deny = ["git push", "git merge"]
+worker_cap = 4
+
+[record_scope]
+also_read = []
