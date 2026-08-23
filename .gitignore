@@ -1,0 +1,6 @@
+# Rust build output
+target/
+
+# Spike fixtures and run artifacts
+node_modules/
+.scratch/farseer/spikes/jobspike/tree/pids-*.txt
