@@ -102,6 +102,7 @@ cargo run --bin farseer -- serve --port 8787
 ```
 
 Binds `127.0.0.1` only, opens the record, loads the definitions, and writes its port and a fresh token to a file whose DACL grants nobody but the current user.
+`--repo <path>` picks which git repository a `Worktree`-strategy cell's runs are worktrees of; it defaults to the current directory if omitted.
 
 | Surface | What it does |
 | --- | --- |
@@ -125,7 +126,6 @@ A cross-site `Origin` is refused before the token is even looked at, because [16
 - **Delegation.** `instruct` runs the cell's own **manager** runner directly against the goal - there is no manager loop yet to plan and delegate to workers, so `22`'s "an instruction delegates to one owner" is true only in the trivial sense that the owner is whichever manager was asked. Two native runners are wired now - `claude-code` and `codex` - so a manager naming either can execute; a roster worker naming `cursor-agent` still cannot, and neither can any worker at all, since nothing yet calls `run_worker` for one.
 - **Steer.** `05`'s remaining manager verb. Blocked on a real fact, not effort: `10` confirmed `--input-format stream-json` accepts a follow-up into a running Claude Code process, but no ticket captured the JSON envelope that follow-up takes, and guessing one would break `10`'s own rule - what a runner exposes must be observed, not read off a page. `rerun` and `rescope` needed no such guess, since both are just a fresh process with a reconstructed contract.
 - Gated actions and cell calls.
-- **A workspace's `repo`.** `13` deliberately keeps no git flag on `CellDefinition`, so a `Worktree`-strategy cell's runs are worktrees of whatever directory `farseer serve` was started in - the farseer checkout itself, in the common case, since cell zero is farseer's own builder harness. That is a stated assumption, not a config option yet.
 - **The ACP server adapter** and the A2A endpoint, both decided and both later.
 
 The command half of the API is absent rather than stubbed: an endpoint that accepts an instruction nothing can execute would be a lie with a status code.

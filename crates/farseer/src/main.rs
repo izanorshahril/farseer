@@ -24,6 +24,14 @@ struct Cli {
     #[arg(long, global = true)]
     record: Option<PathBuf>,
 
+    /// The git repository a `Worktree`-strategy cell's runs are worktrees
+    /// of. `13` keeps no git flag on `CellDefinition`, so this has to come
+    /// from the CLI or default to the current directory - the common case,
+    /// since cell zero is farseer's own builder harness. Only matters when
+    /// running `serve`; ignored by `validate` and `where`.
+    #[arg(long, global = true)]
+    repo: Option<PathBuf>,
+
     #[command(subcommand)]
     command: Command,
 }
@@ -53,10 +61,13 @@ fn main() -> Result<()> {
         }
         Command::Serve { port } => {
             let record = cli.record.map(Ok).unwrap_or_else(default_record_path)?;
+            let repo_root = cli.repo.map(Ok).unwrap_or_else(|| {
+                std::env::current_dir().context("reading the current directory")
+            })?;
             tokio::runtime::Builder::new_multi_thread()
                 .enable_all()
                 .build()?
-                .block_on(run(cli.cells, record, port))
+                .block_on(run(cli.cells, record, repo_root, port))
         }
     }
 }
@@ -79,7 +90,7 @@ fn validate(cells: &std::path::Path) -> Result<()> {
     }
 }
 
-async fn run(cells: PathBuf, record: PathBuf, port: u16) -> Result<()> {
+async fn run(cells: PathBuf, record: PathBuf, repo_root: PathBuf, port: u16) -> Result<()> {
     if let Some(parent) = record.parent() {
         std::fs::create_dir_all(parent)
             .with_context(|| format!("creating {}", parent.display()))?;
@@ -91,13 +102,12 @@ async fn run(cells: PathBuf, record: PathBuf, port: u16) -> Result<()> {
         .join("runs");
     std::fs::create_dir_all(&runs_dir)
         .with_context(|| format!("creating {}", runs_dir.display()))?;
-    let repo_root = std::env::current_dir().context("reading the current directory")?;
     let state = Arc::new(AppState::new(
         store,
         &cells,
         RuntimeToken::generate(),
         runs_dir,
-        repo_root,
+        &repo_root,
     ));
 
     let report = state.reload();
@@ -110,6 +120,7 @@ async fn run(cells: PathBuf, record: PathBuf, port: u16) -> Result<()> {
         cells.display()
     );
     println!("record:  {}", record.display());
+    println!("repo:    {}", repo_root.display());
     println!("runtime: {}", farseer_api::runtime_file_path().display());
 
     serve(state, port).await.map_err(Into::into)
