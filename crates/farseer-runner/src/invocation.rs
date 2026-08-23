@@ -1,16 +1,17 @@
 //! Builds the argv for a one-shot Claude Code invocation from a worker
 //! contract's goal.
 //!
-//! **Deliberately narrower than `10`'s full contract-test finding.** `10`
-//! measured that `--input-format stream-json` accepts follow-up turns into a
-//! live process, session intact - the thing that makes Claude Code pass `20`'s
-//! corrected steering test. That flag is **not** included here, because
-//! neither `10` nor `20` captured the JSON envelope an *initial* message takes
-//! under `--input-format stream-json`, and guessing a wire format contradicts
-//! `10`'s own rule: **what a runner exposes must be observed, not read off a
-//! page.** Until that envelope is observed, this builds the well-documented
-//! one-shot form instead - the goal as a positional prompt - which cannot
-//! steer mid-run and does not need to.
+//! **Deliberately narrower than `10`'s full contract-test finding, but no
+//! longer for lack of a verified envelope.** `10` measured that
+//! `--input-format stream-json` accepts follow-up turns into a live process,
+//! session intact - the thing that makes Claude Code pass `20`'s corrected
+//! steering test. That flag is still **not** included here: this builds the
+//! one-shot form, goal as a positional prompt, because *this function* has
+//! no live process to steer - `farseer-manager` spawns and blocks on one
+//! synchronously today, with no seam for a later HTTP request to reach its
+//! stdin. The envelope itself is now observed (see
+//! [`crate::claude_code`]'s doc comment) and is not what is blocking steer
+//! anymore; the remaining work is that seam.
 //!
 //! Also not yet mapped: `tool_grants` onto whatever permission flags Claude
 //! Code exposes, and the workspace `cwd` trust prompt `10` found on two of

@@ -124,7 +124,7 @@ A cross-site `Origin` is refused before the token is even looked at, because [16
 ### What is not built yet
 
 - **Delegation.** `instruct` runs the cell's own **manager** runner directly against the goal - there is no manager loop yet to plan and delegate to workers, so `22`'s "an instruction delegates to one owner" is true only in the trivial sense that the owner is whichever manager was asked. Two native runners are wired now - `claude-code` and `codex` - so a manager naming either can execute; a roster worker naming `cursor-agent` still cannot, and neither can any worker at all, since nothing yet calls `run_worker` for one.
-- **Steer.** `05`'s remaining manager verb. Blocked on a real fact, not effort: `10` confirmed `--input-format stream-json` accepts a follow-up into a running Claude Code process, but no ticket captured the JSON envelope that follow-up takes, and guessing one would break `10`'s own rule - what a runner exposes must be observed, not read off a page. `rerun` and `rescope` needed no such guess, since both are just a fresh process with a reconstructed contract.
+- **Steer.** `05`'s remaining manager verb. The JSON envelope that blocked it is now verified directly against the installed `claude` 2.1.233 - see [`claude_code.rs`](crates/farseer-runner/src/claude_code.rs)'s doc comment - and a follow-up message really does continue the same session with the first turn's context intact. What is missing now is architecture, not a fact: `farseer-manager` spawns and blocks on a process synchronously, with no seam for a later HTTP request to reach that process's stdin.
 - Gated actions and cell calls.
 - **The ACP server adapter** and the A2A endpoint, both decided and both later.
 

@@ -1,6 +1,10 @@
-//! Maps Claude Code's `--print --output-format stream-json --input-format
-//! stream-json --include-partial-messages` line stream onto the contract `05`
-//! wrote and `20`/`10` scored this runner against.
+//! Maps Claude Code's stream-json line stream onto the contract `05` wrote
+//! and `20`/`10` scored this runner against. [`crate::invocation::build_args`]
+//! is the production invocation - `--print --output-format stream-json
+//! --verbose`, no `--input-format` or `--include-partial-messages` - and this
+//! module parses whatever that emits, so a `content_block_start`/`stream_event`
+//! line is only ever seen when a caller opts into `--include-partial-messages`
+//! separately.
 //!
 //! **Every successfully parsed line is activity**, full stop - that is what
 //! solves `05`'s twenty-minute-reasoning problem, and it does not depend on
@@ -15,6 +19,18 @@
 //! (`resetsAt`, `rateLimitType`) - transcribed from the payload `10` captured
 //! on this machine, not renamed to Rust convention, so a `grep` on the wire
 //! format finds this file.
+//!
+//! **Steer is no longer blocked on an unverified envelope.** Verified
+//! 2026-08-23 against the real, installed `claude` 2.1.233: piping
+//! `{"type":"user","message":{"role":"user","content":[{"type":"text","text":"..."}]}}\n`
+//! lines to a process started with `--input-format stream-json` is accepted
+//! both as the initial message and as a genuine follow-up turn - a second
+//! message sent before closing stdin correctly recalled a fact stated in the
+//! first, under the same `session_id`, and each turn produced its **own**
+//! terminal `result` event rather than one at the very end. `invocation.rs`'s
+//! doc comment previously called this envelope unobserved; it is now
+//! observed and cited here, though wiring a live process's stdin to a later
+//! HTTP request is real remaining work this probe did not attempt.
 
 use farseer_core::event::EventKind;
 use farseer_core::run::Outcome;
@@ -108,10 +124,22 @@ fn rate_limit(v: &Value) -> Option<RateLimitInfo> {
     })
 }
 
+/// **`subtype` is not the success signal.** Verified 2026-08-23 against the
+/// real, installed `claude` 2.1.233: a headless run refused for
+/// `authentication_failed` still emitted `"subtype":"success"` on its
+/// terminal `result` event, alongside a top-level `"is_error":true`. The
+/// same probe's successful run had `is_error:false` with the identical
+/// `subtype`. `is_error` is therefore the authoritative field; `subtype` is
+/// kept as a fallback only for the case it is absent, which no captured
+/// payload has shown but nothing rules out either.
 fn finished(v: &Value) -> FinishedSignal {
-    let outcome = match v.get("subtype").and_then(Value::as_str) {
-        Some("success") => Outcome::Ok,
-        _ => Outcome::Failed,
+    let outcome = match v.get("is_error").and_then(Value::as_bool) {
+        Some(true) => Outcome::Failed,
+        Some(false) => Outcome::Ok,
+        None => match v.get("subtype").and_then(Value::as_str) {
+            Some("success") => Outcome::Ok,
+            _ => Outcome::Failed,
+        },
     };
     let cost_usd_micros = v
         .get("total_cost_usd")
@@ -203,6 +231,31 @@ mod tests {
             panic!("expected one Finished signal, got {signals:?}");
         };
         assert_eq!(f.outcome, Outcome::Failed);
+    }
+
+    #[test]
+    fn is_error_overrides_a_misleading_success_subtype() {
+        // The exact shape a real `claude` 2.1.233 run emitted for
+        // `authentication_failed`: `subtype` reads "success" - it names the
+        // output format, not the outcome - while `is_error` correctly says
+        // this failed. Trusting `subtype` alone would record this as `Ok`.
+        let line = r#"{"type":"result","subtype":"success","is_error":true,"total_cost_usd":0}"#;
+        let signals = parse_line(line).unwrap();
+        let [RunnerSignal::Finished(f)] = signals.as_slice() else {
+            panic!("expected one Finished signal, got {signals:?}");
+        };
+        assert_eq!(f.outcome, Outcome::Failed);
+    }
+
+    #[test]
+    fn is_error_false_with_a_success_subtype_is_ok() {
+        let line =
+            r#"{"type":"result","subtype":"success","is_error":false,"total_cost_usd":0.01}"#;
+        let signals = parse_line(line).unwrap();
+        let [RunnerSignal::Finished(f)] = signals.as_slice() else {
+            panic!("expected one Finished signal, got {signals:?}");
+        };
+        assert_eq!(f.outcome, Outcome::Ok);
     }
 
     #[test]
