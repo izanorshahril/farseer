@@ -1313,6 +1313,8 @@ runner = "claude-code"
     }
 
     #[tokio::test]
+    #[ignore = "spawns a real headless `claude` process - see the note on \
+                `steering_a_claude_code_run_reaches_its_live_stdin`"]
     async fn steering_with_an_empty_message_is_a_400() {
         let h = harness();
         let (_, body) = h
@@ -1337,6 +1339,9 @@ runner = "claude-code"
     }
 
     #[tokio::test]
+    #[ignore = "spawns a real headless `claude` process - slow (cold-start plugin \
+                load cost per AGENTS.md) and excluded from `cargo test --workspace` \
+                so the default run stays fast; run with `-- --ignored` to include it"]
     async fn steering_a_claude_code_run_reaches_its_live_stdin() {
         // `claude_code::steer_envelope`'s 2026-08-23 probe verified the wire
         // format; this proves the seam - a later HTTP request reaching a
@@ -1374,18 +1379,20 @@ runner = "claude-code"
         h.cancel_and_wait_for_finished(&run_id).await;
     }
 
-    /// This is the one test in the suite that actually spawns a process - the
-    /// mechanics of spawning, reaping and mapping stream-json are already
-    /// proven against `cmd.exe` fixtures in `farseer-runner` and
-    /// `farseer-manager`'s own tests, so this only needs to prove the HTTP
-    /// wiring around them: fire-and-forget returns a `run_id` before the run
-    /// finishes, the record picks it up, and a workspace directory exists.
-    /// Whether `claude` is actually installed on the machine running this
-    /// test is deliberately not asserted either way - `10` confirms it is on
-    /// the dev machine, but the row this test waits for reaches a terminal
-    /// state either way: `ok`/`failed` if it ran, `failed` immediately via
-    /// `ExecutableNotFound` if it did not.
+    /// One of several tests in this suite that spawn a real process - see the
+    /// `#[ignore]` on each for why. The mechanics of spawning, reaping and
+    /// mapping stream-json are already proven against `cmd.exe` fixtures in
+    /// `farseer-runner` and `farseer-manager`'s own tests, so this only needs
+    /// to prove the HTTP wiring around them: fire-and-forget returns a
+    /// `run_id` before the run finishes, the record picks it up, and a
+    /// workspace directory exists. Whether `claude` is actually installed on
+    /// the machine running this test is deliberately not asserted either way
+    /// - `10` confirms it is on the dev machine, but the row this test waits
+    /// for reaches a terminal state either way: `ok`/`failed` if it ran,
+    /// `failed` immediately via `ExecutableNotFound` if it did not.
     #[tokio::test]
+    #[ignore = "spawns a real headless `claude` process - see the note on \
+                `steering_a_claude_code_run_reaches_its_live_stdin`"]
     async fn instructing_a_cell_returns_a_run_id_that_becomes_a_real_queryable_run() {
         let h = harness();
         let (status, body) = h
@@ -1417,6 +1424,8 @@ runner = "claude-code"
     }
 
     #[tokio::test]
+    #[ignore = "spawns a real headless `claude` process - see the note on \
+                `steering_a_claude_code_run_reaches_its_live_stdin`"]
     async fn a_running_run_reports_liveness_and_a_finished_one_reports_none() {
         let h = harness();
         let (_, body) = h
@@ -1471,6 +1480,8 @@ runner = "claude-code"
     }
 
     #[tokio::test]
+    #[ignore = "spawns a real headless `claude` process - see the note on \
+                `steering_a_claude_code_run_reaches_its_live_stdin`"]
     async fn rescoping_without_a_goal_is_refused() {
         let h = harness();
         let (_, body) = h
@@ -1486,6 +1497,8 @@ runner = "claude-code"
     }
 
     #[tokio::test]
+    #[ignore = "spawns a real headless `claude` process - see the note on \
+                `steering_a_claude_code_run_reaches_its_live_stdin`"]
     async fn rescoping_with_the_unchanged_goal_is_refused() {
         let h = harness();
         let (_, body) = h
@@ -1504,6 +1517,8 @@ runner = "claude-code"
     }
 
     #[tokio::test]
+    #[ignore = "spawns a real headless `claude` process - see the note on \
+                `steering_a_claude_code_run_reaches_its_live_stdin`"]
     async fn rerun_and_rescope_start_a_fresh_run_linked_to_the_original() {
         let h = harness();
         let (_, body) = h

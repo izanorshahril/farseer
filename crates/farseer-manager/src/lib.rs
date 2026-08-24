@@ -370,6 +370,21 @@ pub fn start_worker(
                 None,
             )
         }
+        "goose" => {
+            let exe =
+                resolve("goose").ok_or_else(|| ManagerError::ExecutableNotFound("goose".into()))?;
+            StartedWorker::spawn(
+                &exe,
+                &farseer_runner::goose::build_args(contract),
+                cwd,
+                thresholds,
+                farseer_runner::goose::parse_line,
+                // `-r/--resume` restarts into a new process rather than
+                // continuing this one, and no `--input-format`-style flag
+                // exists, per this crate's own 2026-08-24 probe.
+                None,
+            )
+        }
         other => return Err(ManagerError::UnsupportedRunner(other.to_string())),
     }?;
     started.bootstrap(&contract.goal)?;
@@ -728,6 +743,44 @@ mod tests {
         assert!(
             !matches!(result, Err(ManagerError::UnsupportedRunner(_))),
             "codex must dispatch to a process, not fall through to the unsupported-runner error: {result:?}"
+        );
+    }
+
+    #[test]
+    fn start_worker_dispatches_goose_rather_than_refusing_it_as_unsupported() {
+        let store = Store::open_in_memory().unwrap();
+        let spec = WorkerContractSpec {
+            run_id: RunId::new(),
+            task_id: TaskId::new(),
+            cell_id: CellId::new("zero"),
+            goal: "reply with just the word ok".into(),
+            workspace: WorkspaceStrategy::PlainDirectory,
+            runner: "goose".into(),
+            tool_grants: vec![],
+            autonomy_ceiling: Irreversibility::Reversible,
+            budget: Budget::default(),
+            definition_of_done: "".into(),
+        };
+        let contract = WorkerContract::seal(spec);
+
+        let result = run_worker(
+            &store,
+            &contract,
+            &std::env::temp_dir(),
+            LivenessThresholds::default(),
+            || 1,
+            |token, _liveness, steer| {
+                assert!(
+                    steer.is_none(),
+                    "goose has no steering path - `-r/--resume` starts a new process"
+                );
+                token.cancel();
+            },
+        );
+
+        assert!(
+            !matches!(result, Err(ManagerError::UnsupportedRunner(_))),
+            "goose must dispatch to a process, not fall through to the unsupported-runner error: {result:?}"
         );
     }
 

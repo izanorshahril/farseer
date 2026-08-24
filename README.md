@@ -4,7 +4,7 @@ A local-first agent orchestration runtime for Windows.
 One operator, one Rust binary, no required external services.
 
 **Status: the foundation is built, and farseer can now execute and steer a real instruction.**
-Twenty-seven decision tickets are closed, and the domain model, the record, the local API, three native runners, all four of `05`'s manager verbs, and `02`'s MCP face are implemented against them.
+Twenty-seven decision tickets are closed, and the domain model, the record, the local API, four native runners, all four of `05`'s manager verbs, and `02`'s MCP face are implemented against them.
 `POST /v1/cells/{id}/instruct` runs a cell's manager against a goal and returns a `run_id` immediately; `POST /v1/runs/{id}/cancel` ends it early; `POST /v1/runs/{id}/steer` sends a follow-up message into the same live process. All three are real, not stubs - the command half of the API is no longer absent.
 See [What runs today](#what-runs-today).
 
@@ -74,7 +74,7 @@ An external protocol is spoken at a boundary, never shaped into internals.
 │  ├─ farseer-core/    domain model: cells, policy, run state, scrubbing. Pure, no I/O
 │  ├─ farseer-store/   the record: one append-only SQLite log, memory, UI state
 │  ├─ farseer-api/     local HTTP plus SSE on 127.0.0.1, token and loopback guard; nests the MCP face at /v1/mcp
-│  ├─ farseer-runner/  runners: Claude Code, Codex and cursor-agent, PATHEXT resolution, Job-Object spawn, stream-json mapping, worktree lifecycle
+│  ├─ farseer-runner/  runners: Claude Code, Codex, cursor-agent and goose, PATHEXT resolution, Job-Object spawn, stream-json mapping, worktree lifecycle
 │  ├─ farseer-manager/ runs one worker contract against a runner and records what happened. Called by `POST /v1/cells/{id}/instruct`
 │  └─ farseer/         the binary: runtime and CLI in one
 ├─ cells/              cell definitions, hand-written, in git
@@ -115,7 +115,7 @@ Binds `127.0.0.1` only, opens the record, loads the definitions, and writes its 
 | `GET /v1/stream` | the same query as SSE, honouring `Last-Event-ID`. Attach and replay are one call with a different cursor |
 | `GET /v1/runs/{id}` | a run's row: lifecycle, outcome, cost, tokens, and `18`/`05`'s liveness - `live`/`stalled`/`likely_hung`, or `null` once nothing in memory can answer |
 | `POST /v1/runs/{id}/cancel` | end a run early, recorded as `05`'s `cancelled` outcome, never `failed`. `404` if it already finished or never existed - idempotent, not a silent no-op |
-| `POST /v1/runs/{id}/steer` | send a follow-up message into a run's live process. `400` if the runner has no steering path - Codex today - `404` if the run is unknown or already finished |
+| `POST /v1/runs/{id}/steer` | send a follow-up message into a run's live process. `400` if the runner has no steering path - Codex, cursor-agent and goose today - `404` if the run is unknown or already finished |
 | `POST /v1/runs/{id}/rerun` | same contract, fresh run, fresh workspace. `404` on an unknown run |
 | `POST /v1/runs/{id}/rescope` | a new run with a changed `goal`. `400` if `goal` is missing or unchanged from the original - that is `rerun`, not `rescope` |
 | `GET`/`PUT /v1/ui-state/{key}` | an opaque blob farseer never parses, so a canvas survives a restart. `413` above 1 MiB |
@@ -127,7 +127,7 @@ A cross-site `Origin` is refused before the token is even looked at, because [16
 
 ### What is not built yet
 
-- **Delegation.** `instruct` runs the cell's own **manager** runner directly against the goal - there is no manager loop yet to plan and delegate to workers, so `22`'s "an instruction delegates to one owner" is true only in the trivial sense that the owner is whichever manager was asked. Three native runners are wired now - `claude-code`, `codex`, `cursor-agent` - so a manager naming any of them can execute; no roster worker can, since nothing yet calls `run_worker` for one.
+- **Delegation.** `instruct` runs the cell's own **manager** runner directly against the goal - there is no manager loop yet to plan and delegate to workers, so `22`'s "an instruction delegates to one owner" is true only in the trivial sense that the owner is whichever manager was asked. Four native runners are wired now - `claude-code`, `codex`, `cursor-agent`, `goose` - so a manager naming any of them can execute; no roster worker can, since nothing yet calls `run_worker` for one.
 - Gated actions and cell calls.
 - **Farseer as an MCP client.** The MCP face built here is farseer as a *server* for its own memory; a manager reaching *out* to a third-party MCP tool server is still the `M0 -.->|MCP| TOOL` edge on the map above, and it is not implemented.
 - **The ACP server adapter** and the A2A endpoint, both decided and both later.
