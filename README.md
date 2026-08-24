@@ -131,6 +131,8 @@ A cross-site `Origin` is refused before the token is even looked at, because [16
 - Gated actions and cell calls.
 - **Farseer as an MCP client.** The MCP face built here is farseer as a *server* for its own memory; a manager reaching *out* to a third-party MCP tool server is still the `M0 -.->|MCP| TOOL` edge on the map above, and it is not implemented.
 - **The ACP server adapter** and the A2A endpoint, both decided and both later.
+- **The UI.** Backend support exists - `GET`/`PUT /v1/ui-state/{key}` per `24`, and `07` constrains the attach surface to a rendered event stream over one run - but "UI shape" itself is still fog on [the map](.scratch/farseer/map.md), not a closed ticket: manager chat, fleet view, board and graph explorer are options, not a decision. It waits on a `/wayfinder` grilling-and-prototype session, HITL, not something to design and build unilaterally.
+- **A fifth runner, `pi` (badlogic/pi-mono).** Installed on the dev machine but has no provider credentials configured (`pi auth check` answers `credentials_not_configured`) - configuring one is an operator decision, so this stays a documented gap rather than a guess.
 
 The command half of the API is absent rather than stubbed: an endpoint that accepts an instruction nothing can execute would be a lie with a status code.
 
