@@ -2090,7 +2090,7 @@ grants_shell = true
                 &std::env::current_dir().unwrap(),
                 LivenessThresholds::default(),
                 farseer_runner::claude_code::parse_line,
-                None,
+                farseer_manager::Channel::OneShot,
             )
             .unwrap()
         };

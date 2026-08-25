@@ -56,6 +56,119 @@ pub enum AcpError {
     NoSession,
 }
 
+/// Walk the handshake on a process somebody else spawned.
+///
+/// Split out of [`AcpSession::open`] because the manager owns its own
+/// supervised process - job object, watchdog clock, cancel token - and must not
+/// have a second one wrapped around it. Leaves the session ready for
+/// [`prompt_on`].
+pub fn handshake<F>(
+    process: &mut SupervisedProcess,
+    cwd: &Path,
+    mode: Option<&str>,
+    next_id: &mut i64,
+    on_line: &mut F,
+) -> Result<SessionOpened, AcpError>
+where
+    F: FnMut(Result<Vec<RunnerSignal>, ParseError>),
+{
+    let take = |next_id: &mut i64| {
+        let id = *next_id;
+        *next_id += 1;
+        id
+    };
+
+    let id = take(next_id);
+    request(
+        process,
+        &acp::initialize_frame(id),
+        id,
+        "initialize",
+        on_line,
+    )?;
+
+    let id = take(next_id);
+    let answer = request(
+        process,
+        &acp::session_new_frame(id, &cwd.to_string_lossy()),
+        id,
+        "session/new",
+        on_line,
+    )?;
+    let opened = acp::session_opened(&answer.to_string()).ok_or(AcpError::NoSession)?;
+
+    if let Some(mode) = mode {
+        let id = take(next_id);
+        let frame = acp::set_mode_frame(id, &opened.session_id, mode);
+        request(process, &frame, id, "session/set_mode", on_line)?;
+    }
+    Ok(opened)
+}
+
+/// Send one turn. The answer arrives on stdout.
+pub fn prompt_on(
+    process: &SupervisedProcess,
+    session_id: &str,
+    id: i64,
+    text: &str,
+) -> std::io::Result<()> {
+    process.write_line(&acp::prompt_frame(id, session_id, text))
+}
+
+/// Whether a parsed line ended the turn.
+///
+/// The read loop of a conversational runner needs this and a one-shot runner's
+/// does not, which is the whole distinction: an ACP agent **does not exit when
+/// the turn ends**, so end of stream is the wrong thing to wait for.
+pub fn ends_turn(parsed: &Result<Vec<RunnerSignal>, ParseError>) -> bool {
+    parsed.as_ref().is_ok_and(|signals| {
+        signals
+            .iter()
+            .any(|signal| matches!(signal, RunnerSignal::Finished(_)))
+    })
+}
+
+/// Write one request and read until its answer, forwarding everything else.
+fn request<F>(
+    process: &mut SupervisedProcess,
+    frame: &str,
+    id: i64,
+    method: &'static str,
+    on_line: &mut F,
+) -> Result<Value, AcpError>
+where
+    F: FnMut(Result<Vec<RunnerSignal>, ParseError>),
+{
+    process.write_line(frame)?;
+    while let Some(line) = process.read_line()? {
+        let parsed: Option<Value> = serde_json::from_str(&line).ok();
+        let is_answer = parsed
+            .as_ref()
+            .and_then(|v| v.get("id"))
+            .and_then(Value::as_i64)
+            == Some(id);
+        if !is_answer {
+            // Somebody else's line: activity, and possibly a signal. The
+            // handshake is not a quiet period.
+            on_line(acp::parse_line(&line));
+            continue;
+        }
+        let value = parsed.expect("an id was read out of it");
+        if let Some(error) = value.get("error") {
+            return Err(AcpError::Refused {
+                method,
+                message: error
+                    .get("message")
+                    .and_then(Value::as_str)
+                    .unwrap_or("no message")
+                    .to_string(),
+            });
+        }
+        return Ok(value);
+    }
+    Err(AcpError::Closed { method })
+}
+
 /// A live ACP conversation with one agent, in one workspace.
 pub struct AcpSession {
     process: SupervisedProcess,
@@ -85,30 +198,14 @@ impl AcpSession {
         // `StdinMode::Closed` rule `28 operator surface` learned the hard way is
         // about one-shot runners; this is the other case it exists to
         // distinguish.
-        let process = SupervisedProcess::spawn(exe, args, cwd, StdinMode::Live)?;
-        let mut session = Self {
+        let mut process = SupervisedProcess::spawn(exe, args, cwd, StdinMode::Live)?;
+        let mut next_id = 1;
+        let opened = handshake(&mut process, cwd, mode, &mut next_id, on_line)?;
+        let session = Self {
             process,
-            opened: SessionOpened::default(),
-            next_id: 1,
+            opened,
+            next_id,
         };
-
-        let id = session.take_id();
-        session.request(&acp::initialize_frame(id), id, "initialize", on_line)?;
-
-        let id = session.take_id();
-        let answer = session.request(
-            &acp::session_new_frame(id, &cwd.to_string_lossy()),
-            id,
-            "session/new",
-            on_line,
-        )?;
-        session.opened = acp::session_opened(&answer.to_string()).ok_or(AcpError::NoSession)?;
-
-        if let Some(mode) = mode {
-            let id = session.take_id();
-            let frame = acp::set_mode_frame(id, &session.opened.session_id, mode);
-            session.request(&frame, id, "session/set_mode", on_line)?;
-        }
 
         Ok(session)
     }
@@ -126,8 +223,7 @@ impl AcpSession {
     /// turn-boundary granular, and ACP has no mid-turn channel to disagree with.
     pub fn prompt(&mut self, text: &str) -> std::io::Result<()> {
         let id = self.take_id();
-        let frame = acp::prompt_frame(id, &self.opened.session_id, text);
-        self.process.write_line(&frame)
+        prompt_on(&self.process, &self.opened.session_id, id, text)
     }
 
     /// `05 run state model`'s `cancel`, as a notification the agent owes no
@@ -158,11 +254,7 @@ impl AcpSession {
     {
         while let Some(line) = self.process.read_line()? {
             let parsed = acp::parse_line(&line);
-            let ended = parsed.as_ref().is_ok_and(|signals| {
-                signals
-                    .iter()
-                    .any(|signal| matches!(signal, RunnerSignal::Finished(_)))
-            });
+            let ended = ends_turn(&parsed);
             on_line(parsed);
             if ended {
                 return Ok(());
@@ -185,47 +277,6 @@ impl AcpSession {
         let id = self.next_id;
         self.next_id += 1;
         id
-    }
-
-    /// Write one request and read until its answer, forwarding everything else.
-    fn request<F>(
-        &mut self,
-        frame: &str,
-        id: i64,
-        method: &'static str,
-        on_line: &mut F,
-    ) -> Result<Value, AcpError>
-    where
-        F: FnMut(Result<Vec<RunnerSignal>, ParseError>),
-    {
-        self.process.write_line(frame)?;
-        while let Some(line) = self.process.read_line()? {
-            let parsed: Option<Value> = serde_json::from_str(&line).ok();
-            let is_answer = parsed
-                .as_ref()
-                .and_then(|v| v.get("id"))
-                .and_then(Value::as_i64)
-                == Some(id);
-            if !is_answer {
-                // Somebody else's line: activity, and possibly a signal. The
-                // handshake is not a quiet period.
-                on_line(acp::parse_line(&line));
-                continue;
-            }
-            let value = parsed.expect("an id was read out of it");
-            if let Some(error) = value.get("error") {
-                return Err(AcpError::Refused {
-                    method,
-                    message: error
-                        .get("message")
-                        .and_then(Value::as_str)
-                        .unwrap_or("no message")
-                        .to_string(),
-                });
-            }
-            return Ok(value);
-        }
-        Err(AcpError::Closed { method })
     }
 }
 

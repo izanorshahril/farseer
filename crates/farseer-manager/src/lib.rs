@@ -68,6 +68,8 @@ impl RunSink for Store {
 
 #[derive(Debug, thiserror::Error)]
 pub enum ManagerError {
+    #[error(transparent)]
+    Acp(#[from] farseer_runner::acp_drive::AcpError),
     #[error("runner `{0}` has no native implementation yet")]
     UnsupportedRunner(String),
     #[error("`{0}` is not on PATH")]
@@ -164,6 +166,60 @@ impl Default for RunOptions {
     }
 }
 
+/// The ACP mode farseer opens a session in.
+///
+/// `goose acp` offers `auto`, `approve`, `smart_approve` and `chat`; only the
+/// first runs unattended. An agent that does not offer this exact id opens in
+/// its own default, which is a gap `29 harness protocol` recorded rather than
+/// papered over - the mode names are not standardised, and guessing at another
+/// agent's synonym would be inventing a grant `12 autonomy and deny list` did
+/// not give.
+pub const ACP_UNATTENDED_MODE: &str = "auto";
+
+/// How farseer speaks to a runner, which decides three things at once: whether
+/// a stdin exists, how the goal is delivered, and what ends the read loop.
+///
+/// It replaced an `Option<fn(&str) -> String>` because that field had quietly
+/// become the answer to all three questions and could only express two of them.
+/// `29 harness protocol` added the third case and the omission became a bug -
+/// twice, in the same shape.
+#[derive(Debug, Clone, Copy)]
+pub enum Channel {
+    /// Goal on argv, EOF at spawn, ends at end of stream.
+    ///
+    /// `28 operator surface` learned the second clause the hard way: `codex
+    /// exec` waits for EOF **before it starts**, so an open pipe nobody writes
+    /// to is a run that never begins.
+    OneShot,
+    /// Goal as the first stdin frame, steerable, ends at end of stream.
+    ///
+    /// Only Claude Code, per `invocation.rs`.
+    Steered(fn(&str) -> String),
+    /// An ACP agent: a JSON-RPC handshake, then the goal as `session/prompt`.
+    ///
+    /// **Ends at the terminal signal rather than at end of stream**, because an
+    /// ACP agent does not exit when the turn ends - the session stays open for
+    /// the next prompt. Waiting for EOF here waits forever, which is exactly how
+    /// `29 harness protocol`'s first live run hung.
+    Acp,
+}
+
+impl Channel {
+    fn stdin_mode(self) -> StdinMode {
+        match self {
+            // A goal or a handshake has to reach it.
+            Self::Steered(_) | Self::Acp => StdinMode::Live,
+            Self::OneShot => StdinMode::Closed,
+        }
+    }
+
+    /// Whether the read loop stops at the terminal signal instead of at end of
+    /// stream.
+    fn ends_at_terminal(self) -> bool {
+        matches!(self, Self::Acp)
+    }
+}
+
 /// A worker process, spawned and waiting to be driven.
 ///
 /// Split from spawning-and-driving in one call so a caller holds a
@@ -179,14 +235,13 @@ pub struct StartedWorker {
     /// function pointer, not a trait, since every runner's `parse_line` is
     /// already exactly this shape.
     parse: fn(&str) -> Result<Vec<RunnerSignal>, ParseError>,
-    /// `Some` for a runner steer can actually reach - today only
-    /// `claude_code::steer_frame`, per `invocation.rs`'s doc comment.
-    /// `None` for a runner like Codex, whose own steering path does not
-    /// exist (`codex exec resume` starts a new process, per `10 runner inventory`). Also the
-    /// initial message: [`Self::bootstrap`] writes `contract.goal` through
-    /// it as the first stdin line, since `--input-format stream-json`
-    /// expects the goal there rather than as argv.
-    steer_frame: Option<fn(&str) -> String>,
+    /// How the goal gets in, whether steering can reach, and what ends the
+    /// read loop. See [`Channel`].
+    channel: Channel,
+    /// Set once the ACP handshake has run, so a steer knows which session to
+    /// address. `None` for every other channel, and for an ACP run that has not
+    /// been bootstrapped yet.
+    acp_session: Option<String>,
 }
 
 /// A cloneable handle that writes a steer message into a run's live process,
@@ -239,28 +294,16 @@ impl StartedWorker {
         cwd: &Path,
         thresholds: LivenessThresholds,
         parse: fn(&str) -> Result<Vec<RunnerSignal>, ParseError>,
-        steer_frame: Option<fn(&str) -> String>,
+        channel: Channel,
     ) -> Result<Self, ManagerError> {
         Ok(Self {
-            // The steer frame is the reason to hold a stdin open, so it is also
-            // the answer to whether one should exist. A runner nobody steers
-            // gets EOF at spawn - `codex exec` waits for it before starting, and
-            // an open pipe nobody writes to is a run that never begins.
-            proc: SupervisedProcess::spawn(
-                exe,
-                args,
-                cwd,
-                if steer_frame.is_some() {
-                    StdinMode::Live
-                } else {
-                    StdinMode::Closed
-                },
-            )?,
+            proc: SupervisedProcess::spawn(exe, args, cwd, channel.stdin_mode())?,
             activity: Arc::new(Mutex::new(ActivityClock::started_at(0))),
             monotonic_start: Instant::now(),
             thresholds,
             parse,
-            steer_frame,
+            channel,
+            acp_session: None,
         })
     }
 
@@ -276,10 +319,15 @@ impl StartedWorker {
         // both here means a mismatch cannot produce a handle that writes into
         // nothing.
         let stdin = self.proc.stdin_handle()?;
-        self.steer_frame.map(|frame| SteerHandle {
-            stdin: stdin.clone(),
-            frame,
-        })
+        match self.channel {
+            Channel::Steered(frame) => Some(SteerHandle { stdin, frame }),
+            // An ACP steer is another `session/prompt` on the same session,
+            // which needs the session id and a fresh request id - neither of
+            // which fits a `fn(&str) -> String`. `20 worker control channel`
+            // made steering the exception, so an ACP worker is unsteerable
+            // until a manager needs it rather than speculatively.
+            Channel::Acp | Channel::OneShot => None,
+        }
     }
 
     /// Fetch before calling the blocking `run_to_completion` - the handle
@@ -304,9 +352,38 @@ impl StartedWorker {
     /// thing that makes the handle reachable at all - ever fires; a caller
     /// building a [`StartedWorker`] directly and skipping this is exercising
     /// something other than the real dispatch path.
-    pub fn bootstrap(&self, goal: &str) -> Result<(), ManagerError> {
-        if let Some(frame) = self.steer_frame {
-            self.proc.write_line(&frame(goal))?;
+    ///
+    /// For [`Channel::Acp`] this is where the whole handshake happens -
+    /// `initialize`, `session/new`, `session/set_mode`, then the goal as
+    /// `session/prompt`. Signals arriving during the handshake are dropped
+    /// rather than recorded: `bootstrap` has no store, and the one line this
+    /// loses in practice is a `usage_update` that the agent sends again after
+    /// the turn.
+    pub fn bootstrap(&mut self, goal: &str, cwd: &Path) -> Result<(), ManagerError> {
+        match self.channel {
+            Channel::OneShot => {}
+            Channel::Steered(frame) => self.proc.write_line(&frame(goal))?,
+            Channel::Acp => {
+                let mut next_id = 1;
+                let mut discard = |_: Result<Vec<RunnerSignal>, ParseError>| {};
+                let opened = farseer_runner::acp_drive::handshake(
+                    &mut self.proc,
+                    cwd,
+                    // The mode that does not ask. `12 autonomy and deny list`
+                    // decides autonomy before the run, and nobody is watching a
+                    // prompt farseer did not expect.
+                    Some(ACP_UNATTENDED_MODE),
+                    &mut next_id,
+                    &mut discard,
+                )?;
+                farseer_runner::acp_drive::prompt_on(
+                    &self.proc,
+                    &opened.session_id,
+                    next_id,
+                    goal,
+                )?;
+                self.acp_session = Some(opened.session_id);
+            }
         }
         Ok(())
     }
@@ -333,7 +410,8 @@ impl StartedWorker {
         let activity = Arc::clone(&self.activity);
         let monotonic_start = self.monotonic_start;
 
-        drive(&mut self.proc, self.parse, |parsed| {
+        let ends_at_terminal = self.channel.ends_at_terminal();
+        let mut on_line = |parsed: Result<Vec<RunnerSignal>, ParseError>| {
             // `05 run state model`: any bytes at all is activity, parse failure or not - the
             // process is still there regardless of what the line meant.
             let now = monotonic_start.elapsed().as_secs();
@@ -452,7 +530,23 @@ impl StartedWorker {
                     }
                 }
             }
-        })?;
+        };
+
+        if ends_at_terminal {
+            // A conversational runner stays alive after the work is done, so
+            // end of stream never comes. `29 harness protocol`'s first live run
+            // waited for it anyway and hung.
+            while let Some(line) = self.proc.read_line()? {
+                let parsed = (self.parse)(&line);
+                let ended = farseer_runner::acp_drive::ends_turn(&parsed);
+                on_line(parsed);
+                if ended {
+                    break;
+                }
+            }
+        } else {
+            drive(&mut self.proc, self.parse, on_line)?;
+        }
 
         if let Some(e) = store_err {
             return Err(e.into());
@@ -489,6 +583,17 @@ impl StartedWorker {
     }
 }
 
+/// The ACP runners, as `name -> (executable, subcommand)`.
+///
+/// Both were verified installed and speaking ACP on 2026-08-26. The list is
+/// short on purpose: an entry here is a claim that farseer has **seen this
+/// agent's output**, which is `10 runner inventory`'s rule, not a claim that
+/// ACP agents in general work.
+pub const ACP_RUNNERS: [(&str, &str, &str); 2] = [
+    ("goose-acp", "goose", "acp"),
+    ("opencode-acp", "opencode", "acp"),
+];
+
 /// `contract.runner` selects one of the four verified native stream-json dialects: Claude Code, Codex, cursor-agent, or Goose.
 /// The ACP runner from `20 worker control channel` remains unimplemented, so anything else is `UnsupportedRunner`.
 ///
@@ -521,8 +626,11 @@ pub fn start_worker(
                 cwd,
                 thresholds,
                 farseer_runner::claude_code::parse_line,
-                (options.role == RunRole::Manager)
-                    .then_some(farseer_runner::claude_code::steer_frame as fn(&str) -> String),
+                if options.role == RunRole::Manager {
+                    Channel::Steered(farseer_runner::claude_code::steer_frame)
+                } else {
+                    Channel::OneShot
+                },
             )
         }
         "codex" => {
@@ -536,7 +644,7 @@ pub fn start_worker(
                 farseer_runner::codex::parse_line,
                 // Codex has no steering path: `codex exec resume` starts a
                 // new process rather than continuing this one, per `10 runner inventory`.
-                None,
+                Channel::OneShot,
             )
         }
         "cursor-agent" => {
@@ -551,7 +659,7 @@ pub fn start_worker(
                 // No `--input-format` flag exists on this CLI at all, per
                 // `10 runner inventory` - `--resume`/`--continue` restart into a new process,
                 // same shape as Codex.
-                None,
+                Channel::OneShot,
             )
         }
         "goose" => {
@@ -566,12 +674,32 @@ pub fn start_worker(
                 // `-r/--resume` restarts into a new process rather than
                 // continuing this one, and no `--input-format`-style flag
                 // exists, per this crate's own 2026-08-24 probe.
-                None,
+                Channel::OneShot,
             )
         }
-        other => return Err(ManagerError::UnsupportedRunner(other.to_string())),
+        // The ACP runners, per `29 harness protocol`. A runner name here means
+        // **an executable and a subcommand**, which is a shape `10 runner
+        // inventory` never had to carry: `goose` and `goose-acp` are the same
+        // binary offering two different faces, and they are different runners
+        // because they report different things.
+        other => match ACP_RUNNERS.iter().find(|(name, _, _)| *name == other) {
+            Some((_, exe_name, subcommand)) => {
+                let exe = resolve(exe_name)
+                    .ok_or_else(|| ManagerError::ExecutableNotFound((*exe_name).into()))?;
+                StartedWorker::spawn(
+                    &exe,
+                    &[(*subcommand).to_string()],
+                    cwd,
+                    thresholds,
+                    farseer_runner::acp::parse_line,
+                    Channel::Acp,
+                )
+            }
+            None => return Err(ManagerError::UnsupportedRunner(other.to_string())),
+        },
     }?;
-    started.bootstrap(&contract.goal)?;
+    let mut started = started;
+    started.bootstrap(&contract.goal, cwd)?;
     Ok(started)
 }
 
@@ -810,7 +938,7 @@ mod tests {
             &std::env::current_dir().unwrap(),
             LivenessThresholds::default(),
             farseer_runner::claude_code::parse_line,
-            None,
+            Channel::OneShot,
         )
         .unwrap();
         (dir, started)
@@ -1076,7 +1204,7 @@ mod tests {
             &std::env::current_dir().unwrap(),
             LivenessThresholds::default(),
             completed_turn_fixture,
-            None,
+            Channel::OneShot,
         )
         .unwrap();
         let token = started.cancel_token();
@@ -1108,7 +1236,7 @@ mod tests {
             // Exercises the bootstrap-write path alongside cancellation:
             // `ping`'s own stdin is unread, so writing the goal frame to
             // it before the read loop starts must not itself break anything.
-            Some(farseer_runner::claude_code::steer_frame),
+            Channel::Steered(farseer_runner::claude_code::steer_frame),
         )
         .unwrap();
         assert!(
@@ -1231,7 +1359,7 @@ mod tests {
                 likely_hung_secs: 1,
             },
             farseer_runner::claude_code::parse_line,
-            None,
+            Channel::OneShot,
         )
         .unwrap();
         let handle = started.liveness_handle();
@@ -1263,5 +1391,117 @@ mod tests {
             Liveness::Live,
             "the result line was activity moments ago, well inside the default 120s threshold"
         );
+    }
+
+    #[test]
+    fn a_channel_decides_the_stdin_and_what_ends_the_read_loop() {
+        // The three questions that used to be answered by one `Option<fn>`.
+        assert!(matches!(Channel::OneShot.stdin_mode(), StdinMode::Closed));
+        assert!(matches!(
+            Channel::Steered(farseer_runner::claude_code::steer_frame).stdin_mode(),
+            StdinMode::Live
+        ));
+        assert!(matches!(Channel::Acp.stdin_mode(), StdinMode::Live));
+
+        // Only a conversational runner stops early, because only it stays alive
+        // after the work is done.
+        assert!(Channel::Acp.ends_at_terminal());
+        assert!(!Channel::OneShot.ends_at_terminal());
+        assert!(!Channel::Steered(farseer_runner::claude_code::steer_frame).ends_at_terminal());
+    }
+
+    #[test]
+    fn an_acp_runner_name_means_an_executable_and_a_subcommand() {
+        // `10 runner inventory` only ever carried bare executables. `goose` and
+        // `goose-acp` are one binary offering two faces, and they are separate
+        // runners because they report different things - the ACP face names a
+        // context window and the native one does not.
+        assert_eq!(ACP_RUNNERS[0], ("goose-acp", "goose", "acp"));
+        assert!(
+            ACP_RUNNERS.iter().all(|(name, exe, _)| name != exe),
+            "an ACP runner is never just its executable name"
+        );
+    }
+
+    #[test]
+    fn an_unknown_runner_is_still_unsupported_after_the_acp_list_is_consulted() {
+        let spec = WorkerContractSpec {
+            run_id: RunId::new(),
+            task_id: TaskId::new(),
+            cell_id: CellId::new("zero"),
+            goal: "irrelevant".into(),
+            workspace: WorkspaceStrategy::Worktree,
+            runner: "goose-acp-typo".into(),
+            tool_grants: vec![],
+            autonomy_ceiling: Irreversibility::Reversible,
+            budget: Budget::default(),
+            definition_of_done: String::new(),
+        };
+        let contract = WorkerContract::seal(spec);
+        let result = start_worker(
+            &contract,
+            &std::env::temp_dir(),
+            LivenessThresholds::default(),
+            &RunOptions::default(),
+        );
+        assert!(matches!(result, Err(ManagerError::UnsupportedRunner(_))));
+    }
+
+    /// Live, end to end, through the same `run_worker` an HTTP request reaches.
+    ///
+    /// Claude Code is deliberately not involved: the operator uses it
+    /// interactively and farseer competing for that session is a conflict
+    /// farseer should not create.
+    ///
+    /// Run with: `cargo test -p farseer-manager acp -- --ignored --nocapture`
+    #[test]
+    #[ignore = "spawns a real `goose acp` and spends a subscription"]
+    fn an_acp_run_reaches_the_record_with_a_context_window() {
+        let store = Store::open_in_memory().unwrap();
+        let spec = WorkerContractSpec {
+            run_id: RunId::new(),
+            task_id: TaskId::new(),
+            cell_id: CellId::new("zero"),
+            goal: "Say hello in one short sentence.".into(),
+            workspace: WorkspaceStrategy::Worktree,
+            runner: "goose-acp".into(),
+            tool_grants: vec![],
+            autonomy_ceiling: Irreversibility::Reversible,
+            budget: Budget::default(),
+            definition_of_done: String::new(),
+        };
+        let run_id = spec.run_id;
+        let contract = WorkerContract::seal(spec);
+
+        let mut tick = 100i64;
+        let report = run_worker(
+            &store,
+            &contract,
+            &std::env::current_dir().unwrap(),
+            LivenessThresholds::default(),
+            &RunOptions::default(),
+            || {
+                tick += 1;
+                tick
+            },
+            |_, _, steer| {
+                assert!(
+                    steer.is_none(),
+                    "an ACP steer needs a session id, which no `fn(&str) -> String` carries"
+                );
+            },
+        )
+        .expect("the run completes rather than waiting for an EOF that never comes");
+
+        assert_eq!(report.outcome, Outcome::Ok);
+        let events = store
+            .scan(0, 200, &farseer_store::ScanFilter::run(run_id))
+            .unwrap();
+        let kinds: Vec<&str> = events.iter().map(|event| event.kind.as_str()).collect();
+        assert!(
+            kinds.contains(&EventKind::USAGE_UPDATED),
+            "the denominator is the reason this runner exists, and it must reach the record: {kinds:?}"
+        );
+        assert!(kinds.contains(&EventKind::MANAGER_ANSWERED), "{kinds:?}");
     }
 }

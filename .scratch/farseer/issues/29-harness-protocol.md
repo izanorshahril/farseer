@@ -241,3 +241,38 @@ Claude Code was not involved, per the operator's standing request.
 ### Still not built
 
 Nothing **calls** `AcpSession` yet. `StartedWorker::spawn` chooses a native adapter by runner name and knows nothing about ACP, so wiring it is the next step and it needs a decision the map does not have: an ACP runner in `runners.toml` names an executable **and a subcommand** (`goose acp`, `opencode acp`), which is a shape `10 runner inventory`'s inventory has not carried before.
+
+
+## Implementation note, 2026-08-26: wired, and one field that was answering three questions
+
+`goose-acp` and `opencode-acp` are runners now. A live run through `run_worker` - the same path an HTTP request takes - finished in 2.65 seconds with `usage_updated` and `manager_answered` in the record and outcome `ok`.
+
+### The decision this ticket said the map did not have
+
+**An ACP runner name means an executable *and* a subcommand.** `10 runner inventory` only ever carried bare executables.
+
+`goose` and `goose-acp` are **the same binary offering two faces**, and they are two runners rather than one because *they report different things*: the ACP face names a context window and the native face does not.
+That is `10`'s own rule - observed, never advertised - applied one level finer than it was written. `ACP_RUNNERS` is a three-column table for that reason, and an entry in it is a claim farseer has **seen this agent's output**, not that ACP agents work in general.
+
+### `Option<fn(&str) -> String>` was answering three questions and could express two
+
+`StartedWorker`'s steer field had accumulated three jobs: whether a stdin exists, how the goal is delivered, and what ends the read loop.
+The first two it answered by accident and correctly. The third it answered by **omission**, and `29` is the second bug in that omission:
+
+- `28 operator surface`: a one-shot runner given a live stdin never starts.
+- `29 harness protocol`: a conversational runner read to end of stream never finishes.
+
+Both present identically - a live process producing nothing.
+`Channel::{OneShot, Steered, Acp}` now names all three answers in one place, which is why this is a rename of an existing concept rather than a new flag beside it.
+
+### What an ACP worker deliberately cannot do yet
+
+**Steer.** An ACP steer is another `session/prompt`, which needs the session id and a fresh request id, and neither fits a `fn(&str) -> String`.
+`20 worker control channel` made steering the exception rather than the rule, so `steer_handle()` returns `None` for `Channel::Acp` and the live test asserts it - a refusal farseer can see beats a handle that writes into nothing.
+A **manager** on ACP needs this, so it is the gate on that work rather than a loose end.
+
+Also: the mode is hardcoded to `auto`, which is `goose`'s id for "do not ask".
+ACP does not standardise mode names, so an agent using another word for the same thing opens in its own default.
+Guessing at a synonym would be inventing a grant `12 autonomy and deny list` did not give, so `ACP_UNATTENDED_MODE` is one constant with the reasoning attached rather than a table of guesses.
+
+Signals arriving **during** the handshake are dropped rather than recorded, because `bootstrap` has no store. In practice that is one `usage_update` the agent sends again after the turn.
