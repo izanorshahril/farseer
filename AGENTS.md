@@ -33,6 +33,12 @@ Widget code is authored by cell zero into `widgets/` in git and farseer never st
 `GET /v1/quota` reports `allowed` / `exhausted_until` / `unknown`, a `resets_at` countdown, farseer's own spend since the window opened, and the runners sharing that account.
 **It never reports a percentage**, and tests assert its absence: farseer's own spend is a lower bound on a window drained by sessions it cannot see, so a percentage would be most wrong exactly near exhaustion. An undeclared runner is its own account, which declines to merge rather than guessing at a shared login.
 
+The canvas from `28 operator surface` lives in [`ui/`](ui/README.md) - Vite, React and TypeScript, run with `bun`, and a client of `/v1` like any other per `01 cell primitive`'s headless ruling.
+The dev proxy attaches the operator token so **the browser never holds it**, widgets reach farseer only through `src/bridge.ts`, and the canvas arrangement round-trips through `PUT /v1/ui-state/canvas` rather than `localStorage`.
+`28`'s three gates are built and each was tested by attacking it: the **import allowlist** refuses `node:fs` and any path outside the widget's own directory at compile; the **sandboxed render** is an opaque-origin iframe where a hostile widget reached the host bridge and nothing else - not the parent page, not `localStorage`, not cookies, not a direct fetch of farseer; **keep or undo** is git scoped to `widgets/`.
+Widgets in `widgets/` are discovered and compiled by `ui/plugins/widget-host.ts`, never by the runtime, so `01 cell primitive`'s no-plugin-ABI ruling still holds.
+Cell zero has not yet written one: `widgets/run-tally` is hand-written, because the contract gets proven before a manager is asked to satisfy it.
+
 The MCP face from `02 record scope` is nested at `/v1/mcp` in the same router and process because `09 store decision` requires one process and one writer.
 The exact-pinned `rmcp` streamable-HTTP service shares `AppState`'s `Store` and loopback/token guard; only `/v1/mcp` accepts the per-manager bearer, while operator routes still require the process-wide token.
 The four tools are manager-scoped `read_memory`, `write_memory`, `delegate_to_worker`, and `delegate_to_cell`; every call derives identity and memory scope from the active pinned manager context, and no tool appends a raw event.
@@ -86,6 +92,12 @@ Two platform facts the spikes established the hard way:
 
 ```bash
 cargo test --workspace
+```
+
+The canvas has its own check, and it is a typecheck rather than a test suite - there is nothing there yet whose behaviour a test would pin:
+
+```bash
+bun run --cwd ui check
 ```
 
 `cargo clippy --workspace --all-targets` is expected to be silent, and `cargo fmt --all` is applied before every commit.

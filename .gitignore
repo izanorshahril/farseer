@@ -4,3 +4,7 @@ target/
 # Spike fixtures and run artifacts
 node_modules/
 .scratch/farseer/spikes/jobspike/tree/pids-*.txt
+
+# Local runtime output
+.scratch/canvas-dev/
+ui/dist/
