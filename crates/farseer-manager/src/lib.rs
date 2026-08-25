@@ -423,6 +423,10 @@ pub fn start_worker(
                         live_input: options.role == RunRole::Manager,
                         mcp_config: options.claude_mcp_config.as_deref(),
                         append_system_prompt: options.claude_append_system_prompt.as_deref(),
+                        edits_granted: options
+                            .manager_cell
+                            .as_ref()
+                            .is_some_and(|cell| cell.has_shell_grant()),
                     },
                 ),
                 cwd,

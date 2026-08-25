@@ -26,6 +26,14 @@ pub struct ClaudeCodeLaunch<'a> {
     pub mcp_config: Option<&'a Path>,
     /// Manager identity and roster guidance, kept out of the operator's goal.
     pub append_system_prompt: Option<&'a str>,
+    /// Whether the pinned cell grants a shell-capable tool.
+    ///
+    /// `12 autonomy and deny list` makes the grant the boundary, so this is the
+    /// cell's own policy mapped onto the runner's flag rather than a second
+    /// policy invented here. A cell that grants no shell gets no file-editing
+    /// tools either - and the API already refuses to launch a native runner in
+    /// such a cell at all.
+    pub edits_granted: bool,
 }
 
 /// The captured stream-json flags plus optional manager-only MCP wiring.
@@ -41,6 +49,19 @@ pub const MANAGER_ALLOWED_TOOLS: [&str; 4] = [
     "mcp__farseer__read_memory",
     "mcp__farseer__write_memory",
 ];
+
+/// The built-ins a manager needs to leave an artefact behind.
+///
+/// Observed 2026-08-25: a manager told to write a widget read its contract,
+/// decided correctly, and then stalled on **"Claude requested permissions to
+/// write to ..."** - a prompt nobody is watching. `10 runner inventory` recorded
+/// that `--allowedTools` is not an *exclusive* allowlist, and this is the other
+/// half of that fact: a built-in being reachable does not mean it is permitted.
+///
+/// Granted only to a cell that already grants a shell, because `12 autonomy and
+/// deny list` made that grant the boundary and a cell without one has no file
+/// authority to express.
+pub const MANAGER_EDIT_TOOLS: [&str; 3] = ["Write", "Edit", "Bash"];
 
 pub fn build_args(contract: &WorkerContractSpec, launch: ClaudeCodeLaunch<'_>) -> Vec<String> {
     let mut args = vec![
@@ -64,7 +85,13 @@ pub fn build_args(contract: &WorkerContractSpec, launch: ClaudeCodeLaunch<'_>) -
             // observed live on 2026-08-25 when `delegate_to_cell` shipped
             // without it: "Claude requested permissions to use
             // mcp__farseer__delegate_to_cell, but you haven't granted it yet."
-            MANAGER_ALLOWED_TOOLS.join(","),
+            {
+                let mut granted: Vec<&str> = MANAGER_ALLOWED_TOOLS.to_vec();
+                if launch.edits_granted {
+                    granted.extend(MANAGER_EDIT_TOOLS);
+                }
+                granted.join(",")
+            },
         ]);
     }
     if let Some(prompt) = launch.append_system_prompt {
@@ -104,6 +131,7 @@ mod tests {
             &contract("post a haiku about ferrous rust"),
             ClaudeCodeLaunch {
                 live_input: true,
+                edits_granted: true,
                 ..ClaudeCodeLaunch::default()
             },
         );
@@ -111,6 +139,43 @@ mod tests {
             !args.contains(&"post a haiku about ferrous rust".to_string()),
             "the goal travels as the first stdin frame, not argv"
         );
+    }
+
+    #[test]
+    fn a_cell_without_a_shell_grant_gets_no_file_editing_tools() {
+        // Observed 2026-08-25: a manager that may not write stalls on a
+        // permission prompt nobody answers, which looks exactly like a hang.
+        // `12 autonomy and deny list` makes the cell's own grant the boundary,
+        // so this is that policy on the flag rather than a second one.
+        let config = std::path::PathBuf::from("mcp.json");
+        let granted = build_args(
+            &contract("anything"),
+            ClaudeCodeLaunch {
+                mcp_config: Some(&config),
+                edits_granted: true,
+                ..ClaudeCodeLaunch::default()
+            },
+        );
+        let refused = build_args(
+            &contract("anything"),
+            ClaudeCodeLaunch {
+                mcp_config: Some(&config),
+                edits_granted: false,
+                ..ClaudeCodeLaunch::default()
+            },
+        );
+        let allowed = |args: &[String]| {
+            let at = args.iter().position(|a| a == "--allowedTools").unwrap();
+            args[at + 1].clone()
+        };
+
+        assert!(allowed(&granted).contains("Write"));
+        assert!(allowed(&granted).contains("mcp__farseer__delegate_to_cell"));
+        assert!(
+            !allowed(&refused).contains("Write"),
+            "a cell granting no shell has no file authority to hand on"
+        );
+        assert!(allowed(&refused).contains("mcp__farseer__read_memory"));
     }
 
     #[test]
@@ -126,6 +191,7 @@ mod tests {
             &contract("anything"),
             ClaudeCodeLaunch {
                 live_input: true,
+                edits_granted: true,
                 ..ClaudeCodeLaunch::default()
             },
         );
@@ -158,6 +224,7 @@ mod tests {
             &contract("delegate this"),
             ClaudeCodeLaunch {
                 live_input: true,
+                edits_granted: true,
                 mcp_config: Some(Path::new(r"C:\runs\manager\farseer-mcp.json")),
                 append_system_prompt: Some("manager context"),
             },
