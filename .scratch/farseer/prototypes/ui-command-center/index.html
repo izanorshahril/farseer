@@ -141,6 +141,11 @@
   .B .bar i { display: block; height: 100%; }
   .B .sparks { display: flex; gap: 3px; align-items: flex-end; height: 34px; }
   .B .sparks i { flex: 1; background: linear-gradient(180deg, var(--accent), #1f6feb); border-radius: 1px; }
+  .B .ask {
+    flex: 1; background: var(--panel-2); border: 1px solid var(--line); border-radius: 5px;
+    padding: 8px 10px; color: var(--ink); font: 13px var(--sans);
+  }
+  .B .ask:focus { outline: none; border-color: var(--accent); }
 
   /* --- variant C: blotter ------------------------------------------- */
   .C { flex: 1; min-height: 0; display: grid; grid-template-columns: 1fr 340px; }
@@ -580,8 +585,22 @@ function renderB() {
       <div class="grow scroll">${board(state.overlay)}</div>
     </div>` : '';
 
+  const composer = `<div class="panel w full" style="position:sticky;top:0;z-index:5">
+    <div class="body" style="padding:8px 10px">
+      <div class="row">
+        <span class="pill">to: top manager</span>
+        <input class="ask" placeholder="Ask for anything - a new widget, a status, work in any channel ..." data-verb="instruct">
+      </div>
+      <div class="note" style="border:0;background:none;padding:4px 0 0">
+        One address for every request. The widget you typed from is the <b>anchor</b>, never the destination -
+        the top manager decides where the work goes. Operator verbs on a run stay direct.
+      </div>
+    </div>
+  </div>`;
+
   return `${topbar('<span class="faint" style="font-size:11px">canvas: drag to arrange · saved to /v1/ui-state</span>')}
   <div class="B scroll"><div class="canvas">
+    ${composer}
     ${CELLS.map(cellTile).join('')}${attention}${quota}${spend}${lessons}
   </div></div>${overlay}`;
 }

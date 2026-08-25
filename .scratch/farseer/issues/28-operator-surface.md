@@ -124,3 +124,42 @@ Liveness is derived per `05 run state model`, and the verb list is derived from 
 - `13 harness build kit` - widget code joins cell definitions as **a file in git, not a database row**, and the kit may generate one.
 - `27 quota accounting` - its utilisation surface is a widget, and it keeps its own rule: `allowed` / `exhausted_until` / `unknown` and farseer's own spend, never a percentage.
 - `26 routing policy` - unchanged, and now unblocked: the display it feeds is a widget.
+
+## Corrected 2026-08-25: a widget displays a cell, it never addresses one
+
+Section 2 got the right answer for the wrong reason, and the wrong half is load-bearing.
+
+It said a widget's manager **is** the manager of the cell it fronts, which quietly puts an address on every widget.
+The operator corrected it the same day: **every AI input, from any widget, goes to the top manager, and only the top manager.**
+That manager is the one thing currently controlling farseer, and it decides from there where the work goes.
+
+The prior art is [Claude Design](https://claude.ai/code): a comment left on a UI component returns to the **main agent**, not to a per-component agent.
+The component is the **anchor**, not the recipient.
+
+### What changes
+
+- **One address.** A widget's AI input is `POST /v1/cells/zero/instruct`, whatever the widget is showing. Still no new API operation.
+- **The widget supplies an anchor, not a destination.** Which widget, and what it was displaying - a cell, a run, a board column - prepended to the goal so the manager knows what the operator was looking at when they typed. It rides in `goal` as text, because the reader is an LLM and prose is what an LLM reads. `16 local api surface`'s additive-only promise leaves room for a structured `context` field the day something needs to machine-read the anchor; nothing does yet.
+- **Section 5's `instruct` row now reads "addressed to the top manager"**, not "addressed to a cell".
+
+### Why this is the better split
+
+**Routing is a decision, not a click.**
+A per-cell composer lets the operator route work by choosing which box to type in, which makes the surface a router and hides the routing decision from the record.
+Routing belongs to `26 routing policy` and to the manager that owns the task.
+
+**One address means one place** autonomy, policy and budget are enforced, and one place the decision is recorded.
+Two composers would have meant two, differing quietly.
+
+**The line it draws is clean**: operator **verbs** act on a run directly - `steer`, `cancel`, `observe`, `take over`, `release`, unchanged from section 5 - while **anything phrased as a request** goes to the top manager.
+Clicking cancel is not a conversation. Asking for something is.
+
+### The cost, and it is not small
+
+**Cross-cell delegation stops being optional.**
+
+Under section 2 as written, a widget fronting `social` could have reached social's manager directly and needed nothing new.
+Under the correction that request lands on the top manager and has to travel outward, so **every widget fronting a cell other than zero is blocked until cross-cell delegation lands**.
+`AGENTS.md` records it as "remains open"; this correction makes it a **blocking dependency of the operator surface**, and it should be built before the second widget rather than after.
+
+Sections 1, 3 and 4 are unaffected.

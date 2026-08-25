@@ -22,6 +22,8 @@ A `Worktree` cell uses the repository named by `--repo`, which defaults to the d
 
 The operator surface is decided but not built: `28 operator surface` made the **canvas the home screen**, and anything that is not the canvas a **widget** on it.
 A widget is a **cell's face** - it renders, and the cell behind it thinks - so there is no second place agents run and no new API operation.
+A widget **displays** a cell and never **addresses** one: every AI input from every widget goes to the **top manager**, which decides where the work goes, while operator verbs on a run stay direct.
+That makes cross-cell delegation a **blocking dependency** of the operator surface rather than merely open, since a widget fronting any cell but zero needs the top manager to reach outward.
 Widget code is authored by cell zero into `widgets/` in git and farseer never stores it, which keeps `01 cell primitive`'s no-plugin-ABI ruling intact: the loader lives in the client, and the runtime still loads nothing.
 
 The MCP face from `02 record scope` is nested at `/v1/mcp` in the same router and process because `09 store decision` requires one process and one writer.
