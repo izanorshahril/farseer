@@ -159,3 +159,53 @@ Read 2026-08-26.
 - Crush omits the model from headless JSON: `github.com/charmbracelet/crush/issues/2412`
 - pi's RPC mode and ACP status: `github.com/earendil-works/pi/discussions/4444`
 - `acpx`: `acpx.sh`
+
+
+## Implementation note, 2026-08-26: the parser, and what a real transcript changed
+
+`goose acp` and `opencode acp` are **both already installed on this machine**, which settles section 1 empirically rather than from documentation.
+A probe drove `goose acp` 1.47.0 through `initialize`, `session/new` and `session/prompt` and captured eleven lines. Every mapping in `acp.rs` is backed by one of them.
+
+### The denominator exists
+
+```json
+{"sessionUpdate":"usage_update","used":4560,"size":1050000,"cost":{"amount":0.000918,"currency":"USD"}}
+```
+
+`size` is the field this map has never had a source for.
+`28 operator surface` asked for "context info" and got a token count with no denominator, because neither Claude Code nor Codex sends one.
+The first ACP agent farseer ever spoke to sent it **before the first turn**, unprompted, and again after.
+
+It lands in the record as `usage_updated` rather than on `RunReport`, which is a correction to how I first wired it: a reading that only survives to the end of the run cannot show a window filling up *while* it fills, and `28`'s meta strip reads the event stream.
+
+### And the breakdown was not rejected after all
+
+Section 3 said ACP "chose `used`/`size` **instead of** the per-turn breakdown". That is too strong, and the capture shows why:
+
+```json
+{"id":3,"result":{"stopReason":"end_turn","usage":{"totalTokens":4560,"inputTokens":4554,"outputTokens":6}}}
+```
+
+Both exist, at **different scopes**: `used`/`size` is streamed and cumulative, the split rides the terminal response and is per turn.
+So the real rule is not "one instead of the other" but **do not report cost from both**, since one denominator is a session and the other is a turn. `acp.rs` reads cost only from `usage_update`, with a test naming the reason.
+
+### Three more things the capture said
+
+- **The provider is advertised.** `session/new` returned `configOptions` including `{"id":"provider","currentValue":"chatgpt_codex"}` - the field `28` wanted and could only get from `runners.toml`. Not parsed yet.
+- **Goose reports cost over ACP**, cumulative and in USD. `10 runner inventory` scored cost per *runner*; it is per **face**.
+- **Declining `fs` and `terminal` was accepted without complaint**, and the turn ran. Section 4's requirement is not theoretical.
+
+### The hazard this build takes seriously
+
+ACP expects the client to answer `session/request_permission`, and farseer has nobody watching.
+An unanswered request is a live process producing nothing - the identical failure `28` already paid for when a granted tool was missing from `--allowedTools`.
+So `parse_line` **surfaces it as `permission_requested`** rather than dropping it, and `set_mode_frame` exists so a driver can open a session in a mode that does not ask.
+`goose acp` happens to default to `auto`. That is luck, and the driver must not rely on it.
+
+### Not built
+
+**The driver.** Every native runner here is one-shot - spawn, read lines, exit - and ACP is a conversation: initialize, wait, open a session, wait, prompt.
+`drive()` reads stdout and never writes, so ACP needs a stateful counterpart that owns request ids and the session id.
+`acp.rs` ships the frames and the parse it will need, proven against a real agent; nothing yet sends them in anger.
+
+Also unbuilt: `configOptions` parsing, and a `size` for the native runners, which have no source for one and should keep showing nothing.

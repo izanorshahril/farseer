@@ -460,3 +460,11 @@ code {
   color: var(--faint);
   font-weight: 400;
 }
+
+/* Context pressure, at the thresholds ACP's clients already use. */
+.meta .warn b {
+  color: var(--warn, #b78100);
+}
+.meta .bad b {
+  color: var(--bad, #c0392b);
+}

@@ -53,6 +53,14 @@ pub enum RunnerSignal {
     /// everywhere - observed, never advertised - so a runner that says nothing
     /// produces nothing rather than a default that looks like an answer.
     Session(SessionInfo),
+    /// Context-window usage, and the cumulative cost beside it.
+    ///
+    /// Only an ACP runner produces this: `29 harness protocol` found that
+    /// neither Claude Code nor Codex reports a window **size** at all, so
+    /// "how full is the context" was unanswerable until farseer spoke a
+    /// protocol whose authors had already decided it was the number that
+    /// matters. See [`crate::acp::UsageInfo`].
+    Usage(crate::acp::UsageInfo),
     /// User-visible terminal text which a supervising manager can relay.
     Output(String),
     Finished(FinishedSignal),

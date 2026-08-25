@@ -15,12 +15,17 @@
 //! runner's invocation-building and stream-json mapping, and a
 //! Job-Object-supervised child process with piped, line-buffered I/O
 //! ([`spawn`], Windows only). Together these can run and reap one process
-//! and read its lines - the primitive a runner needs. **Not yet built**: the
-//! ACP runner `20 worker control channel` chose as the default path. Only Claude Code has a steering
+//! and read its lines - the primitive a runner needs. The ACP runner
+//! `20 worker control channel` chose as the default path is now here
+//! ([`acp`]), built against a captured `goose acp` transcript rather than
+//! against the spec alone; **not yet built** is the stateful driver that
+//! sends its handshake, since every native runner here is one-shot and ACP is
+//! a conversation. Only Claude Code has a steering
 //! path - Codex, cursor-agent and goose all restart into a new process on
 //! resume/continue rather than continuing a live one, per `10 runner inventory` (Codex,
 //! cursor-agent) and this crate's own goose probe.
 
+pub mod acp;
 pub mod claude_code;
 pub mod codex;
 pub mod cursor_agent;

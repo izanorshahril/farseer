@@ -33,7 +33,23 @@ type Meta = {
   cost?: number;
   tokens?: number;
   outcome?: string;
+  /** Context tokens in use, and the window they are used out of. */
+  used?: number;
+  size?: number;
 };
+
+/**
+ * `used / size`, with the percentage that makes it actionable.
+ *
+ * Absent unless the runner said both. A `used` with no `size` is a token count
+ * without a denominator, which is what every non-ACP runner reports and is not
+ * a context reading.
+ */
+function context(meta: Meta): string | undefined {
+  if (meta.used === undefined || !meta.size) return undefined;
+  const pct = Math.round((meta.used / meta.size) * 100);
+  return `${meta.used.toLocaleString()} / ${meta.size.toLocaleString()} (${pct}%)`;
+}
 
 type Turn = {
   seq: number;
@@ -127,6 +143,19 @@ export function ConversationWidget({ bridge }: { bridge: Bridge }) {
         }));
         return;
       }
+      // Cumulative, so the latest reading is the answer. Only an ACP runner
+      // sends a `size`; the rest never say how big the window is, so the field
+      // stays absent rather than showing a fraction with a made-up denominator.
+      if (event.kind === "usage_updated") {
+        setMeta((current) => ({
+          ...current,
+          cell: event.cell_id,
+          used: num("used") ?? current.used,
+          size: num("size") ?? current.size,
+          cost: num("cost_usd_micros") ?? current.cost,
+        }));
+        return;
+      }
       if (event.kind === "run_finished") {
         setMeta((current) => ({
           ...current,
@@ -164,6 +193,18 @@ export function ConversationWidget({ bridge }: { bridge: Bridge }) {
     };
   }, [bridge]);
 
+  // 75-90% is worth noticing and above 95% the next prompt may not fit, which
+  // is the convention ACP's clients already settled on - farseer does not need
+  // a second one.
+  const pressure =
+    meta.used !== undefined && meta.size
+      ? meta.used / meta.size >= 0.95
+        ? "bad"
+        : meta.used / meta.size >= 0.75
+          ? "warn"
+          : ""
+      : "";
+
   const strip = (
     <div className="meta">
       {[
@@ -171,11 +212,17 @@ export function ConversationWidget({ bridge }: { bridge: Bridge }) {
         ["runner", meta.runner],
         ["model", meta.model],
         ["session", meta.session_id?.slice(0, 8)],
+        ["context", context(meta)],
         ["tokens", meta.tokens?.toLocaleString()],
         ["cost", typeof meta.cost === "number" ? usd(meta.cost) : undefined],
         ["last run", meta.outcome],
       ].map(([label, value]) => (
-        <span key={label} className={value ? "" : "absent"}>
+        <span
+          key={label}
+          className={[value ? "" : "absent", label === "context" ? pressure : ""]
+            .filter(Boolean)
+            .join(" ")}
+        >
           <i>{label}</i>
           <b className="mono">{value ?? "not reported"}</b>
         </span>

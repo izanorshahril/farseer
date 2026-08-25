@@ -407,6 +407,29 @@ impl StartedWorker {
                     // carried out on the report, and appended by the layer that
                     // knows which account it belongs to - on change only.
                     RunnerSignal::RateLimit(info) => window = Some(Box::new(info)),
+                    // Straight into the record rather than onto the report:
+                    // `28 operator surface`'s meta strip reads the event stream,
+                    // and a reading that only survives to the end of the run
+                    // cannot show a context window filling up while it fills.
+                    RunnerSignal::Usage(info) => {
+                        let event = NewEvent::new(
+                            contract.cell_id.clone(),
+                            contract.run_id,
+                            EventKind::new(EventKind::USAGE_UPDATED),
+                            progress_actor,
+                            now_ms(),
+                            serde_json::json!({
+                                "used": info.used,
+                                "size": info.size,
+                                "cost_usd_micros": info.cost_usd_micros,
+                            }),
+                        );
+                        if let Err(e) = sink.append(&event) {
+                            store_err = Some(e);
+                            cancel_on_store_failure.cancel();
+                            return;
+                        }
+                    }
                     RunnerSignal::Session(info) => {
                         let event = NewEvent::new(
                             contract.cell_id.clone(),
