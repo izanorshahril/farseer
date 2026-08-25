@@ -33,6 +33,10 @@ Widget code is authored by cell zero into `widgets/` in git and farseer never st
 `GET /v1/quota` reports `allowed` / `exhausted_until` / `unknown`, a `resets_at` countdown, farseer's own spend since the window opened, and the runners sharing that account.
 **It never reports a percentage**, and tests assert its absence: farseer's own spend is a lower bound on a window drained by sessions it cannot see, so a percentage would be most wrong exactly near exhaustion. An undeclared runner is its own account, which declines to merge rather than guessing at a shared login.
 
+`GET /v1/runs` lists recent runs, newest first, sharing one view builder with `GET /v1/runs/{id}` so a list row and a single read can never disagree.
+The **Runs** widget draws `05 run state model`'s verbs on that line and derives which ones to offer from lifecycle, control and the runner's steering path - a finished run offers none, and `steer` never appears for a runner that cannot take one.
+A run verb is on the host bridge and deliberately **not** on the sandbox bridge: a widget the operator did not write can show a run and cannot cancel one.
+
 The canvas reads the record live: `src/stream.ts` follows `/v1/stream` and the **Activity** widget renders it, so an instruction the composer fires has somewhere to land.
 It parses SSE by hand rather than using `EventSource`, because farseer puts the **event kind** in the `event:` field and `EventSource.onmessage` fires only for unnamed events - it would silently receive nothing.
 The cursor is exclusive, so a dropped connection resumes with no gap and no duplicate.

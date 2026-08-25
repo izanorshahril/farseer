@@ -1,0 +1,139 @@
+import { useCallback, useEffect, useState } from "react";
+import type { Bridge } from "../bridge";
+import { follow } from "../stream";
+
+/**
+ * The fleet, with `05 run state model`'s verbs on the line.
+ *
+ * The rule this widget exists to keep: **a surface never offers a verb the
+ * runtime would refuse.** The verb list is derived from lifecycle and control
+ * the same way liveness is derived from a timestamp - never stored, never
+ * guessed, and never a button that fails when clicked.
+ *
+ * `28 operator surface`'s table put `steer`, `cancel`, `observe`, `take over`
+ * and `release` inline here, and `re-run` and `re-scope` only where the contract
+ * is on screen - both start a **new** run, so they belong to a detail view this
+ * widget deliberately does not fake.
+ */
+type Run = {
+  run_id: string;
+  task_id: string;
+  cell_id: string;
+  runner: string;
+  lifecycle: "running" | "finished";
+  outcome: string | null;
+  usd_micros: number;
+  tokens: number;
+  operator_touched: boolean;
+  started_ts: number;
+  liveness: "live" | "stalled" | "likely_hung" | null;
+};
+
+/** What `05 run state model` permits, given where the run actually is. */
+function verbsFor(run: Run): string[] {
+  if (run.lifecycle !== "running") return [];
+  // Steer needs a live process listening on stdin. The runtime answers `400`
+  // when the runner has no steering path, and finding that out by clicking is
+  // exactly what this list exists to prevent - but the runner is on the row, so
+  // the decision is honest rather than optimistic.
+  return run.runner === "claude-code" ? ["steer", "cancel"] : ["cancel"];
+}
+
+const usd = (micros: number) => `$${(micros / 1_000_000).toFixed(2)}`;
+
+const TONE: Record<string, string> = {
+  ok: "ok",
+  failed: "bad",
+  cancelled: "dim",
+  abandoned: "dim",
+};
+
+export function RunsWidget({ bridge }: { bridge: Bridge }) {
+  const [runs, setRuns] = useState<Run[] | null>(null);
+  const [busy, setBusy] = useState<string | null>(null);
+  const [note, setNote] = useState<string | null>(null);
+
+  const load = useCallback(
+    () =>
+      bridge
+        .read<Run[]>("/runs?limit=25")
+        .then(setRuns)
+        .catch((e: Error) => setNote(e.message)),
+    [bridge],
+  );
+
+  useEffect(() => {
+    void load();
+    // The stream is the trigger, not a timer: a run changes state because
+    // something happened, and something happening is an event.
+    const subscription = follow(() => void load());
+    return subscription.close;
+  }, [load]);
+
+  const act = async (run: Run, verb: string) => {
+    setBusy(`${run.run_id}:${verb}`);
+    setNote(null);
+    try {
+      if (verb === "steer") {
+        const message = prompt(`Steer run ${run.run_id.slice(0, 8)} - same run, same contract:`);
+        if (!message) return;
+        await bridge.post(`/runs/${run.run_id}/steer`, { message });
+        setNote(`steered ${run.run_id.slice(0, 8)}`);
+      } else {
+        await bridge.post(`/runs/${run.run_id}/cancel`);
+        setNote(`cancelled ${run.run_id.slice(0, 8)}`);
+      }
+      await load();
+    } catch (e) {
+      setNote((e as Error).message);
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  if (note && !runs) return <p className="empty bad">{note}</p>;
+  if (!runs) return <p className="empty">reading runs...</p>;
+  if (runs.length === 0) return <p className="empty">No runs yet.</p>;
+
+  return (
+    <>
+      <ul className="runs">
+        {runs.map((run) => {
+          const verbs = verbsFor(run);
+          return (
+            <li key={run.run_id}>
+              <span
+                className={`dot ${run.liveness ?? (run.lifecycle === "running" ? "live" : "done")}`}
+                title={run.liveness ?? run.lifecycle}
+              />
+              <span className="mono faint">{run.run_id.slice(0, 8)}</span>
+              <span className="badge">{run.cell_id}</span>
+              <span className="dim mono small">{run.runner}</span>
+              <span className={`kind ${TONE[run.outcome ?? ""] ?? ""}`}>
+                {run.outcome ?? run.lifecycle}
+              </span>
+              {run.operator_touched && (
+                <span className="badge touched" title="a human intervened, per 07">
+                  touched
+                </span>
+              )}
+              <span className="mono faint small">{usd(run.usd_micros)}</span>
+              <span className="grow" />
+              {verbs.map((verb) => (
+                <button
+                  key={verb}
+                  className={verb === "cancel" ? "chip danger" : "chip"}
+                  disabled={busy !== null}
+                  onClick={() => void act(run, verb)}
+                >
+                  {busy === `${run.run_id}:${verb}` ? "..." : verb}
+                </button>
+              ))}
+            </li>
+          );
+        })}
+      </ul>
+      {note && <p className="dim small">{note}</p>}
+    </>
+  );
+}

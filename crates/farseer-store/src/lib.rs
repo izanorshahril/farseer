@@ -364,6 +364,53 @@ pub struct RunRow {
 
 /// Convenience for reading a row back, used by tests and by the API.
 impl Store {
+    /// The most recent runs, newest first.
+    ///
+    /// Ordered by `started_ts` rather than by insertion, because a run that
+    /// started earlier and finished later is still the older run - and the
+    /// fleet view reads top-down.
+    pub fn recent_runs(&self, limit: usize) -> Result<Vec<RunRow>> {
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT run_id, task_id, cell_id, runner, model, outcome, usd_micros, tokens,
+                    operator_touched, started_ts, finished_ts
+             FROM runs ORDER BY started_ts DESC, rowid DESC LIMIT ?1",
+        )?;
+        let rows = stmt
+            .query_map([limit as i64], |row| {
+                Ok((
+                    row.get::<_, Vec<u8>>(0)?,
+                    row.get::<_, Vec<u8>>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, String>(4)?,
+                    row.get::<_, Option<String>>(5)?,
+                    row.get::<_, i64>(6)?,
+                    row.get::<_, i64>(7)?,
+                    row.get::<_, i64>(8)?,
+                    row.get::<_, i64>(9)?,
+                    row.get::<_, Option<i64>>(10)?,
+                ))
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        rows.into_iter()
+            .map(|r| {
+                Ok(RunRow {
+                    run_id: RunId::from_bytes(uuid_bytes(&r.0, "run_id")?),
+                    task_id: farseer_core::TaskId::from_bytes(uuid_bytes(&r.1, "task_id")?),
+                    cell_id: CellId::new(r.2),
+                    runner: r.3,
+                    model: r.4,
+                    outcome: r.5,
+                    usd_micros: r.6 as u64,
+                    tokens: r.7 as u64,
+                    operator_touched: r.8 != 0,
+                    started_ts: r.9,
+                    finished_ts: r.10,
+                })
+            })
+            .collect()
+    }
+
     pub fn run(&self, run_id: RunId) -> Result<Option<RunRow>> {
         let row = self
             .conn
