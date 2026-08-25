@@ -874,6 +874,7 @@ irreversibility = "undoable"
             cost_usd_micros: Some(123_456),
             tokens: Some(789),
             result: Some("terminal text".into()),
+            window: None,
         };
 
         let preserved =

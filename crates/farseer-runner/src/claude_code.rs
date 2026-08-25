@@ -60,6 +60,27 @@ pub struct RateLimitInfo {
     pub is_using_overage: bool,
 }
 
+impl RateLimitInfo {
+    /// `26 routing policy`'s availability signal, which `27 quota accounting`
+    /// then records over time. One mechanism for routing and for accounting, as
+    /// `26 routing policy` predicted.
+    ///
+    /// Anything that is not the provider's own `allowed` is treated as
+    /// exhausted: `10 runner inventory` captured `allowed` and nothing else, so
+    /// guessing which other strings are benign would be inventing reach farseer
+    /// has not observed. Failing to `exhausted_until` is the safe direction -
+    /// `26 routing policy` routes away from it rather than into it.
+    pub fn availability(&self) -> farseer_core::Availability {
+        if self.status == "allowed" {
+            farseer_core::Availability::Allowed
+        } else {
+            farseer_core::Availability::ExhaustedUntil {
+                resets_at: self.resets_at,
+            }
+        }
+    }
+}
+
 /// `11 analytics questions`'s cost metric, native to this runner per `10 runner inventory`: `total_cost_usd` in the
 /// terminal `result` event, converted to the store's integer micros so no
 /// float ever reaches the record.

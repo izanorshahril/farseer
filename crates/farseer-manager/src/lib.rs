@@ -93,6 +93,14 @@ pub struct RunReport {
     pub tokens: Option<i64>,
     /// User-visible terminal text for a supervising manager to relay.
     pub result: Option<String>,
+    /// The last window the runner reported during this run, per `27 quota
+    /// accounting`. The manager only carries it out: resolving which **account**
+    /// it belongs to needs runner config, which is machine-wide and none of a
+    /// run's business.
+    ///
+    /// Boxed so a rarely-present observation does not widen every `Result` this
+    /// crate returns - `ManagerError::Cancelled` carries a whole report.
+    pub window: Option<Box<farseer_runner::claude_code::RateLimitInfo>>,
 }
 
 /// Which role the process has in the cell.
@@ -295,6 +303,7 @@ impl StartedWorker {
     ) -> Result<RunReport, ManagerError> {
         let mut report = None;
         let mut output = None;
+        let mut window = None;
         let mut store_err = None;
         let cancel_on_store_failure = self.proc.cancel_token();
         let activity = Arc::clone(&self.activity);
@@ -344,11 +353,16 @@ impl StartedWorker {
                             cost_usd_micros: f.cost_usd_micros,
                             tokens: f.tokens,
                             result: output.clone(),
+                            // Attached after the stream ends: `10 runner
+                            // inventory` observed `rate_limit_event` arriving
+                            // around the terminal result, not before it.
+                            window: None,
                         });
                     }
-                    // `27 quota accounting`'s quota accounting is not wired yet: observed,
-                    // dropped, rather than guessed at.
-                    RunnerSignal::RateLimit(_) => {}
+                    // `27 quota accounting`: observed on every successful run,
+                    // carried out on the report, and appended by the layer that
+                    // knows which account it belongs to - on change only.
+                    RunnerSignal::RateLimit(info) => window = Some(Box::new(info)),
                 }
             }
         })?;
@@ -366,6 +380,7 @@ impl StartedWorker {
                 if report.result.is_none() {
                     report.result = output;
                 }
+                report.window = window;
                 if was_cancelled {
                     report.outcome = Outcome::Cancelled;
                     Err(ManagerError::Cancelled(report))
@@ -378,6 +393,7 @@ impl StartedWorker {
                 cost_usd_micros: None,
                 tokens: None,
                 result: None,
+                window,
             })),
             None => Err(ManagerError::NoResult),
         }
@@ -741,6 +757,7 @@ mod tests {
             cost_usd_micros: Some(123_456),
             tokens: Some(789),
             result: Some("reported result".into()),
+            window: None,
         }));
 
         let row = finished_row(&contract, &result, 1, 2);
@@ -758,6 +775,7 @@ mod tests {
             cost_usd_micros: None,
             tokens: None,
             result: None,
+            window: None,
         }));
 
         let row = finished_row(&contract, &result, 1, 2);

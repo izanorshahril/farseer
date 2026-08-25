@@ -92,6 +92,13 @@ impl EventKind {
     /// A nested run in the calling cell, per `06 cell transport` and `22 cell addressing`.
     pub const CELL_CALLED: &'static str = "cell_called";
 
+    /// A subscription window changed state, per `27 quota accounting`.
+    ///
+    /// Appended **on change only** and with `actor: system`: `10 runner inventory`
+    /// measured this arriving on every successful run, so recording each one
+    /// would bury the transitions. Current state derives from the latest.
+    pub const RATE_LIMIT: &'static str = "rate_limit_event";
+
     pub fn new(kind: impl Into<String>) -> Self {
         Self(kind.into())
     }

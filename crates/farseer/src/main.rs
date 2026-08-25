@@ -10,6 +10,7 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use farseer_api::{AppState, RuntimeToken, serve, validate_dir};
+use farseer_core::RunnerConfig;
 use farseer_store::Store;
 
 #[derive(Parser)]
@@ -31,6 +32,13 @@ struct Cli {
     /// running `serve`; ignored by `validate` and `where`.
     #[arg(long, global = true)]
     repo: Option<PathBuf>,
+
+    /// Machine-wide runner facts: which account each runner signs in with, so
+    /// `27 quota accounting` can key a subscription window by the thing that
+    /// owns it. Absent is fine - every runner is then its own account, which
+    /// declines to merge rather than guessing that two share a login.
+    #[arg(long, global = true, default_value = "runners.toml")]
+    runners: PathBuf,
 
     #[command(subcommand)]
     command: Command,
@@ -67,7 +75,7 @@ fn main() -> Result<()> {
             tokio::runtime::Builder::new_multi_thread()
                 .enable_all()
                 .build()?
-                .block_on(run(cli.cells, record, repo_root, port))
+                .block_on(run(cli.cells, cli.runners, record, repo_root, port))
         }
     }
 }
@@ -90,7 +98,13 @@ fn validate(cells: &std::path::Path) -> Result<()> {
     }
 }
 
-async fn run(cells: PathBuf, record: PathBuf, repo_root: PathBuf, port: u16) -> Result<()> {
+async fn run(
+    cells: PathBuf,
+    runners: PathBuf,
+    record: PathBuf,
+    repo_root: PathBuf,
+    port: u16,
+) -> Result<()> {
     if let Some(parent) = record.parent() {
         std::fs::create_dir_all(parent)
             .with_context(|| format!("creating {}", parent.display()))?;
@@ -102,13 +116,25 @@ async fn run(cells: PathBuf, record: PathBuf, repo_root: PathBuf, port: u16) -> 
         .join("runs");
     std::fs::create_dir_all(&runs_dir)
         .with_context(|| format!("creating {}", runs_dir.display()))?;
-    let state = Arc::new(AppState::new(
-        store,
-        &cells,
-        RuntimeToken::generate(),
-        runs_dir,
-        &repo_root,
-    ));
+    let runner_config = match std::fs::read_to_string(&runners) {
+        Ok(text) => {
+            RunnerConfig::load(&text).with_context(|| format!("reading {}", runners.display()))?
+        }
+        // Absent is the common case and not an error: accounts are how the
+        // operator sharpens accounting, never a precondition for running.
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => RunnerConfig::default(),
+        Err(error) => return Err(error).with_context(|| format!("reading {}", runners.display())),
+    };
+    let state = Arc::new(
+        AppState::new(
+            store,
+            &cells,
+            RuntimeToken::generate(),
+            runs_dir,
+            &repo_root,
+        )
+        .with_runner_config(runner_config),
+    );
 
     let report = state.reload();
     for error in &report.errors {

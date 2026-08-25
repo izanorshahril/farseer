@@ -21,12 +21,14 @@ use farseer_core::{
 
 mod analytics;
 mod memory;
+mod quota;
 mod schema;
 mod ui_state;
 
 pub use analytics::{CostRow, InterventionRow, LessonRow, ReworkRow};
 pub use farseer_core::MemoryId;
 pub use memory::{MemoryCaps, MemoryClaim, MemoryScope, NewMemory, Promotion};
+pub use quota::WindowRow;
 pub use ui_state::{UI_STATE_CAP_BYTES, UI_STATE_KEY_CAP_BYTES};
 
 #[derive(Debug, thiserror::Error)]

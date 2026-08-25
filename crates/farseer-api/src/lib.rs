@@ -32,6 +32,7 @@ use axum::routing::{get, post};
 use axum::{Json, Router, middleware};
 use serde::{Deserialize, Serialize};
 
+use farseer_core::RunnerConfig;
 use farseer_core::policy::Budget;
 use farseer_core::run::{WorkerContract, WorkerContractSpec, WorkspaceStrategy};
 use farseer_core::{CellDefinition, CellId, LivenessThresholds, NewEvent, RunId, Seq, TaskId};
@@ -75,6 +76,12 @@ pub struct AppState {
     /// practice this is the farseer checkout itself, which is exactly what
     /// cell zero - farseer's own builder harness - is for.
     repo_root: PathBuf,
+    /// Machine-wide runner facts, per `27 quota accounting` section 3: which
+    /// account a runner signs in with, declared by the operator and never
+    /// inferred. Loaded once at startup, because it describes the machine rather
+    /// than the work - unlike cell definitions, which `16 local api surface`
+    /// gives a reload verb.
+    runner_config: RunnerConfig,
     /// In-flight runs, keyed by run id. A run removes its own entry when it
     /// finishes, successfully or not - so a lookup miss here means either
     /// "already finished" or "farseer restarted since", and the run row is
@@ -213,6 +220,7 @@ impl AppState {
             thresholds: LivenessThresholds::default(),
             runs_dir: runs_dir.into(),
             repo_root: repo_root.into(),
+            runner_config: RunnerConfig::default(),
             runs: Mutex::new(HashMap::new()),
             managers: Mutex::new(HashMap::new()),
             pending_cancellations: Mutex::new(HashMap::new()),
@@ -229,6 +237,18 @@ impl AppState {
     /// Reloading makes the files on disk the truth: a cell whose own file is
     /// broken **disappears** until it parses again. `17 cell lifecycle` pins the definition
     /// version per run, so work already executing is unaffected.
+    /// An absent or unreadable config is an empty one: declaring accounts
+    /// improves accounting, and `27 quota accounting` never made it a
+    /// precondition for running anything.
+    pub fn with_runner_config(mut self, config: RunnerConfig) -> Self {
+        self.runner_config = config;
+        self
+    }
+
+    pub fn runner_config(&self) -> &RunnerConfig {
+        &self.runner_config
+    }
+
     pub fn reload(&self) -> ReloadReport {
         let mut report = ReloadReport::default();
         let entries = match std::fs::read_dir(&self.cells_dir) {
@@ -315,6 +335,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/v1/runs/{run_id}/rerun", post(rerun_run))
         .route("/v1/runs/{run_id}/rescope", post(rescope_run))
         .route("/v1/ui-state/{key}", get(get_ui_state).put(put_ui_state))
+        .route("/v1/quota", get(quota))
         .route("/v1/analytics/cost", get(analytics_cost))
         .route("/v1/analytics/intervention", get(analytics_intervention))
         .route("/v1/analytics/rework", get(analytics_rework))
@@ -779,6 +800,7 @@ pub(crate) fn spawn_run(
             &options,
             Some(cancel_requested.as_ref()),
         );
+        observe_window(&background_state, &contract, &result);
         background_state.managers().remove(&run_id);
         background_state
             .pending_cancellations
@@ -795,6 +817,49 @@ pub(crate) fn spawn_run(
     });
 
     Ok(run_id)
+}
+
+/// Record a window transition the run happened to observe, per `27 quota accounting`.
+///
+/// The run is the only thing that sees `rate_limit_event`, and the runtime is the
+/// only thing that knows which **account** the runner signs in with, so the two
+/// halves meet here. Appended on change only, so the repetition `10 runner
+/// inventory` measured - one report per successful run, identical across
+/// concurrent runs on one account - never reaches the log.
+///
+/// A cancelled run still carries what it observed: the window it saw was real.
+fn observe_window(
+    state: &Arc<AppState>,
+    contract: &WorkerContract,
+    result: &Result<farseer_manager::RunReport, farseer_manager::ManagerError>,
+) {
+    let report = match result {
+        Ok(report) => Some(report),
+        Err(farseer_manager::ManagerError::Cancelled(report)) => Some(report),
+        Err(_) => None,
+    };
+    let Some(info) = report.and_then(|report| report.window.as_ref()) else {
+        return;
+    };
+    let observation = farseer_core::WindowObservation {
+        account: state.runner_config().account_for(&contract.runner),
+        runner: contract.runner.clone(),
+        availability: info.availability(),
+        rate_limit_type: info.rate_limit_type.clone(),
+        is_using_overage: info.is_using_overage,
+    };
+    let store = state.store();
+    if let Err(error) =
+        store.observe_window(&contract.cell_id, contract.run_id, &observation, now_ms())
+    {
+        // The record is the product, but a window transition is an observation
+        // about the machine rather than about the run, so losing one must not
+        // fail a run that already succeeded.
+        eprintln!(
+            "window observation for run {} was not recorded: {error}",
+            contract.run_id
+        );
+    }
 }
 
 /// `05 run state model` cancellation ends the selected run as `cancelled`, never `failed`.
@@ -1218,6 +1283,36 @@ async fn put_ui_state(
     let store = state.store();
     store.put_ui_state(&key, &body, now_ms())?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// `27 quota accounting`'s utilisation surface.
+///
+/// **Never a percentage.** `10 runner inventory` proved `used_percentage` reaches
+/// only a status line that does not fire headless, and farseer's own spend is a
+/// lower bound on the window - it would be most wrong exactly near exhaustion.
+/// So this answers the question the operator actually has, which `27 quota
+/// accounting` identified as "what has the fleet spent and which runners are
+/// spending it", rather than the one nobody can answer honestly.
+///
+/// Accounting is keyed by **account** and display by **runner**, deliberately.
+async fn quota(State(state): State<Arc<AppState>>) -> ApiResult<Json<serde_json::Value>> {
+    let config = state.runner_config();
+    let windows = {
+        let store = state.store();
+        store.windows(|account| config.runners_on(account))?
+    };
+    let rows: Vec<serde_json::Value> = windows
+        .into_iter()
+        .map(|window| {
+            let runners = config.runners_on(&window.account);
+            let mut value = serde_json::to_value(&window).unwrap_or_default();
+            if let Some(object) = value.as_object_mut() {
+                object.insert("runners".into(), serde_json::json!(runners));
+            }
+            value
+        })
+        .collect();
+    Ok(Json(serde_json::json!({ "windows": rows })))
 }
 
 macro_rules! analytics_route {
@@ -3197,5 +3292,129 @@ grants_shell = true
             callee_row.task_id, task_id,
             "`22 cell addressing` section 2: one task, one owner"
         );
+    }
+    /// `27 quota accounting`'s utilisation surface, end to end through the API.
+    ///
+    /// The assertion that matters most is the negative one: no percentage, ever.
+    /// Farseer's own spend is a lower bound on a window drained by sessions it
+    /// cannot see, so a percentage would be wrong in a way the operator could
+    /// not detect, and most wrong exactly near exhaustion.
+    #[tokio::test]
+    async fn the_quota_surface_reports_windows_by_account_and_never_a_percentage() {
+        use farseer_core::{Availability, WindowObservation};
+
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("zero.toml"), CELL).unwrap();
+        let runs_dir = tempfile::tempdir().unwrap();
+        let repo = git_repo_with_a_commit();
+        let token = RuntimeToken::generate();
+        // `27 quota accounting` section 3: two runners on one login share one
+        // window, and only the operator can say so.
+        let config = RunnerConfig::load(
+            r#"
+[claude-code]
+account = "anthropic-max"
+
+[claude-acp]
+account = "anthropic-max"
+"#,
+        )
+        .unwrap();
+        let state = Arc::new(
+            AppState::new(
+                Store::open_in_memory().unwrap(),
+                dir.path(),
+                token.clone(),
+                runs_dir.path(),
+                repo.path(),
+            )
+            .with_runner_config(config),
+        );
+        state.reload();
+        let h = Harness {
+            router: router(state.clone()),
+            token,
+            state,
+            _dir: dir,
+            _runs_dir: runs_dir,
+            _repo: repo,
+        };
+
+        let observation = |availability| WindowObservation {
+            account: "anthropic-max".into(),
+            runner: "claude-code".into(),
+            availability,
+            rate_limit_type: "five_hour".into(),
+            is_using_overage: false,
+        };
+        let observe = |observation: &WindowObservation, ts| {
+            h.state
+                .store()
+                .observe_window(&CellId::new("zero"), RunId::new(), observation, ts)
+                .unwrap()
+        };
+
+        assert!(observe(&observation(Availability::Allowed), 1_000));
+        assert!(
+            !observe(&observation(Availability::Allowed), 2_000),
+            "`10 runner inventory` measured this arriving on every run; only \
+             transitions are history"
+        );
+        // Farseer's own spend inside the window, across both runners on the
+        // account.
+        for (runner, usd, tokens) in [
+            ("claude-code", 250_000u64, 900u64),
+            ("claude-acp", 50_000, 100),
+        ] {
+            h.state
+                .store()
+                .upsert_run(&RunRow {
+                    run_id: RunId::new(),
+                    task_id: TaskId::new(),
+                    cell_id: CellId::new("zero"),
+                    runner: runner.into(),
+                    model: String::new(),
+                    outcome: Some("ok".into()),
+                    usd_micros: usd,
+                    tokens,
+                    operator_touched: false,
+                    started_ts: 1_500,
+                    finished_ts: Some(1_600),
+                })
+                .unwrap();
+        }
+
+        let (status, body) = h.get("/v1/quota").await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let window = &body["windows"][0];
+        assert_eq!(window["account"], "anthropic-max");
+        assert_eq!(window["status"], "allowed");
+        assert_eq!(
+            window["runners"],
+            json!(["claude-acp", "claude-code"]),
+            "accounting keys by account, display keys by runner"
+        );
+        assert_eq!(window["farseer_usd_micros"], 300_000);
+        assert_eq!(window["farseer_tokens"], 1_000);
+        assert!(
+            window["resets_at"].is_null(),
+            "an allowed window has no reset to count down to"
+        );
+
+        let exhausted = observation(Availability::ExhaustedUntil {
+            resets_at: 1_787_000_000,
+        });
+        assert!(observe(&exhausted, 3_000), "a status flip is a transition");
+        let (_, body) = h.get("/v1/quota").await;
+        assert_eq!(body["windows"][0]["status"], "exhausted_until");
+        assert_eq!(body["windows"][0]["resets_at"], 1_787_000_000i64);
+
+        let wire = body.to_string();
+        for absent in ["percent", "used_", "remaining", "quota_left"] {
+            assert!(
+                !wire.contains(absent),
+                "`{absent}` would present a lower bound as a measurement: {wire}"
+            );
+        }
     }
 }

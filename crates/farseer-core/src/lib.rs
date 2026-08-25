@@ -9,7 +9,9 @@ pub mod cell;
 pub mod event;
 pub mod ids;
 pub mod policy;
+pub mod quota;
 pub mod run;
+pub mod runners;
 pub mod scrub;
 
 pub use call::CellCall;
@@ -19,8 +21,10 @@ pub use cell::{
 pub use event::{Actor, Event, EventKind, MemoryTier, NewEvent};
 pub use ids::{CallId, CellId, EventId, MemoryId, RunId, Seq, TaskId};
 pub use policy::{Budget, BudgetError, BudgetStack, Irreversibility, Policy, Spend};
+pub use quota::{Availability, WindowObservation};
 pub use run::{
     ActivityClock, Control, Lifecycle, Liveness, LivenessThresholds, ManagerVerb, Outcome, Pause,
     WorkerContract, WorkerContractSpec, WorkspaceState, WorkspaceStrategy,
 };
+pub use runners::{RunnerConfig, RunnerEntry};
 pub use scrub::scrub;

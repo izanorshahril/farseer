@@ -153,3 +153,35 @@ That is the last question on the map, and like `22` before it, it added no field
 - `11 analytics questions` - fleet spend per window is decomposable by cell and runner. **Window usage percentage is not available and must never be presented**, since farseer's own consumption is only a lower bound.
 - `13 harness build kit` - runner config holds the **account string** alongside `26`'s price table. Neither belongs in a cell definition.
 - `16 local API surface` - the utilisation surface reads `allowed`/`exhausted`, a `resetsAt` countdown, and farseer's own spend. It must not expose a percentage of the provider's window.
+
+## Implementation note, 2026-08-25
+
+Built, and the shape this ticket chose survived contact unchanged: no new budget field, no new lifecycle state, no mutable current-state table.
+
+- `farseer-core`'s `quota.rs` holds `Availability` - `26 routing policy`'s `allowed` / `exhausted_until(t)` / `unknown` - and `WindowObservation`, which knows how to say whether it is a **transition** rather than a repeat.
+- `farseer-core`'s `runners.rs` holds runner config, and `farseer serve --runners runners.toml` loads it. An absent file is an empty config, because declaring accounts sharpens accounting and was never a precondition for running anything.
+- `farseer-store`'s `quota.rs` appends on change and derives current from the latest event, exactly as `05 run state model` derives liveness.
+- `GET /v1/quota` is the surface: `allowed` / `exhausted_until` / `unknown`, a `resets_at` to count down to, farseer's own spend since the window opened, and the runners on the account. Tests assert the **absence** of a percentage in the payload, in the store row and in the observation, because that is the rule most easily lost to a later well-meaning edit.
+
+### An undeclared runner is its own account
+
+This ticket said the account is declared and never inferred, and left open what happens before the operator declares one.
+
+An undeclared runner is keyed by **its own name**.
+That is not an inference: it declines to merge two runners rather than guessing they share a login.
+The failure mode is two windows displayed where there is really one, which the operator can see and fix with one line of config.
+The opposite guess would silently merge two accounts and misreport both, and it would be invisible.
+
+### Anything that is not `allowed` is treated as exhausted
+
+`10 runner inventory` captured `allowed` and no other status string.
+Guessing which other values are benign would be inventing reach farseer has not observed, so the mapping fails to `exhausted_until`, which is the direction `26 routing policy` routes **away** from rather than into.
+
+### A cancelled run still reports the window it saw
+
+The observation is attached after the stream ends rather than at the terminal result, because `10 runner inventory` observed `rate_limit_event` arriving around the terminal result rather than before it.
+A cancelled run keeps it: the window it saw was real, and cancelling the run does not unsee it.
+
+### Not yet wired
+
+`26 routing policy` itself. The availability signal exists and is recorded, but nothing routes on it yet.
