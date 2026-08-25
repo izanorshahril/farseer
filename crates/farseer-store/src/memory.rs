@@ -1,12 +1,12 @@
 //! Memory: what agents write, as **claims** rather than observations.
 //!
-//! `25` settled the lifecycle by researching Hermes Agent, which has no tiers at
+//! `25 memory lifecycle` settled the lifecycle by researching Hermes Agent, which has no tiers at
 //! all: one flat store with a hard character cap, and a write that would exceed
 //! it **returns an error rather than silently dropping anything**. Scarcity is
 //! the feature - a wrong lesson cannot accumulate, because it competes for a
 //! small fixed space with better ones and must justify itself on every write.
 //!
-//! Farseer keeps `02`'s three tiers and adds that cap per tier per cell. The
+//! Farseer keeps `02 record scope`'s three tiers and adds that cap per tier per cell. The
 //! number is an implementation choice; the principle is what transfers.
 
 use rusqlite::{OptionalExtension, params_from_iter};
@@ -18,7 +18,7 @@ use crate::{Result, Store, StoreError};
 
 /// How many characters a tier may hold, per cell.
 ///
-/// `25`: **do not copy Hermes' number.** 2,200 characters is a single-agent
+/// `25 memory lifecycle`: **do not copy Hermes' number.** 2,200 characters is a single-agent
 /// assistant's whole budget; farseer's cap is per tier per cell.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MemoryCaps {
@@ -61,15 +61,15 @@ pub struct MemoryClaim {
 /// A claim on its way in.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NewMemory {
-    /// `25`: **cell-local is the default write tier.** A run-local default would
-    /// mean memory does nothing until promotion is built, and would give `11`'s
+    /// `25 memory lifecycle`: **cell-local is the default write tier.** A run-local default would
+    /// mean memory does nothing until promotion is built, and would give `11 analytics questions`'s
     /// fourth question an n of 1 forever.
     pub tier: MemoryTier,
     pub cell_id: CellId,
     pub run_id: Option<RunId>,
     pub body: String,
     /// The claims this one replaces. Consolidating several entries into a denser
-    /// one is an append too, per `25`, never an edit in place.
+    /// one is an append too, per `25 memory lifecycle`, never an edit in place.
     pub supersedes: Vec<MemoryId>,
     pub ts: i64,
 }
@@ -90,7 +90,7 @@ impl NewMemory {
 
 /// Who authorised moving a claim up a tier.
 ///
-/// `25` tiers promotion by blast radius: **the manager decides for `cell-local`,
+/// `25 memory lifecycle` tiers promotion by blast radius: **the manager decides for `cell-local`,
 /// the operator gates `global`.** Global is the only tier that crosses cells, so
 /// it is the only one that needs a human. An agent that could promote its own
 /// lesson to global would poison every cell from inside a single run, which is
@@ -103,7 +103,7 @@ pub enum Promotion {
 
 /// What a reader may see.
 ///
-/// `02`: `global` is readable by every cell and needs no declaration; cross-cell
+/// `02 record scope`: `global` is readable by every cell and needs no declaration; cross-cell
 /// reads beyond it are opt-in via the **reader's** own definition, never blanket.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MemoryScope {
@@ -193,9 +193,9 @@ impl Store {
 
     /// Retract a claim that turned out to be wrong.
     ///
-    /// `25`: a superseding tombstone, never a removal. Farseer diverges from
+    /// `25 memory lifecycle`: a superseding tombstone, never a removal. Farseer diverges from
     /// Hermes here and the divergence is forced - Hermes corrects with a
-    /// destructive `replace` and `remove`, and `02` made farseer append-only.
+    /// destructive `replace` and `remove`, and `02 record scope` made farseer append-only.
     ///
     /// A merely wrong lesson is not a privacy problem, so this is not
     /// [`Store::purge_cell`].
@@ -322,7 +322,7 @@ impl Store {
         row.map(claim_from).transpose()
     }
 
-    /// `run -> consulted -> memory`, the edge `11`'s fourth question runs on.
+    /// `run -> consulted -> memory`, the edge `11 analytics questions`'s fourth question runs on.
     pub fn record_consulted(&self, run_id: RunId, memory_id: MemoryId, ts: i64) -> Result<()> {
         self.conn.execute(
             "INSERT OR IGNORE INTO consulted (run_id, memory_id, ts) VALUES (?1, ?2, ?3)",

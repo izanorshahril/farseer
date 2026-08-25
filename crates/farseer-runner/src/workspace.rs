@@ -1,6 +1,6 @@
-//! Worktree creation and teardown, per `04`.
+//! Worktree creation and teardown, per `04 spike workspace teardown`.
 //!
-//! `04`'s spike measured **zero stuck workspaces in 60 supervised cycles**
+//! `04 spike workspace teardown`'s spike measured **zero stuck workspaces in 60 supervised cycles**
 //! (p50 2.5ms, p95 38.5ms; 278ms with a real 48MB `node_modules` present),
 //! against **10 of 10 stuck** when the delete ran without reaping first.
 //! Every blocked delete was `ERROR_SHARING_VIOLATION` on the workspace root,
@@ -15,7 +15,7 @@
 //! which happens at or after process exit.
 //!
 //! **Quarantine-by-rename does not work and this module does not attempt
-//! it.** `04` forced that path and found rename fails 5 for 5, for the
+//! it.** `04 spike workspace teardown` forced that path and found rename fails 5 for 5, for the
 //! identical reason the delete does: a directory held open as a cwd cannot
 //! be renamed either. The honest ladder is two rungs - reap (already done by
 //! the time this module runs), then delete with backoff - and a workspace
@@ -34,7 +34,7 @@ use windows::Win32::Storage::FileSystem::{
 };
 use windows::core::PCWSTR;
 
-/// `04`'s measured schedule: total budget a little over 4 seconds before the
+/// `04 spike workspace teardown`'s measured schedule: total budget a little over 4 seconds before the
 /// workspace is declared stuck.
 const BACKOFF_MS: &[u64] = &[0, 10, 25, 50, 100, 200, 400, 800, 1200, 1500];
 
@@ -56,7 +56,7 @@ pub enum WorkspaceError {
 }
 
 /// `git worktree add --detach` at `parent/name`. `parent` is created if
-/// missing. `--detach` because a run owns no branch of its own - `13`
+/// missing. `--detach` because a run owns no branch of its own - `13 harness build kit`
 /// deliberately keeps definition versioning in plain git, outside this path.
 pub fn create_worktree(repo: &Path, parent: &Path, name: &str) -> Result<PathBuf, WorkspaceError> {
     std::fs::create_dir_all(parent)?;
@@ -78,7 +78,7 @@ pub fn create_worktree(repo: &Path, parent: &Path, name: &str) -> Result<PathBuf
     Ok(workspace)
 }
 
-/// Deletes `workspace`, retrying with `04`'s measured backoff. `repo` is
+/// Deletes `workspace`, retrying with `04 spike workspace teardown`'s measured backoff. `repo` is
 /// `Some` only for a worktree - `git worktree prune` runs after a successful
 /// delete so the worktree stops being registered and its path can be reused;
 /// a plain directory has nothing to prune.
@@ -115,7 +115,7 @@ pub fn teardown_workspace(workspace: &Path, repo: Option<&Path>) -> Result<(), W
     })
 }
 
-/// One delete attempt, depth-first. `04`: git marks packfiles read-only, so a
+/// One delete attempt, depth-first. `04 spike workspace teardown`: git marks packfiles read-only, so a
 /// plain recursive delete dies inside `.git` before reaching anything
 /// interesting - the read-only bit is cleared on the way down, file by file.
 fn try_delete(dir: &Path) -> std::io::Result<()> {
@@ -138,7 +138,7 @@ fn try_delete(dir: &Path) -> std::io::Result<()> {
     std::fs::remove_dir(dir)
 }
 
-/// `04`: every filesystem call that touches attributes goes through the
+/// `04 spike workspace teardown`: every filesystem call that touches attributes goes through the
 /// extended-length form, because `node_modules` alone can blow past
 /// `MAX_PATH` from a short root. `\\?\` also disables path normalisation, so
 /// the input must already be fully qualified with backslashes only - `remove_file`
@@ -251,7 +251,7 @@ mod tests {
 
     #[test]
     fn a_readonly_file_does_not_block_teardown() {
-        // `04`: git marks packfiles read-only, so a plain recursive delete
+        // `04 spike workspace teardown`: git marks packfiles read-only, so a plain recursive delete
         // dies inside `.git` before reaching anything interesting. Proven
         // here with a plain read-only file rather than a real packfile,
         // since a linked worktree's own `.git` is just a small text pointer

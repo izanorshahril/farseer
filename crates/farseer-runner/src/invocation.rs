@@ -1,7 +1,7 @@
 //! Builds the argv for a Claude Code invocation.
 //!
-//! `--input-format stream-json` puts Claude Code in the mode [`crate::claude_code::steer_envelope`]'s 2026-08-23 probe verified.
-//! The goal travels as the first stdin envelope and later steer messages use the same live process.
+//! `--input-format stream-json` puts Claude Code in the mode [`crate::claude_code::steer_frame`]'s 2026-08-23 probe verified.
+//! The goal travels as the first stdin frame and later steer messages use the same live process.
 //!
 //! A manager launch may also receive farseer's generated MCP config through `--mcp-config` and `--strict-mcp-config`.
 //! `10 runner inventory` records the disposable Claude Code 2.1.233 probe which generated the exact HTTP shape: `{"mcpServers":{"farseer":{"type":"http","url":"http://127.0.0.1:<port>/v1/mcp","headers":{"Authorization":"Bearer <token>"}}}}`.
@@ -92,7 +92,7 @@ mod tests {
         );
         assert!(
             !args.contains(&"post a haiku about ferrous rust".to_string()),
-            "the goal travels as the first stdin envelope, not argv"
+            "the goal travels as the first stdin frame, not argv"
         );
     }
 
@@ -104,7 +104,7 @@ mod tests {
     }
 
     #[test]
-    fn the_stream_json_flags_match_what_10_actually_ran_plus_input_format() {
+    fn the_stream_json_flags_match_what_the_runner_inventory_actually_ran_plus_input_format() {
         let args = build_args(
             &contract("anything"),
             ClaudeCodeLaunch {
@@ -119,7 +119,7 @@ mod tests {
         assert!(
             args.windows(2)
                 .any(|w| w == ["--input-format", "stream-json"]),
-            "steer needs the process listening on stdin, per claude_code::steer_envelope"
+            "steer needs the process listening on stdin, per claude_code::steer_frame"
         );
         assert!(args.contains(&"--verbose".to_string()));
     }

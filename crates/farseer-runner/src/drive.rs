@@ -1,7 +1,7 @@
 //! Reads a [`SupervisedProcess`]'s stdout line by line and hands each line's
 //! parse result to a caller-supplied sink.
 //!
-//! **Every line reaches the sink, parse failure or not.** `05`'s activity
+//! **Every line reaches the sink, parse failure or not.** `05 run state model`'s activity
 //! signal is "any bytes", so a line this crate fails to parse is still
 //! evidence the process is alive; silently dropping it would throw that
 //! evidence away. The sink decides what a parse failure means for its own

@@ -1,6 +1,6 @@
-//! One binary ships both runtime and CLI, per `01`.
+//! One binary ships both runtime and CLI, per `01 cell primitive`.
 //!
-//! That is what makes the compatibility promise in `16` section 9 exist purely
+//! That is what makes the compatibility promise in `16 local api surface` section 9 exist purely
 //! for third-party UIs: the CLI can never skew from the runtime it talks to,
 //! because it is the same build.
 
@@ -25,7 +25,7 @@ struct Cli {
     record: Option<PathBuf>,
 
     /// The git repository a `Worktree`-strategy cell's runs are worktrees
-    /// of. `13` keeps no git flag on `CellDefinition`, so this has to come
+    /// of. `13 harness build kit` keeps no git flag on `CellDefinition`, so this has to come
     /// from the CLI or default to the current directory - the common case,
     /// since cell zero is farseer's own builder harness. Only matters when
     /// running `serve`; ignored by `validate` and `where`.

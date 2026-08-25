@@ -1,12 +1,12 @@
 //! Farseer's local API: **bespoke HTTP plus SSE on `127.0.0.1`.**
 //!
-//! `16` weighed making ACP the substrate, as berd does, and rejected it: roughly
+//! `16 local api surface` weighed making ACP the substrate, as berd does, and rejected it: roughly
 //! a fifth of farseer's surface maps to an ACP verb, and **a protocol that
 //! covers a fifth of the surface is not the transport**. ACP belongs on top of
 //! this as a server adapter, exposing one cell's manager conversation and
 //! nothing else.
 //!
-//! Two rules from `16` shape everything below:
+//! Two rules from `16 local api surface` shape everything below:
 //!
 //! - **Every stream connection takes a cursor.** Attach-to-a-running-worker and
 //!   replay-a-dead-session are the same call with a different cursor, so they can
@@ -50,7 +50,7 @@ pub use security::{RuntimeToken, runtime_file_path, write_runtime_file};
 ///
 /// Polling the record rather than fanning out from an in-process bus is what
 /// makes "a slow client never slows a worker" structural instead of a rule
-/// someone has to remember. `09` measured the read side at p99 478us while a
+/// someone has to remember. `09 store decision` measured the read side at p99 478us while a
 /// writer appends continuously, so this costs a worker nothing.
 const STREAM_POLL: Duration = Duration::from_millis(250);
 
@@ -69,7 +69,7 @@ pub struct AppState {
     /// `Worktree`.
     runs_dir: PathBuf,
     /// The git repository a `Worktree`-strategy cell's runs are worktrees
-    /// *of*. `13` deliberately keeps no git flag on `CellDefinition`, so this
+    /// *of*. `13 harness build kit` deliberately keeps no git flag on `CellDefinition`, so this
     /// has to come from somewhere else - the runtime's own working directory
     /// is the only unambiguous repo available without inventing a field. In
     /// practice this is the farseer checkout itself, which is exactly what
@@ -223,11 +223,11 @@ impl AppState {
 
     /// Re-read every definition from disk.
     ///
-    /// `16` gives the API read, validate and reload, and **no edit path**: an
+    /// `16 local api surface` gives the API read, validate and reload, and **no edit path**: an
     /// edit API would make farseer responsible for merge conflicts and skew
     /// against the operator's own editor, in exchange for nothing.
     /// Reloading makes the files on disk the truth: a cell whose own file is
-    /// broken **disappears** until it parses again. `17` pins the definition
+    /// broken **disappears** until it parses again. `17 cell lifecycle` pins the definition
     /// version per run, so work already executing is unaffected.
     pub fn reload(&self) -> ReloadReport {
         let mut report = ReloadReport::default();
@@ -326,7 +326,7 @@ pub fn router(state: Arc<AppState>) -> Router {
 
 /// Bind loopback only, write the runtime file, and serve until cancelled.
 pub async fn serve(state: Arc<AppState>, port: u16) -> std::io::Result<()> {
-    // `16`: **bind `127.0.0.1` only.** Not `0.0.0.0`, not a hostname that might
+    // `16 local api surface`: **bind `127.0.0.1` only.** Not `0.0.0.0`, not a hostname that might
     // resolve to something routable.
     let listener = tokio::net::TcpListener::bind(("127.0.0.1", port)).await?;
     let bound = listener.local_addr()?.port();
@@ -396,7 +396,7 @@ impl IntoResponse for ApiError {
             Self::Unauthorized => StatusCode::UNAUTHORIZED,
             Self::NotFound(_) => StatusCode::NOT_FOUND,
             Self::BadRequest(_) | Self::Policy(_) => StatusCode::BAD_REQUEST,
-            // `24`: over 1 MiB per key, the answer is `413`.
+            // `24 ui state persistence`: over 1 MiB per key, the answer is `413`.
             Self::Store(StoreError::UiStateTooLarge { .. }) => StatusCode::PAYLOAD_TOO_LARGE,
             // `24 ui state persistence`: the key is capped too, and an overlong
             // one arrives in the URL, so `414` names what was actually too long.
@@ -827,8 +827,8 @@ pub struct SteerBody {
     pub message: String,
 }
 
-/// `05`'s **steer**: a follow-up message into a run's live process, on the
-/// envelope `claude_code::steer_envelope`'s 2026-08-23 probe verified.
+/// `05 run state model`'s **steer**: a follow-up message into a run's live process, on the
+/// frame `claude_code::steer_frame`'s 2026-08-23 probe verified.
 /// `400` when the run's runner has no steering path (Codex today) rather
 /// than writing a line nothing reads; `404` when the run is unknown or
 /// already finished, same as `cancel`.
@@ -862,7 +862,7 @@ async fn steer_run(
 
 #[derive(Debug, Default, Deserialize)]
 pub struct RescopeBody {
-    /// The field being changed. `05`: re-scope is a new run because a
+    /// The field being changed. `05 run state model`: re-scope is a new run because a
     /// contract field changed; a run's own goal is the one an operator can
     /// actually reach here today. Omit to leave it as it was - that is
     /// `rerun`, not `rescope`, so this endpoint refuses an unchanged goal.
@@ -919,9 +919,9 @@ fn original_run(state: &AppState, run_id: RunId) -> ApiResult<OriginalRun> {
     })
 }
 
-/// `05`'s **re-run**: same contract, fresh run, fresh workspace. `16`:
+/// `05 run state model`'s **re-run**: same contract, fresh run, fresh workspace. `16 local api surface`:
 /// operator-initiated re-run leaves an event behind - here, the
-/// `rescoped_from` edge `11`'s rework-depth query already walks, so a chain
+/// `rescoped_from` edge `11 analytics questions`'s rework-depth query already walks, so a chain
 /// of re-runs reads exactly like a chain of re-scopes to that analytics query.
 async fn rerun_run(
     State(state): State<Arc<AppState>>,
@@ -933,7 +933,7 @@ async fn rerun_run(
     respawn(&state, original, parent_run_id).await
 }
 
-/// `05`'s **re-scope**: a new run against the same task, with a changed
+/// `05 run state model`'s **re-scope**: a new run against the same task, with a changed
 /// contract field. Only `goal` is reachable here today - `tool_grants`,
 /// `autonomy_ceiling` and the rest come from the cell definition at
 /// `instruct` time, not from anything an operator can override per run yet.
@@ -989,7 +989,7 @@ async fn respawn(
 
 #[derive(Debug, Default, Deserialize)]
 pub struct StreamQuery {
-    /// Scope, applied server-side. `16` rejected a firehose the client filters.
+    /// Scope, applied server-side. `16 local api surface` rejected a firehose the client filters.
     pub cell: Option<String>,
     pub run: Option<String>,
     /// The cursor. Omit for live only.
@@ -1051,7 +1051,7 @@ async fn stream_events(
         None => state.store().latest_seq().unwrap_or(0),
     };
 
-    // A bounded channel *is* `16`'s bounded per-connection buffer. When the
+    // A bounded channel *is* `16 local api surface`'s bounded per-connection buffer. When the
     // client stops reading, the poller below blocks on `send` - and the poller
     // is not a worker, so the worker keeps going.
     let (tx, rx) = tokio::sync::mpsc::channel(STREAM_BATCH);
@@ -1091,7 +1091,7 @@ async fn stream_events(
 
 /// A run, on all three axes.
 ///
-/// `16`: **liveness is derived, never stored**, so there is no write path for it
+/// `16 local api surface`: **liveness is derived, never stored**, so there is no write path for it
 /// and any client that caches it must recompute rather than trust a snapshot.
 /// This is the one place where a naive CRUD shape would be actively wrong.
 #[derive(Debug, Serialize)]
@@ -1110,9 +1110,9 @@ pub struct RunView {
     pub finished_ts: Option<i64>,
     pub liveness_stalled_secs: u64,
     pub liveness_likely_hung_secs: u64,
-    /// `18`/`05`'s watchdog state - `"live"`, `"stalled"` or `"likely_hung"` -
+    /// `18 hang detection prior art`/`05 run state model`'s watchdog state - `"live"`, `"stalled"` or `"likely_hung"` -
     /// or `None` when there is nothing in memory to ask: the run already
-    /// finished, or farseer restarted since it started. `17` chose no orphan
+    /// finished, or farseer restarted since it started. `17 cell lifecycle` chose no orphan
     /// survival over run survival, so a restart losing this is the same
     /// trade already made everywhere else, not a new gap.
     pub liveness: Option<String>,
@@ -1179,7 +1179,7 @@ async fn get_ui_state(
     }
 }
 
-/// `24`: farseer stores an opaque blob and **never parses it**. No validation,
+/// `24 ui state persistence`: farseer stores an opaque blob and **never parses it**. No validation,
 /// no schema, no reference-following. This is deliberately the only part of the
 /// API that returns something farseer does not understand.
 async fn put_ui_state(
@@ -1531,7 +1531,7 @@ grants_shell = true
 
         assert_eq!(h.get("/v1/cells/missing").await.0, StatusCode::NOT_FOUND);
 
-        // There is no edit path, per `16` section 6.
+        // There is no edit path, per `16 local api surface` section 6.
         let put = h.request("PUT", "/v1/cells/zero");
         assert_eq!(h.send(put).await.0, StatusCode::METHOD_NOT_ALLOWED);
     }
@@ -1965,7 +1965,7 @@ grants_shell = true
                 load cost per AGENTS.md) and excluded from `cargo test --workspace` \
                 so the default run stays fast; run with `-- --ignored` to include it"]
     async fn steering_a_claude_code_run_reaches_its_live_stdin() {
-        // `claude_code::steer_envelope`'s 2026-08-23 probe verified the wire
+        // `claude_code::steer_frame`'s 2026-08-23 probe verified the wire
         // format; this proves the seam - a later HTTP request reaching a
         // live process's stdin - actually exists end to end.
         let h = harness();
@@ -2009,7 +2009,7 @@ grants_shell = true
     /// `run_id` before the run finishes, the record picks it up, and a
     /// workspace directory exists. Whether `claude` is actually installed on
     /// the machine running this test is deliberately not asserted either way
-    /// - `10` confirms it is on the dev machine, but the row this test waits
+    /// - `10 runner inventory` confirms it is on the dev machine, but the row this test waits
     /// for reaches a terminal state either way: `ok`/`failed` if it ran,
     /// `failed` immediately via `ExecutableNotFound` if it did not.
     #[tokio::test]
@@ -2030,7 +2030,7 @@ grants_shell = true
         assert_eq!(row["cell_id"], "zero");
         assert_eq!(row["runner"], "claude-code");
 
-        // `04`'s ordering constraint, proven end to end: the workspace this
+        // `04 spike workspace teardown`'s ordering constraint, proven end to end: the workspace this
         // run's `git worktree add` created is gone by the time this test's
         // own bounded wait ends - teardown ran, and it ran only after the
         // process that held the directory as its cwd had already exited.
@@ -2375,7 +2375,7 @@ grants_shell = true
         let rescope_id = body["run_id"].as_str().unwrap().to_string();
         h.cancel_and_wait_for_finished(&rescope_id).await;
 
-        // `11`'s rework-depth query walks the same `rescoped_from` edge both
+        // `11 analytics questions`'s rework-depth query walks the same `rescoped_from` edge both
         // verbs write - proof the link landed where analytics already reads
         // from, not a parallel record only this endpoint understands.
         let (_, rework) = h.get("/v1/analytics/rework").await;
@@ -2393,7 +2393,7 @@ grants_shell = true
 
     /// Real `rmcp` client, real TCP, real MCP handshake - not a hand-rolled
     /// JSON-RPC request, per the project's own rule against guessing a
-    /// wire-format fact. Covers the whole face `02` section 8 describes:
+    /// wire-format fact. Covers the whole face `02 record scope` section 8 describes:
     /// write, read-back, the run-attributed `memory_consulted` edge, and the
     /// global tier's refusal.
     #[tokio::test]
@@ -2506,9 +2506,9 @@ grants_shell = true
             "the claim just written should read back: {read_text}"
         );
 
-        // `02`'s "Carried from 11": a manager-scoped read marks each returned
+        // `02 record scope`'s "Carried from 11": a manager-scoped read marks each returned
         // claim consulted by the authenticated manager run - the `consulted`
-        // edge `11`'s lessons-against-outcome query joins on.
+        // edge `11 analytics questions`'s lessons-against-outcome query joins on.
         client
             .call_tool(
                 CallToolRequestParams::new("read_memory").with_arguments(
@@ -2533,7 +2533,7 @@ grants_shell = true
             "the claim consulted through MCP should show up against this run: {lessons}"
         );
 
-        // `25`: the global tier is gated on the operator, and this face does
+        // `25 memory lifecycle`: the global tier is gated on the operator, and this face does
         // not offer that promotion. `write_memory` returns `Err(McpError)`
         // for this, which the client surfaces as a JSON-RPC error from the
         // call itself rather than a successful `CallToolResult` with

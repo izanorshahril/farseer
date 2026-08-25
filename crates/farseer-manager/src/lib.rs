@@ -167,33 +167,33 @@ pub struct StartedWorker {
     /// already exactly this shape.
     parse: fn(&str) -> Result<Vec<RunnerSignal>, ParseError>,
     /// `Some` for a runner steer can actually reach - today only
-    /// `claude_code::steer_envelope`, per `invocation.rs`'s doc comment.
+    /// `claude_code::steer_frame`, per `invocation.rs`'s doc comment.
     /// `None` for a runner like Codex, whose own steering path does not
-    /// exist (`codex exec resume` starts a new process, per `10`). Also the
+    /// exist (`codex exec resume` starts a new process, per `10 runner inventory`). Also the
     /// initial message: [`Self::bootstrap`] writes `contract.goal` through
     /// it as the first stdin line, since `--input-format stream-json`
     /// expects the goal there rather than as argv.
-    steer_envelope: Option<fn(&str) -> String>,
+    steer_frame: Option<fn(&str) -> String>,
 }
 
 /// A cloneable handle that writes a steer message into a run's live process,
-/// verified 2026-08-23 against `claude_code::steer_envelope`'s envelope.
+/// verified 2026-08-23 against `claude_code::steer_frame`'s wire shape.
 /// `None` from [`StartedWorker::steer_handle`] rather than an instance of
 /// this means the runner has no steering path at all - refuse the request
 /// rather than writing a line nothing reads.
 #[derive(Clone)]
 pub struct SteerHandle {
     stdin: StdinHandle,
-    envelope: fn(&str) -> String,
+    frame: fn(&str) -> String,
 }
 
 impl SteerHandle {
     pub fn steer(&self, message: &str) -> std::io::Result<()> {
-        self.stdin.write_line(&(self.envelope)(message))
+        self.stdin.write_line(&(self.frame)(message))
     }
 }
 
-/// A cloneable, read-only view onto a run's liveness - `18`/`05`'s watchdog,
+/// A cloneable, read-only view onto a run's liveness - `18 hang detection prior art`/`05 run state model`'s watchdog,
 /// minus the kill. Queryable from any thread: the clock behind it is shared
 /// with whichever thread is inside [`StartedWorker::run_to_completion`], so a
 /// caller does not need to wait for that call to return to ask how it's
@@ -216,7 +216,7 @@ impl LivenessHandle {
 }
 
 impl StartedWorker {
-    /// `thresholds` per `05`: "both configurable, and neither kills
+    /// `thresholds` per `05 run state model`: "both configurable, and neither kills
     /// anything" - the second half is enforced by this crate never calling
     /// [`CancelToken`] on the watchdog's own initiative, not by anything in
     /// the type here.
@@ -226,7 +226,7 @@ impl StartedWorker {
         cwd: &Path,
         thresholds: LivenessThresholds,
         parse: fn(&str) -> Result<Vec<RunnerSignal>, ParseError>,
-        steer_envelope: Option<fn(&str) -> String>,
+        steer_frame: Option<fn(&str) -> String>,
     ) -> Result<Self, ManagerError> {
         Ok(Self {
             proc: SupervisedProcess::spawn(exe, args, cwd)?,
@@ -234,7 +234,7 @@ impl StartedWorker {
             monotonic_start: Instant::now(),
             thresholds,
             parse,
-            steer_envelope,
+            steer_frame,
         })
     }
 
@@ -245,9 +245,9 @@ impl StartedWorker {
     /// Fetch before calling the blocking `run_to_completion`, same reason as
     /// [`Self::cancel_token`]. `None` when this runner has no steering path.
     pub fn steer_handle(&self) -> Option<SteerHandle> {
-        self.steer_envelope.map(|envelope| SteerHandle {
+        self.steer_frame.map(|frame| SteerHandle {
             stdin: self.proc.stdin_handle(),
-            envelope,
+            frame,
         })
     }
 
@@ -264,7 +264,7 @@ impl StartedWorker {
     }
 
     /// Writes `goal` as the first stdin line for a runner with a steer
-    /// envelope - `--input-format stream-json` (per `invocation.rs`) expects
+    /// frame - `--input-format stream-json` (per `invocation.rs`) expects
     /// it there rather than as argv. **Must complete before this worker's
     /// [`SteerHandle`] reaches anywhere a caller could act on it**: both
     /// write to the same stdin pipe, and a steer message that lands first
@@ -274,15 +274,15 @@ impl StartedWorker {
     /// building a [`StartedWorker`] directly and skipping this is exercising
     /// something other than the real dispatch path.
     pub fn bootstrap(&self, goal: &str) -> Result<(), ManagerError> {
-        if let Some(envelope) = self.steer_envelope {
-            self.proc.write_line(&envelope(goal))?;
+        if let Some(frame) = self.steer_frame {
+            self.proc.write_line(&frame(goal))?;
         }
         Ok(())
     }
 
     /// Blocks until the process closes stdout. Every progress signal becomes
     /// a `NewEvent` appended to `store`, in the order it arrived. A line
-    /// `farseer_runner::claude_code::parse_line` cannot parse is `05`'s
+    /// `farseer_runner::claude_code::parse_line` cannot parse is `05 run state model`'s
     /// activity signal same as any other line - the process is still there -
     /// and is otherwise skipped, since there is nothing shaped enough to
     /// record.
@@ -301,7 +301,7 @@ impl StartedWorker {
         let monotonic_start = self.monotonic_start;
 
         drive(&mut self.proc, self.parse, |parsed| {
-            // `05`: any bytes at all is activity, parse failure or not - the
+            // `05 run state model`: any bytes at all is activity, parse failure or not - the
             // process is still there regardless of what the line meant.
             let now = monotonic_start.elapsed().as_secs();
             activity
@@ -346,7 +346,7 @@ impl StartedWorker {
                             result: output.clone(),
                         });
                     }
-                    // `27`'s quota accounting is not wired yet: observed,
+                    // `27 quota accounting`'s quota accounting is not wired yet: observed,
                     // dropped, rather than guessed at.
                     RunnerSignal::RateLimit(_) => {}
                 }
@@ -413,7 +413,7 @@ pub fn start_worker(
                 thresholds,
                 farseer_runner::claude_code::parse_line,
                 (options.role == RunRole::Manager)
-                    .then_some(farseer_runner::claude_code::steer_envelope as fn(&str) -> String),
+                    .then_some(farseer_runner::claude_code::steer_frame as fn(&str) -> String),
             )
         }
         "codex" => {
@@ -426,7 +426,7 @@ pub fn start_worker(
                 thresholds,
                 farseer_runner::codex::parse_line,
                 // Codex has no steering path: `codex exec resume` starts a
-                // new process rather than continuing this one, per `10`.
+                // new process rather than continuing this one, per `10 runner inventory`.
                 None,
             )
         }
@@ -440,7 +440,7 @@ pub fn start_worker(
                 thresholds,
                 farseer_runner::cursor_agent::parse_line,
                 // No `--input-format` flag exists on this CLI at all, per
-                // `10` - `--resume`/`--continue` restart into a new process,
+                // `10 runner inventory` - `--resume`/`--continue` restart into a new process,
                 // same shape as Codex.
                 None,
             )
@@ -469,7 +469,7 @@ pub fn start_worker(
 /// The whole run row lifecycle: `upsert_run` with no outcome at the start,
 /// `upsert_run` again with the final one at the end - so a run that this
 /// process crashes mid-flight is left `running` forever rather than silently
-/// missing, matching `17`'s choice to surface an orphan rather than paper
+/// missing, matching `17 cell lifecycle`'s choice to surface an orphan rather than paper
 /// over it.
 ///
 /// `on_started` fires once, after the process spawns but before the blocking
@@ -576,7 +576,7 @@ fn row(
         cell_id: contract.cell_id.clone(),
         runner: contract.runner.clone(),
         // A `WorkerContract` names a runner, not a model, so per-model
-        // attribution (`11`) waits on the contract carrying one.
+        // attribution (`11 analytics questions`) waits on the contract carrying one.
         model: String::new(),
         outcome: outcome.map(outcome_str).map(str::to_string),
         usd_micros,
@@ -769,7 +769,7 @@ mod tests {
 
     #[test]
     fn run_worker_records_the_sealed_contract_as_a_run_queued_event_even_on_failure() {
-        // `05`: immutability is what makes "what was this worker allowed to
+        // `05 run state model`: immutability is what makes "what was this worker allowed to
         // do" answerable after the fact - but nothing durable carried the
         // goal or the grants until this event. Written even on a failure
         // path, since the record should say what was attempted regardless
@@ -884,14 +884,14 @@ mod tests {
             LivenessThresholds::default(),
             farseer_runner::claude_code::parse_line,
             // Exercises the bootstrap-write path alongside cancellation:
-            // `ping`'s own stdin is unread, so writing the goal envelope to
+            // `ping`'s own stdin is unread, so writing the goal frame to
             // it before the read loop starts must not itself break anything.
-            Some(farseer_runner::claude_code::steer_envelope),
+            Some(farseer_runner::claude_code::steer_frame),
         )
         .unwrap();
         assert!(
             started.steer_handle().is_some(),
-            "a runner with a steer envelope exposes a steer handle"
+            "a runner with a steer frame exposes a steer handle"
         );
         let token = started.cancel_token();
         std::thread::spawn(move || {
@@ -899,7 +899,7 @@ mod tests {
             token.cancel();
         });
 
-        // `05`: cancelled is never failed. Without the result line a crash
+        // `05 run state model`: cancelled is never failed. Without the result line a crash
         // and a deliberate cancel look identical on the wire; `Cancelled`
         // proves the distinction survived rather than collapsing to `NoResult`.
         let result = started.run_to_completion(&store, &contract, Actor::Worker, || 1);

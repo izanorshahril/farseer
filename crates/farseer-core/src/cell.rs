@@ -1,12 +1,12 @@
 //! The cell definition: data in git, never a loadable plugin.
 //!
-//! `13` assembled the minimum field list from six closed tickets and found it
-//! fits on one page, which is the falsification test `01` set and `08` passed.
-//! Adding a field here is not a small act - `08` proved the coding cell and the
+//! `13 harness build kit` assembled the minimum field list from six closed tickets and found it
+//! fits on one page, which is the falsification test `01 cell primitive` set and `08 generalization test` passed.
+//! Adding a field here is not a small act - `08 generalization test` proved the coding cell and the
 //! social cell differ only in roster, tools and policy values.
 //! `23 prototype loose ends` later required the task-root budget policy value and a per-worker cap; its correction to `13 harness build kit` records why those additions preserve the test rather than silently reopening it.
 //!
-//! Explicitly **not** here, per `13` section 7: no review mode, no scheduling,
+//! Explicitly **not** here, per `13 harness build kit` section 7: no review mode, no scheduling,
 //! no credential store, no git flag, no delivery-gate field, no `cell_kind`.
 
 use serde::{Deserialize, Serialize};
@@ -16,12 +16,12 @@ use crate::ids::CellId;
 use crate::policy::{Budget, Irreversibility, Policy};
 use crate::run::WorkspaceStrategy;
 
-/// The mandatory manager. `01`: every cell has one, and only a manager may
+/// The mandatory manager. `01 cell primitive`: every cell has one, and only a manager may
 /// spawn a worker or call another cell.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Manager {
-    /// A name from the runner inventory. `10` made the inventory a menu an
+    /// A name from the runner inventory. `10 runner inventory` made the inventory a menu an
     /// author picks from, not a survey.
     pub runner: String,
     #[serde(default)]
@@ -30,12 +30,12 @@ pub struct Manager {
 
 /// What a cell may use.
 ///
-/// `22` widened this from "workers and tools" to "workers, tools and callable
-/// cells". Not a new field, which is why `08`'s test survived.
+/// `22 cell addressing` widened this from "workers and tools" to "workers, tools and callable
+/// cells". Not a new field, which is why `08 generalization test`'s test survived.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum RosterEntry {
-    /// Supervised, has a run, is cancellable. `01` classifies by supervision,
+    /// Supervised, has a run, is cancellable. `01 cell primitive` classifies by supervision,
     /// not by whether an LLM is involved.
     Worker {
         name: String,
@@ -45,17 +45,17 @@ pub enum RosterEntry {
         max_budget: Budget,
     },
     /// A call that returns or errors. Declares its own irreversibility level,
-    /// which policy then gates on, per `12`.
+    /// which policy then gates on, per `12 autonomy and deny list`.
     Tool {
         name: String,
         irreversibility: Irreversibility,
-        /// Whether this tool reaches a shell. `12`: **if shell is granted,
+        /// Whether this tool reaches a shell. `12 autonomy and deny list`: **if shell is granted,
         /// everything is granted**, and the deny list becomes advisory. Recorded
         /// so that is a stated choice rather than an assumed one.
         #[serde(default)]
         grants_shell: bool,
     },
-    /// A nested run in this cell, per `06` and `22`.
+    /// A nested run in this cell, per `06 cell transport` and `22 cell addressing`.
     Cell {
         name: String,
         cell_id: CellId,
@@ -67,8 +67,8 @@ pub enum RosterEntry {
         /// narrowed again by the caller's remaining task budget.
         #[serde(default)]
         max_budget: Budget,
-        /// A foreign A2A orchestrator rather than a local cell. `21` found such
-        /// a callee **silently ignores four of eight cell-call fields**, so `12`
+        /// A foreign A2A orchestrator rather than a local cell. `21 a2a conformance` found such
+        /// a callee **silently ignores four of eight cell-call fields**, so `12 autonomy and deny list`
         /// pins it at the top level and it cannot be lowered.
         #[serde(default)]
         peer: bool,
@@ -85,7 +85,7 @@ impl RosterEntry {
 
 /// Which other cells' `cell_local` memory this cell may read.
 ///
-/// `02`: the `global` tier is readable by every cell and needs no declaration.
+/// `02 record scope`: the `global` tier is readable by every cell and needs no declaration.
 /// Cross-cell reads beyond it are opt-in via the **reader's** definition, never
 /// blanket - a coding cell inheriting brand voice is noise.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -99,15 +99,15 @@ pub struct RecordScope {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CellDefinition {
-    /// **Stable across reload, never derived from content**, per `17`. Content
-    /// changes on every edit, and `06` needs this to survive a reload or the
+    /// **Stable across reload, never derived from content**, per `17 cell lifecycle`. Content
+    /// changes on every edit, and `06 cell transport` needs this to survive a reload or the
     /// record loses its join key and history detaches from the cell.
     pub cell_id: CellId,
     pub name: String,
     #[serde(default)]
     pub description: String,
-    /// Plain git handles versioning and rollback, per `13` section 4. This is
-    /// the label `17` pins per run so a rollback never reaches into work already
+    /// Plain git handles versioning and rollback, per `13 harness build kit` section 4. This is
+    /// the label `17 cell lifecycle` pins per run so a rollback never reaches into work already
     /// executing.
     #[serde(default)]
     pub version: String,
@@ -115,7 +115,7 @@ pub struct CellDefinition {
     /// `23 prototype loose ends` makes this the task-root pool that every delegated call draws down.
     #[serde(default)]
     pub budget: Budget,
-    /// Zero entries is legal, per `01`. A worker may never spawn.
+    /// Zero entries is legal, per `01 cell primitive`. A worker may never spawn.
     #[serde(default)]
     pub roster: Vec<RosterEntry>,
     pub workspace_strategy: WorkspaceStrategy,
@@ -127,20 +127,22 @@ pub struct CellDefinition {
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum ValidationError {
-    #[error("cell_id is empty; `17` requires a stable id that survives a reload")]
+    #[error("cell_id is empty; `17 cell lifecycle` requires a stable id that survives a reload")]
     EmptyCellId,
-    #[error("name is empty; `21` generates the A2A agent card from it")]
+    #[error("name is empty; `21 a2a conformance` generates the A2A agent card from it")]
     EmptyName,
-    #[error("manager.runner is empty; `01` makes the manager mandatory")]
+    #[error("manager.runner is empty; `01 cell primitive` makes the manager mandatory")]
     EmptyManagerRunner,
     #[error("roster entry `{0}` is declared more than once")]
     DuplicateRosterName(String),
     #[error(
         "roster cell `{0}` is a foreign peer but its ceiling is `{1:?}`; \
-         `21` pins a peer at `irreversible` and it cannot be lowered"
+         `21 a2a conformance` pins a peer at `irreversible` and it cannot be lowered"
     )]
     PeerCeilingLowered(String, Irreversibility),
-    #[error("roster cell `{0}` calls this cell itself; `22` refuses a cycle on the call path")]
+    #[error(
+        "roster cell `{0}` calls this cell itself; `22 cell addressing` refuses a cycle on the call path"
+    )]
     SelfCall(String),
 }
 
@@ -148,10 +150,10 @@ pub enum ValidationError {
 /// deliberately. Not an error: the definition still loads.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Advisory {
-    /// `12`: `deny read .env` is defeated by `cat .env`. A cell whose roster
+    /// `12 autonomy and deny list`: `deny read .env` is defeated by `cat .env`. A cell whose roster
     /// includes a shell has accepted that its deny list is advisory.
     DenyListIsAdvisory { shell_tool: String },
-    /// `13`: a definition with no workers is coherent, and the social cell being
+    /// `13 harness build kit`: a definition with no workers is coherent, and the social cell being
     /// thinner than the coding cell is a fact about the domain, not a smell.
     NoWorkers,
 }
@@ -168,7 +170,7 @@ impl std::fmt::Display for Advisory {
     }
 }
 
-/// What `16`'s `validate` returns: enough to tell a broken definition from a
+/// What `16 local api surface`'s `validate` returns: enough to tell a broken definition from a
 /// working one without a restart.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ValidationReport {
@@ -191,7 +193,7 @@ pub enum LoadError {
 }
 
 impl CellDefinition {
-    /// Parse and validate in one step. `16` gives the API read, validate and
+    /// Parse and validate in one step. `16 local api surface` gives the API read, validate and
     /// reload, and no edit path: definitions are files, and the operator already
     /// has an editor and a diff tool.
     pub fn load(toml_text: &str) -> Result<(Self, Vec<Advisory>), LoadError> {
@@ -291,7 +293,7 @@ impl CellDefinition {
 
     /// The effective ceiling for calling `name`, given what the caller offers.
     ///
-    /// `22` section 3: an ungranted cell stays ungranted even if the operator
+    /// `22 cell addressing` section 3: an ungranted cell stays ungranted even if the operator
     /// names it. A mechanism that yields to conversational pressure is not a
     /// mechanism, and the fix - edit the definition and `reload` - takes about
     /// ten seconds and leaves a git commit.
@@ -310,7 +312,7 @@ impl CellDefinition {
         })
     }
 
-    /// The composed policy for a call into `callee`, per `12`.
+    /// The composed policy for a call into `callee`, per `12 autonomy and deny list`.
     pub fn policy_for_call(&self, callee: &CellDefinition) -> Policy {
         self.policy.narrow(&callee.policy)
     }
@@ -383,7 +385,7 @@ also_read = ["social"]
 
     #[test]
     fn a_cell_with_an_empty_roster_is_coherent() {
-        // `08`'s falsification test, expressed as a test.
+        // `08 generalization test`'s falsification test, expressed as a test.
         let toml_text = r#"
 cell_id = "thin"
 name = "Thin"

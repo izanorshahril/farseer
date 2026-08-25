@@ -1,6 +1,6 @@
 //! The two things that stand between farseer and the operator's browser.
 //!
-//! `16` section 10 is unusually blunt about why the second one is not optional
+//! `16 local api surface` section 10 is unusually blunt about why the second one is not optional
 //! hardening: Docker Desktop's **CVE-2025-9074** was exactly this shape - a
 //! loopback-bound API reachable by any web page in the operator's browser
 //! through DNS rebinding. **A token alone does not save you**, because the

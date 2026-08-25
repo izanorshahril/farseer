@@ -1,15 +1,15 @@
 //! The `cursor-agent` CLI runner: invocation and stream-json mapping.
 //!
-//! `10` scored it against `05`'s contract: activity **pass** (`thinking`
+//! `10 runner inventory` scored it against `05 run state model`'s contract: activity **pass** (`thinking`
 //! deltas, each with `timestamp_ms`), progress **pass** (`tool_call` with
 //! `subtype: started`/`completed`), follow-up **fail** (no `--input-format`
 //! flag exists; `--resume`/`--continue` start a new process, same shape as
 //! Codex), cancel **not evaluated**. **Free-tier account on this machine** -
-//! `10` found real quota is spent per run, so this runner's own tests below
+//! `10 runner inventory` found real quota is spent per run, so this runner's own tests below
 //! use a captured fixture rather than a live process, same discipline as
 //! `claude_code`'s and `codex`'s tests.
 //!
-//! `10` names the trust gate (`--trust`, same shape as Codex's
+//! `10 runner inventory` names the trust gate (`--trust`, same shape as Codex's
 //! `--skip-git-repo-check`) and the shapes of `thinking`/`tool_call`/`result`
 //! but captured no literal payload. This module's own probe, run
 //! 2026-08-24 against the real, installed `cursor-agent` 2026.08.11-e8db854
@@ -25,11 +25,11 @@
 //! ```
 //!
 //! **`tool_call` stayed out of that probe** - the trivial prompt used to
-//! capture it never triggered one - so, per `10`'s own rule and matching
+//! capture it never triggered one - so, per `10 runner inventory`'s own rule and matching
 //! `codex.rs`'s precedent, it counts as activity only until a real payload
 //! is captured to map it to `TOOL_CALL_STARTED`/`TOOL_RESULT` properly.
 //! `system` and `user`/`assistant` echo lines are activity only too: none of
-//! them are one of `05`'s three progress kinds.
+//! them are one of `05 run state model`'s three progress kinds.
 //!
 //! **`is_error` is the terminal signal, not `subtype`** - `claude_code.rs`
 //! found `subtype: "success"` can appear alongside `is_error: true` on that
@@ -43,10 +43,10 @@ use serde_json::Value;
 use crate::claude_code::{FinishedSignal, ParseError, RunnerSignal};
 
 /// The flags this module's own probe verified: `--print` for headless output,
-/// `--output-format stream-json`, `--trust` to disarm `10`'s fresh-workspace
-/// gate (`04` gives every run a fresh worktree, so every run would hit it
+/// `--output-format stream-json`, `--trust` to disarm `10 runner inventory`'s fresh-workspace
+/// gate (`04 spike workspace teardown` gives every run a fresh worktree, so every run would hit it
 /// without this flag), and the goal as the trailing positional prompt - no
-/// steering path exists here, so there is no envelope for it to travel as
+/// steering path exists here, so there is no frame for it to travel as
 /// instead, same reasoning as `codex::build_args`.
 pub fn build_args(contract: &WorkerContractSpec) -> Vec<String> {
     vec![
@@ -76,7 +76,7 @@ pub fn parse_line(line: &str) -> Result<Vec<RunnerSignal>, ParseError> {
     Ok(Vec::new())
 }
 
-/// `10`: cursor-agent reports tokens only, never cost - there is no
+/// `10 runner inventory`: cursor-agent reports tokens only, never cost - there is no
 /// `total_cost_usd` equivalent here, so a run's cost must be priced by
 /// farseer itself from these fields, not read off the wire.
 fn finished(v: &Value) -> FinishedSignal {
@@ -130,7 +130,7 @@ mod tests {
 
     #[test]
     fn the_fresh_workspace_trust_gate_is_always_disarmed() {
-        // `10`: without this flag, every run fails on a fresh worktree while
+        // `10 runner inventory`: without this flag, every run fails on a fresh worktree while
         // looking like a hang to anything watching only for activity.
         let args = build_args(&contract("anything"));
         assert!(args.contains(&"--trust".to_string()));
@@ -181,7 +181,7 @@ mod tests {
 
     #[test]
     fn an_unrecognised_tool_call_is_activity_only_and_yields_no_signal() {
-        // The exact case the module doc comment names: `10` describes the
+        // The exact case the module doc comment names: `10 runner inventory` describes the
         // shape but no ticket captured a literal payload, so this must not
         // be guessed at.
         let line = r#"{"type":"tool_call","subtype":"started","tool":"shell"}"#;

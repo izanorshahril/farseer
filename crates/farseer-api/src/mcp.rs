@@ -99,8 +99,8 @@ struct WriteMemoryArgs {
     /// The per-manager capability injected beside `manager_run_id`.
     manager_token: String,
     body: String,
-    /// `cell_local` (the default, per `25`) or `run_local`. `global` is
-    /// refused here - `25` gates it on the operator, a promotion this face
+    /// `cell_local` (the default, per `25 memory lifecycle`) or `run_local`. `global` is
+    /// refused here - `25 memory lifecycle` gates it on the operator, a promotion this face
     /// does not offer.
     tier: Option<String>,
 }

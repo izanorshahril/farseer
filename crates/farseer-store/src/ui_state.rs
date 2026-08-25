@@ -1,7 +1,7 @@
 //! UI state: the one thing farseer stores and never reads.
 //!
-//! `24` made this a fourth category alongside events, memory and attachments,
-//! and it differs from all three on every rule `02` set: **mutable,
+//! `24 ui state persistence` made this a fourth category alongside events, memory and attachments,
+//! and it differs from all three on every rule `02 record scope` set: **mutable,
 //! last-write-wins, no `seq`, no scrub, and no event emitted on write** - a
 //! cursor drag is not history, and logging one would flood the log.
 //!
@@ -12,7 +12,7 @@ use rusqlite::OptionalExtension;
 
 use crate::{Result, Store, StoreError};
 
-/// `24`: above this, the API answers `413`.
+/// `24 ui state persistence`: above this, the API answers `413`.
 pub const UI_STATE_CAP_BYTES: usize = 1024 * 1024;
 
 /// `24 ui state persistence`'s second invariant: a cap on the key itself, so an
@@ -37,7 +37,7 @@ impl Store {
     /// Store a blob under an opaque key.
     ///
     /// No validation, no schema, no reference-following, and **no concurrency
-    /// control** - that is `01`'s out-of-scope ruling on concurrent clients
+    /// control** - that is `01 cell primitive`'s out-of-scope ruling on concurrent clients
     /// rather than a shortcut. The key is opaque and farseer never splits it on
     /// a separator.
     pub fn put_ui_state(&self, key: &str, blob: &[u8], ts: i64) -> Result<()> {
@@ -129,7 +129,7 @@ mod tests {
 
     #[test]
     fn a_blob_is_stored_verbatim_and_never_scrubbed() {
-        // `24`: farseer cannot scrub what it will not read, and stating that is
+        // `24 ui state persistence`: farseer cannot scrub what it will not read, and stating that is
         // the point. A UI storing something secret-shaped keeps it verbatim.
         let s = Store::open_in_memory().unwrap();
         let blob = b"ghp_ZzAa0011223344556677889900";

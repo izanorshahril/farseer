@@ -1,23 +1,23 @@
 //! Policy: what a worker or a callee is allowed to do.
 //!
-//! `12` settled that policy is four things, and that only the first is a real
+//! `12 autonomy and deny list` settled that policy is four things, and that only the first is a real
 //! boundary: tool grants, irreversibility level, autonomy ceiling, deny list.
 //! Everything here only ever **narrows**.
 //!
-//! The deny list is not a security boundary. `12` is explicit: `deny read .env`
+//! The deny list is not a security boundary. `12 autonomy and deny list` is explicit: `deny read .env`
 //! is defeated by `cat .env`, so it stops a worker that did not intend harm and
 //! nothing else. If shell is granted, everything is granted.
 
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 
-/// How hard a tool call is to take back. `12` chose three levels: two would
+/// How hard a tool call is to take back. `12 autonomy and deny list` chose three levels: two would
 /// collapse "embarrassing but fixable" with "the money is gone", and a spectrum
 /// would be unfalsifiable.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Irreversibility {
-    /// File writes inside a workspace. `04` measured teardown, so these are
+    /// File writes inside a workspace. `04 spike workspace teardown` measured teardown, so these are
     /// fully reversible. Ungated.
     Reversible,
     /// Post, pull request, comment. Gated, and a cell may lower the gate.
@@ -35,8 +35,8 @@ impl Irreversibility {
 
     /// Whether a cell definition may switch the gate off.
     ///
-    /// `12`: otherwise unattended payments are one edit to a definition file
-    /// away, and `01` made definitions plain files in git precisely so they
+    /// `12 autonomy and deny list`: otherwise unattended payments are one edit to a definition file
+    /// away, and `01 cell primitive` made definitions plain files in git precisely so they
     /// would be easy to edit.
     pub fn gate_is_lowerable(self) -> bool {
         self < Self::Irreversible
@@ -51,7 +51,7 @@ pub struct Policy {
     /// Advisory. Catches accidents cheaply; see the module note.
     #[serde(default)]
     pub deny: BTreeSet<String>,
-    /// How many workers this cell may have in flight at once. `01` made a cell
+    /// How many workers this cell may have in flight at once. `01 cell primitive` made a cell
     /// with zero workers legal, so zero is a coherent cap.
     #[serde(default = "default_worker_cap")]
     pub worker_cap: u32,
@@ -74,7 +74,7 @@ impl Default for Policy {
 impl Policy {
     /// Compose this policy with the one a call is entering.
     ///
-    /// `12`: **deny lists union, autonomy ceilings take the minimum, both only
+    /// `12 autonomy and deny list`: **deny lists union, autonomy ceilings take the minimum, both only
     /// ever narrow.** The worker cap is local to a cell and does not compose.
     pub fn narrow(&self, callee: &Policy) -> Policy {
         Policy {
@@ -123,7 +123,7 @@ pub struct BudgetError {
 impl Budget {
     /// The largest budget a callee may be handed, given what this one has left.
     ///
-    /// `23`: a ceiling is a level and is checked once; a budget is a quantity.
+    /// `23 prototype loose ends`: a ceiling is a level and is checked once; a budget is a quantity.
     pub fn cap_to(&self, requested: Budget) -> Budget {
         fn narrower(remaining: Option<u64>, asked: Option<u64>) -> Option<u64> {
             match (remaining, asked) {
@@ -141,7 +141,7 @@ impl Budget {
 
     /// Subtract a spend. Returns the exhausted dimension rather than saturating.
     ///
-    /// Per `05`, exhaustion is a `failed` outcome, never `cancelled`: nobody
+    /// Per `05 run state model`, exhaustion is a `failed` outcome, never `cancelled`: nobody
     /// chose it.
     pub fn draw(&mut self, spend: Spend) -> Result<(), BudgetError> {
         fn take(
@@ -163,7 +163,7 @@ impl Budget {
 
 /// The budgets on a call path, outermost first.
 ///
-/// `23` made budgets **draw down rather than be compared**, which is what stops
+/// `23 prototype loose ends` made budgets **draw down rather than be compared**, which is what stops
 /// three sequential $2 calls spending $6 under a $2 parent. Encoding the path as
 /// a stack is what makes that structural rather than a rule someone remembers.
 #[derive(Debug, Clone, Default)]

@@ -1,4 +1,4 @@
-//! Maps Claude Code's stream-json line stream onto the contract `05` wrote and `20`/`10` scored this runner against.
+//! Maps Claude Code's stream-json line stream onto the contract `05 run state model` wrote and `20 worker control channel`/`10 runner inventory` scored this runner against.
 //! [`crate::invocation::build_args`] selects the production invocation for the process role.
 //! A manager uses `--input-format stream-json` and receives its initial goal plus later steer messages through live stdin.
 //! A worker omits `--input-format` and receives one positional goal so its invocation ends after one turn.
@@ -6,20 +6,20 @@
 //! A `content_block_start` or `stream_event` line is therefore seen only when another caller opts into partial messages.
 //!
 //! **Every successfully parsed line is activity**, full stop - that is what
-//! solves `05`'s twenty-minute-reasoning problem, and it does not depend on
+//! solves `05 run state model`'s twenty-minute-reasoning problem, and it does not depend on
 //! recognising the line's shape. [`RunnerSignal`] carries only what is
-//! additionally **progress** (`05`'s three kinds) or terminal, because those
+//! additionally **progress** (`05 run state model`'s three kinds) or terminal, because those
 //! are the only things the record keeps. A line this module does not
 //! recognise still counts as activity and yields no signal - the schema will
 //! grow kinds this crate does not know yet, and an unmapped line is not a
 //! hang.
 //!
 //! Field names below are `camelCase` where Claude Code's own JSON uses it
-//! (`resetsAt`, `rateLimitType`) - transcribed from the payload `10` captured
+//! (`resetsAt`, `rateLimitType`) - transcribed from the payload `10 runner inventory` captured
 //! on this machine, not renamed to Rust convention, so a `grep` on the wire
 //! format finds this file.
 //!
-//! **Steer is no longer blocked on an unverified envelope.** Verified
+//! **Steer is no longer blocked on an unverified frame.** Verified
 //! 2026-08-23 against the real, installed `claude` 2.1.233: piping
 //! `{"type":"user","message":{"role":"user","content":[{"type":"text","text":"..."}]}}\n`
 //! lines to a process started with `--input-format stream-json` is accepted
@@ -27,7 +27,7 @@
 //! message sent before closing stdin correctly recalled a fact stated in the
 //! first, under the same `session_id`, and each turn produced its **own**
 //! terminal `result` event rather than one at the very end. `invocation.rs`'s
-//! doc comment previously called this envelope unobserved; it is now
+//! doc comment previously called this frame unobserved; it is now
 //! observed and cited here. Production wires the live process's stdin to later
 //! HTTP steer requests through the manager's `SteerHandle`; this probe covered
 //! Claude Code's protocol, not the API path around it.
@@ -50,7 +50,7 @@ pub enum RunnerSignal {
     Finished(FinishedSignal),
 }
 
-/// `10`: "farseer never has to hit a limit to know where it stands" - this is
+/// `10 runner inventory`: "farseer never has to hit a limit to know where it stands" - this is
 /// that event, transcribed field for field from the captured payload.
 #[derive(Debug, Clone, PartialEq)]
 pub struct RateLimitInfo {
@@ -60,7 +60,7 @@ pub struct RateLimitInfo {
     pub is_using_overage: bool,
 }
 
-/// `11`'s cost metric, native to this runner per `10`: `total_cost_usd` in the
+/// `11 analytics questions`'s cost metric, native to this runner per `10 runner inventory`: `total_cost_usd` in the
 /// terminal `result` event, converted to the store's integer micros so no
 /// float ever reaches the record.
 #[derive(Debug, Clone, PartialEq)]
@@ -74,13 +74,13 @@ pub struct FinishedSignal {
 #[error("invalid stream-json line: {0}")]
 pub struct ParseError(pub String);
 
-/// The envelope this doc comment's 2026-08-23 probe verified: one
+/// The frame this doc comment's 2026-08-23 probe verified: one
 /// stream-json line a process started with `--input-format stream-json`
 /// accepts as a user turn, whether it is the first message or a later steer.
 /// `serde_json::json!` rather than hand-built string interpolation so `text`
 /// containing a quote or newline serializes correctly instead of breaking
-/// the envelope.
-pub fn steer_envelope(text: &str) -> String {
+/// the frame.
+pub fn steer_frame(text: &str) -> String {
     serde_json::json!({
         "type": "user",
         "message": {
@@ -185,7 +185,7 @@ fn finished(v: &Value) -> FinishedSignal {
 }
 
 /// The wrapped Anthropic Messages API stream event `--include-partial-messages`
-/// forwards. Only the two shapes `05` needs as progress are mapped; a bare
+/// forwards. Only the two shapes `05 run state model` needs as progress are mapped; a bare
 /// `text_delta` is activity-only and returns `None` on purpose.
 fn stream_event_progress(event: &Value) -> Option<RunnerSignal> {
     match event.get("type").and_then(Value::as_str) {
@@ -210,8 +210,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn steer_envelope_matches_the_shape_the_2026_08_23_probe_verified() {
-        let line = steer_envelope("keep going");
+    fn steer_frame_matches_the_shape_the_2026_08_23_probe_verified() {
+        let line = steer_frame("keep going");
         let v: Value = serde_json::from_str(&line).unwrap();
         assert_eq!(v["type"], "user");
         assert_eq!(v["message"]["role"], "user");
@@ -220,15 +220,15 @@ mod tests {
     }
 
     #[test]
-    fn steer_envelope_escapes_a_quote_in_the_message_rather_than_breaking_the_line() {
-        let line = steer_envelope(r#"say "hi" back"#);
+    fn steer_frame_escapes_a_quote_in_the_message_rather_than_breaking_the_line() {
+        let line = steer_frame(r#"say "hi" back"#);
         let v: Value = serde_json::from_str(&line).unwrap();
         assert_eq!(v["message"]["content"][0]["text"], r#"say "hi" back"#);
     }
 
     #[test]
     fn a_rate_limit_event_carries_the_reset_epoch_and_the_overage_state() {
-        // `10`'s captured payload, transcribed verbatim.
+        // `10 runner inventory`'s captured payload, transcribed verbatim.
         let line = r#"{"type":"rate_limit_event",
  "rate_limit_info":{"status":"allowed",
                     "resetsAt":1787473800,
@@ -270,7 +270,7 @@ mod tests {
 
     #[test]
     fn a_failed_result_is_failed_not_cancelled() {
-        // `05`: only a human choosing not to proceed is `Cancelled`. A harness
+        // `05 run state model`: only a human choosing not to proceed is `Cancelled`. A harness
         // reporting an error is `Failed`, which invites a retry.
         let line = r#"{"type":"result","subtype":"error_during_execution","total_cost_usd":0.01}"#;
         let signals = parse_line(line).unwrap();
@@ -319,7 +319,7 @@ mod tests {
 
     #[test]
     fn a_text_delta_is_activity_only_and_yields_no_signal() {
-        // The twenty-minute-reasoning case `05` built the activity/progress
+        // The twenty-minute-reasoning case `05 run state model` built the activity/progress
         // split for: bytes arrive, nothing goes in the record.
         let line = r#"{"type":"stream_event","event":{"type":"content_block_delta",
                         "index":0,"delta":{"type":"text_delta","text":"thinking..."}}}"#;

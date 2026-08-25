@@ -29,7 +29,7 @@
 //!
 //! No `--input-format`-style flag exists on this CLI (per `--help`); `-r,
 //! --resume` restarts into a new process rather than continuing a live one,
-//! same shape `10` found for Codex and cursor-agent, so there is no steering
+//! same shape `10 runner inventory` found for Codex and cursor-agent, so there is no steering
 //! path here either.
 
 use farseer_core::run::{Outcome, WorkerContractSpec};
