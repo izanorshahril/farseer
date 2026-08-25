@@ -1,6 +1,6 @@
 # Working in this repository
 
-Twenty-seven decision tickets are closed, and the foundation is implemented against them: `farseer-core`, `farseer-store`, `farseer-api`, `farseer-runner`, `farseer-manager`, and the `farseer` binary.
+Twenty-eight decision tickets are closed, and the foundation is implemented against them: `farseer-core`, `farseer-store`, `farseer-api`, `farseer-runner`, `farseer-manager`, and the `farseer` binary.
 `farseer-runner` resolves `claude`, `codex`, `cursor-agent`, or `goose`, builds each argv, supervises the process under a Job Object, maps verified stream-json shapes, and creates or tears down workspaces according to `04 spike workspace teardown`.
 Codex maps the locally verified `item.completed` `agent_message` answer but leaves other `item.*` activity-only.
 Cursor-agent remains shallow past its verified terminal shape because no ticket captured a literal `tool_call` payload.
@@ -20,6 +20,10 @@ Every bounded budget dimension currently fails closed before spawn because no na
 Cross-cell delegation and verified MCP launch wiring for non-Claude managers remain open.
 A `Worktree` cell uses the repository named by `--repo`, which defaults to the directory where `farseer serve` started because `13 harness build kit` keeps git paths out of `CellDefinition`.
 
+The operator surface is decided but not built: `28 operator surface` made the **canvas the home screen**, and anything that is not the canvas a **widget** on it.
+A widget is a **cell's face** - it renders, and the cell behind it thinks - so there is no second place agents run and no new API operation.
+Widget code is authored by cell zero into `widgets/` in git and farseer never stores it, which keeps `01 cell primitive`'s no-plugin-ABI ruling intact: the loader lives in the client, and the runtime still loads nothing.
+
 The MCP face from `02 record scope` is nested at `/v1/mcp` in the same router and process because `09 store decision` requires one process and one writer.
 The exact-pinned `rmcp` streamable-HTTP service shares `AppState`'s `Store` and loopback/token guard; only `/v1/mcp` accepts the per-manager bearer, while operator routes still require the process-wide token.
 The three tools are manager-scoped `read_memory`, `write_memory`, and `delegate_to_worker`; every call derives identity and memory scope from the active pinned manager context, and no tool appends a raw event.
@@ -36,7 +40,7 @@ They are evidence, not a foundation to build on.
 A decision lives in exactly one place: its ticket.
 
 Before answering any question about how farseer should work, check whether a ticket already answers it.
-Twenty-seven of them do, and they carry the reasoning, the rejected alternatives, and what the answer cost.
+Twenty-eight of them do, and they carry the reasoning, the rejected alternatives, and what the answer cost.
 
 When a ticket turns out to be wrong or superseded, **append the correction to that ticket and to the map**, rather than editing the original text in place.
 The map's own list of corrections is how a reader knows a resolution has moved.

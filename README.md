@@ -4,7 +4,7 @@ A local-first agent orchestration runtime for Windows.
 One operator, one Rust binary, no required external services.
 
 **Status: the foundation is built, and a Claude Code manager can delegate to a real roster worker.**
-Twenty-seven decision tickets are closed, and the domain model, the record, the local API, four native runners, all four manager verbs from [Run state model and control semantics](.scratch/farseer/issues/05-run-state-model.md), and the MCP face from [Record scope](.scratch/farseer/issues/02-record-scope.md) are implemented against them.
+Twenty-eight decision tickets are closed, and the domain model, the record, the local API, four native runners, all four manager verbs from [Run state model and control semantics](.scratch/farseer/issues/05-run-state-model.md), and the MCP face from [Record scope](.scratch/farseer/issues/02-record-scope.md) are implemented against them.
 `POST /v1/cells/{id}/instruct` runs a cell's manager against a goal and returns a `run_id` immediately.
 A Claude Code manager receives farseer's own MCP face under a per-run capability and can call `delegate_to_worker` during the same live conversation; cancel and steer remain available through the run API.
 See [What runs today](#what-runs-today).
@@ -87,7 +87,7 @@ An external protocol is spoken at a boundary, never shaped into internals.
 ├─ AGENTS.md           conventions for agents working here (CLAUDE.md points at it)
 └─ .scratch/farseer/
    ├─ map.md           the decision route: destination, decisions, fog, out of scope
-   ├─ issues/          27 decision tickets, all closed
+   ├─ issues/          28 decision tickets, all closed
    ├─ research/        compaction, hang detection, headless UI boundary
    ├─ prototypes/      one operator turn, end to end
    └─ spikes/          jobspike, wsspike, storebench
