@@ -101,6 +101,11 @@ pub struct RunReport {
     /// Boxed so a rarely-present observation does not widen every `Result` this
     /// crate returns - `ManagerError::Cancelled` carries a whole report.
     pub window: Option<Box<farseer_runner::claude_code::RateLimitInfo>>,
+    /// What the runner said about the session, if anything.
+    ///
+    /// `RunRow.model` existed from the beginning and was **always empty**,
+    /// because nothing read the one line where a runner names its model.
+    pub session: Option<farseer_runner::claude_code::SessionInfo>,
 }
 
 /// Which role the process has in the cell.
@@ -322,6 +327,7 @@ impl StartedWorker {
         let mut report = None;
         let mut output = None;
         let mut window = None;
+        let mut session: Option<farseer_runner::claude_code::SessionInfo> = None;
         let mut store_err = None;
         let cancel_on_store_failure = self.proc.cancel_token();
         let activity = Arc::clone(&self.activity);
@@ -394,12 +400,33 @@ impl StartedWorker {
                             // inventory` observed `rate_limit_event` arriving
                             // around the terminal result, not before it.
                             window: None,
+                            session: None,
                         });
                     }
                     // `27 quota accounting`: observed on every successful run,
                     // carried out on the report, and appended by the layer that
                     // knows which account it belongs to - on change only.
                     RunnerSignal::RateLimit(info) => window = Some(Box::new(info)),
+                    RunnerSignal::Session(info) => {
+                        let event = NewEvent::new(
+                            contract.cell_id.clone(),
+                            contract.run_id,
+                            EventKind::new(EventKind::SESSION_STARTED),
+                            progress_actor,
+                            now_ms(),
+                            serde_json::json!({
+                                "model": info.model,
+                                "session_id": info.session_id,
+                                "runner": contract.runner,
+                            }),
+                        );
+                        if let Err(e) = sink.append(&event) {
+                            store_err = Some(e);
+                            cancel_on_store_failure.cancel();
+                            return;
+                        }
+                        session = Some(info);
+                    }
                 }
             }
         })?;
@@ -418,6 +445,7 @@ impl StartedWorker {
                     report.result = output;
                 }
                 report.window = window;
+                report.session = session.clone();
                 if was_cancelled {
                     report.outcome = Outcome::Cancelled;
                     Err(ManagerError::Cancelled(report))
@@ -431,6 +459,7 @@ impl StartedWorker {
                 tokens: None,
                 result: None,
                 window,
+                session,
             })),
             None => Err(ManagerError::NoResult),
         }
@@ -544,7 +573,7 @@ pub fn run_worker(
     on_started: impl FnOnce(CancelToken, LivenessHandle, Option<SteerHandle>),
 ) -> Result<RunReport, ManagerError> {
     let started_ts = now_ms();
-    sink.upsert_run(&row(contract, None, 0, 0, started_ts, None))?;
+    sink.upsert_run(&row(contract, None, 0, 0, started_ts, None, String::new()))?;
     // `05 run state model`: immutability makes the sealed contract one durable
     // answer after the process exits. The same payload pins whether this was a
     // manager or worker and snapshots the manager definition used for later
@@ -651,6 +680,14 @@ fn finished_row(
     started_ts: i64,
     finished_ts: i64,
 ) -> RunRow {
+    let model = match result {
+        Ok(report) | Err(ManagerError::Cancelled(report)) => report
+            .session
+            .as_ref()
+            .and_then(|session| session.model.clone())
+            .unwrap_or_default(),
+        Err(_) => String::new(),
+    };
     let (outcome, usd_micros, tokens) = match result {
         Ok(report) => (
             report.outcome,
@@ -671,6 +708,7 @@ fn finished_row(
         tokens,
         started_ts,
         Some(finished_ts),
+        model,
     )
 }
 
@@ -681,15 +719,19 @@ fn row(
     tokens: u64,
     started_ts: i64,
     finished_ts: Option<i64>,
+    model: String,
 ) -> RunRow {
     RunRow {
         run_id: contract.run_id,
         task_id: contract.task_id,
         cell_id: contract.cell_id.clone(),
         runner: contract.runner.clone(),
-        // A `WorkerContract` names a runner, not a model, so per-model
-        // attribution (`11 analytics questions`) waits on the contract carrying one.
-        model: String::new(),
+        // Observed, not configured. A `WorkerContract` names a runner and never
+        // a model, and this used to be empty for that reason - but the runner
+        // announces the model it actually used, which is the better answer for
+        // `11 analytics questions` anyway: what ran, rather than what was asked
+        // for. Empty until it says so.
+        model,
         outcome: outcome.map(outcome_str).map(str::to_string),
         usd_micros,
         tokens,
@@ -856,6 +898,7 @@ mod tests {
             tokens: Some(340),
             result: Some("the changelog is posted".into()),
             window: None,
+            session: None,
         }));
 
         assert_eq!(payload["outcome"], "ok");
@@ -871,6 +914,7 @@ mod tests {
             tokens: None,
             result: Some("halfway through".into()),
             window: None,
+            session: None,
         })));
 
         assert_eq!(payload["outcome"], "cancelled");
@@ -893,6 +937,7 @@ mod tests {
             tokens: Some(789),
             result: Some("reported result".into()),
             window: None,
+            session: None,
         }));
 
         let row = finished_row(&contract, &result, 1, 2);
@@ -911,6 +956,7 @@ mod tests {
             tokens: None,
             result: None,
             window: None,
+            session: None,
         }));
 
         let row = finished_row(&contract, &result, 1, 2);

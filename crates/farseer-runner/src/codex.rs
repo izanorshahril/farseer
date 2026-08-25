@@ -44,6 +44,15 @@ pub fn parse_line(line: &str) -> Result<Vec<RunnerSignal>, ParseError> {
         return Ok(Vec::new());
     };
     let signal = match kind {
+        // Codex names a thread and never a model, so that is what farseer
+        // reports. Filling the gap with the model somebody configured would be
+        // farseer answering a question the runner declined.
+        "thread.started" => v.get("thread_id").and_then(Value::as_str).map(|thread| {
+            RunnerSignal::Session(crate::claude_code::SessionInfo {
+                model: None,
+                session_id: Some(thread.to_string()),
+            })
+        }),
         "turn.completed" => Some(RunnerSignal::Finished(finished(&v, Outcome::Ok))),
         "turn.failed" => Some(RunnerSignal::Finished(finished(&v, Outcome::Failed))),
         "item.completed" => agent_message(&v).map(RunnerSignal::Output),

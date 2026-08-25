@@ -425,3 +425,38 @@ code {
 .thread li.operator p {
   color: var(--dim);
 }
+
+/* The meta strip. Label above value, wrapping, with an absent field shown as
+   "not reported" rather than hidden - which runner declined to say is itself
+   worth knowing, and a missing row would read as a bug instead. */
+.meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 16px;
+  padding: 0 0 10px;
+  margin-bottom: 10px;
+  border-bottom: 1px solid var(--line);
+}
+.meta span {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+}
+.meta i {
+  font-style: normal;
+  font-size: 10px;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+  color: var(--faint);
+}
+.meta b {
+  font-size: 12px;
+  font-weight: 500;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.meta .absent b {
+  color: var(--faint);
+  font-weight: 400;
+}

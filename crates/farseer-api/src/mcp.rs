@@ -875,6 +875,7 @@ irreversibility = "undoable"
             tokens: Some(789),
             result: Some("terminal text".into()),
             window: None,
+            session: None,
         };
 
         let preserved =

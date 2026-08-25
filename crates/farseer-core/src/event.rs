@@ -104,6 +104,14 @@ impl EventKind {
     /// A nested run in the calling cell, per `06 cell transport` and `22 cell addressing`.
     pub const CELL_CALLED: &'static str = "cell_called";
 
+    /// What the runner said about the session it opened: model, session id.
+    ///
+    /// Appended once, when the runner says it. Every field is optional because
+    /// each is a claim a particular runner chose to make - Codex names a thread
+    /// and no model, and `10 runner inventory`'s rule is that farseer reports
+    /// what it observed rather than what was configured.
+    pub const SESSION_STARTED: &'static str = "session_started";
+
     /// A subscription window changed state, per `27 quota accounting`.
     ///
     /// Appended **on change only** and with `actor: system`: `10 runner inventory`

@@ -45,9 +45,33 @@ pub enum RunnerSignal {
         payload: Value,
     },
     RateLimit(RateLimitInfo),
+    /// What the runner says about the session it just opened.
+    ///
+    /// Every field is optional because **every field is a claim the runner
+    /// chose to make**: Claude Code names its model and session on `system/init`
+    /// and Codex names only a thread. `10 runner inventory`'s rule holds here as
+    /// everywhere - observed, never advertised - so a runner that says nothing
+    /// produces nothing rather than a default that looks like an answer.
+    Session(SessionInfo),
     /// User-visible terminal text which a supervising manager can relay.
     Output(String),
     Finished(FinishedSignal),
+}
+
+/// The session a runner opened, as far as it will say.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SessionInfo {
+    /// The model actually used, which is not always the one anybody configured.
+    pub model: Option<String>,
+    /// The runner's own id for the conversation, so an operator can find it in
+    /// the runner's own tooling rather than only in farseer's record.
+    pub session_id: Option<String>,
+}
+
+impl SessionInfo {
+    pub fn is_empty(&self) -> bool {
+        self.model.is_none() && self.session_id.is_none()
+    }
 }
 
 /// `10 runner inventory`: "farseer never has to hit a limit to know where it stands" - this is
@@ -136,6 +160,16 @@ pub fn parse_line(line: &str) -> Result<Vec<RunnerSignal>, ParseError> {
             .get("rate_limit_info")
             .and_then(rate_limit)
             .map(RunnerSignal::RateLimit),
+        // `system/init` is where Claude Code names the model and the session.
+        // Farseer read past it until now, which is why every run row carried an
+        // empty `model` while the runner knew perfectly well.
+        "system" if v.get("subtype").and_then(Value::as_str) == Some("init") => {
+            let info = SessionInfo {
+                model: text_field(&v, "model"),
+                session_id: text_field(&v, "session_id"),
+            };
+            (!info.is_empty()).then_some(RunnerSignal::Session(info))
+        }
         "system" if v.get("subtype").and_then(Value::as_str) == Some("compact_boundary") => {
             Some(RunnerSignal::Progress {
                 kind: EventKind::new(EventKind::CONTEXT_COMPACTED),
@@ -160,6 +194,13 @@ pub fn parse_line(line: &str) -> Result<Vec<RunnerSignal>, ParseError> {
     };
 
     Ok(signal.into_iter().collect())
+}
+
+fn text_field(v: &Value, field: &str) -> Option<String> {
+    v.get(field)
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
 }
 
 fn rate_limit(v: &Value) -> Option<RateLimitInfo> {
@@ -377,7 +418,33 @@ mod tests {
     fn an_unrecognised_type_is_still_activity_and_yields_no_signal() {
         // The schema will grow kinds this module does not know about yet.
         // That must count as the model doing something, never as a hang.
-        let line = r#"{"type":"system","subtype":"init","session_id":"abc"}"#;
+        // `system/init` used to be the example here and is now mapped, which is
+        // the point: this test needs a kind farseer genuinely does not know.
+        let line = r#"{"type":"system","subtype":"a_kind_from_a_later_release"}"#;
+        assert_eq!(parse_line(line).unwrap(), Vec::new());
+    }
+
+    #[test]
+    fn init_names_the_model_and_the_session_the_runner_actually_opened() {
+        // `RunRow.model` was empty from the beginning because nothing read this
+        // line. The runner knew all along.
+        let line =
+            r#"{"type":"system","subtype":"init","session_id":"abc","model":"claude-opus-5"}"#;
+        let signals = parse_line(line).unwrap();
+        assert_eq!(
+            signals,
+            [RunnerSignal::Session(SessionInfo {
+                model: Some("claude-opus-5".into()),
+                session_id: Some("abc".into()),
+            })]
+        );
+    }
+
+    #[test]
+    fn an_init_that_names_nothing_produces_nothing() {
+        // `10 runner inventory`: observed, never advertised. A runner that
+        // declines to say gets no default invented for it.
+        let line = r#"{"type":"system","subtype":"init"}"#;
         assert_eq!(parse_line(line).unwrap(), Vec::new());
     }
 

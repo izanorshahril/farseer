@@ -377,3 +377,25 @@ The operator asked for Codex rather than Claude Code, because farseer competing 
 ### Still open
 
 A **Claude Code manager** produced no events in the same session even before this fix, and the fix does not touch its path - a live manager was already spawned with a pipe, correctly. Not diagnosed, and not retried on the operator's request, since farseer sharing a Claude session with the operator's own is the conflict they asked to avoid.
+
+## Session meta, 2026-08-26: shown only where a runner said it
+
+The operator asked the conversation to carry the model, the provider and the context - the meta a chat client normally shows.
+
+The rule that shaped it is `10 runner inventory`'s, unchanged: **observed, never advertised.**
+A runner names what it chooses to name, and farseer shows exactly that. A blank reads **"not reported"** rather than being hidden, because *which* runner declined is itself worth knowing, and a missing row reads as a bug.
+
+Two things were being thrown away.
+
+**Claude Code names its model and session on `system/init`, and farseer read past it.**
+`RunRow.model` had been empty since the beginning with a comment explaining why - "a `WorkerContract` names a runner, not a model" - which was true and beside the point: the *runner* announces the model it actually used, which is a better answer for `11 analytics questions` than the one somebody configured.
+
+**Codex names a thread and no model at all.** So a codex run shows a session id and `model: not reported`, and that is correct rather than a gap to fill.
+
+`session_started` carries it, appended once when the runner says it.
+
+### What is still not shown, and why
+
+- **Thinking level.** Neither runner reports one and farseer does not set one, so there is nothing to show. Codex does report `reasoning_output_tokens`, which is the nearest observable thing.
+- **A token breakdown.** Codex reports `input_tokens`, `cached_input_tokens`, `output_tokens` and `reasoning_output_tokens` separately, and `codex.rs` **sums them into one number**. The breakdown is the honest answer to "context info" and it is being discarded at the adapter.
+- **The provider.** The account is in `runners.toml` and the shell already serves it to the settings widget; the conversation does not ask for it yet.

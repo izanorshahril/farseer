@@ -16,6 +16,25 @@ import { follow, type RecordEvent } from "../stream";
  * call with a different cursor. Nothing here is a chat session; it is a view of
  * what happened, which is the only thing farseer keeps.
  */
+/**
+ * What the runner said about itself, plus what the run cost.
+ *
+ * Every field is optional because **every field is a claim some runner chose to
+ * make**: Claude Code names a model and a session, Codex names a thread and no
+ * model at all, and `10 runner inventory`'s rule is that farseer reports what it
+ * observed rather than what was configured. A blank here means the runner
+ * declined, which is information rather than a gap to fill in.
+ */
+type Meta = {
+  runner?: string;
+  model?: string;
+  session_id?: string;
+  cell?: string;
+  cost?: number;
+  tokens?: number;
+  outcome?: string;
+};
+
 type Turn = {
   seq: number;
   run: string;
@@ -59,6 +78,10 @@ function turnFrom(event: RecordEvent): Turn | null {
     return { seq: event.seq, run: event.run_id, who: "manager", text, ts: event.ts };
   }
 
+  if (event.kind === "session_started") {
+    return null;
+  }
+
   if (event.kind === "run_finished") {
     const text = payload["text"];
     if (typeof text !== "string" || !text.trim()) return null;
@@ -80,11 +103,40 @@ function turnFrom(event: RecordEvent): Turn | null {
 
 export function ConversationWidget({ bridge }: { bridge: Bridge }) {
   const [turns, setTurns] = useState<Turn[]>([]);
+  const [meta, setMeta] = useState<Meta>({});
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     let live = true;
     const add = (event: RecordEvent) => {
+      const payload = (event.payload ?? {}) as Record<string, unknown>;
+      const str = (key: string) =>
+        typeof payload[key] === "string" ? (payload[key] as string) : undefined;
+      const num = (key: string) =>
+        typeof payload[key] === "number" ? (payload[key] as number) : undefined;
+
+      // The meta describes the latest session, so later events win. A run that
+      // never named a model leaves the field absent rather than stale.
+      if (event.kind === "session_started") {
+        setMeta((current) => ({
+          ...current,
+          runner: str("runner") ?? current.runner,
+          model: str("model"),
+          session_id: str("session_id"),
+          cell: event.cell_id,
+        }));
+        return;
+      }
+      if (event.kind === "run_finished") {
+        setMeta((current) => ({
+          ...current,
+          cell: event.cell_id,
+          outcome: str("outcome"),
+          cost: num("cost_usd_micros"),
+          tokens: num("tokens"),
+        }));
+      }
+
       const turn = turnFrom(event);
       if (!turn) return;
       setTurns((current) => {
@@ -112,17 +164,41 @@ export function ConversationWidget({ bridge }: { bridge: Bridge }) {
     };
   }, [bridge]);
 
+  const strip = (
+    <div className="meta">
+      {[
+        ["cell", meta.cell],
+        ["runner", meta.runner],
+        ["model", meta.model],
+        ["session", meta.session_id?.slice(0, 8)],
+        ["tokens", meta.tokens?.toLocaleString()],
+        ["cost", typeof meta.cost === "number" ? usd(meta.cost) : undefined],
+        ["last run", meta.outcome],
+      ].map(([label, value]) => (
+        <span key={label} className={value ? "" : "absent"}>
+          <i>{label}</i>
+          <b className="mono">{value ?? "not reported"}</b>
+        </span>
+      ))}
+    </div>
+  );
+
   if (error) return <p className="empty bad">{error}</p>;
   if (turns.length === 0)
     return (
-      <p className="empty">
-        Nothing said yet. Type below - it goes to the top manager, and its answer lands here when
-        the run finishes.
-      </p>
+      <>
+        {strip}
+        <p className="empty">
+          Nothing said yet. Type below - it goes to the top manager, and its answer lands here
+          when the run finishes.
+        </p>
+      </>
     );
 
   return (
-    <ol className="thread">
+    <>
+      {strip}
+      <ol className="thread">
       {turns.map((turn) => (
         <li key={turn.seq} className={turn.who}>
           <div className="row small">
@@ -141,7 +217,8 @@ export function ConversationWidget({ bridge }: { bridge: Bridge }) {
           </div>
           <p>{turn.text}</p>
         </li>
-      ))}
-    </ol>
+        ))}
+      </ol>
+    </>
   );
 }

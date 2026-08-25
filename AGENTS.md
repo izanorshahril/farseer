@@ -37,6 +37,9 @@ Widget code is authored by cell zero into `widgets/` in git and farseer never st
 The **Runs** widget draws `05 run state model`'s verbs on that line and derives which ones to offer from lifecycle, control and the runner's steering path - a finished run offers none, and `steer` never appears for a runner that cannot take one.
 A run verb is on the host bridge and deliberately **not** on the sandbox bridge: a widget the operator did not write can show a run and cannot cancel one.
 
+**`session_started`** carries what a runner says about the session it opened - Claude Code names a model and a session on `system/init`, Codex names a thread and no model - and the observed model now fills `RunRow.model`, which was empty from the beginning because nothing read that line.
+A field a runner declines to report stays absent rather than being defaulted, per `10 runner inventory`'s observed-never-advertised rule.
+
 A manager's own words reach the record as **`manager_answered`**, appended per turn rather than at the end - `10 runner inventory` observed that a Claude Code manager on live stdin answers and stays alive for the next steer, so holding the text until the run finished would mean the operator hears nothing until they close the session they are talking to.
 **`run_finished`** is `05 run state model`'s lifecycle kind, which nothing emitted until now; it carries outcome, text, cost and tokens, and a run with no report quotes its error rather than inventing an apology in the manager's voice.
 Together they are what makes `16 local api surface`'s "the answer arrives on the event stream" true, and the **Conversation** widget is built from them.
