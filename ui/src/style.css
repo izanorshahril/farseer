@@ -351,3 +351,45 @@ footer input:focus {
 .runs .dot.likely_hung { background: var(--bad); box-shadow: 0 0 0 3px rgba(248, 81, 73, 0.15); }
 .badge.touched { color: #a371f7; border-color: rgba(163, 113, 247, 0.35); }
 .chip.danger:hover { color: var(--bad); border-color: var(--bad); }
+
+/* Runner choices. One row each, the chosen one marked rather than reordered -
+   a list that reshuffles when you pick is a list you have to re-read. */
+.runners {
+  list-style: none;
+  margin: 0 0 10px;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.runners li {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 7px 8px;
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  background: var(--panel-2);
+}
+.runners li.chosen {
+  border-color: var(--accent);
+}
+.runners .dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  flex: none;
+  margin-top: 6px;
+  background: var(--faint);
+}
+.runners .dot.live {
+  background: var(--ok);
+  box-shadow: 0 0 0 3px rgba(63, 185, 80, 0.15);
+}
+code {
+  font-family: var(--mono);
+  font-size: 11px;
+  background: var(--panel-2);
+  padding: 1px 4px;
+  border-radius: 3px;
+}

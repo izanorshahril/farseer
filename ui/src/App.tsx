@@ -4,6 +4,7 @@ import { QuotaWidget } from "./widgets/quota";
 import { FleetWidget } from "./widgets/fleet";
 import { ActivityWidget } from "./widgets/activity";
 import { RunsWidget } from "./widgets/runs";
+import { SettingsWidget } from "./widgets/settings";
 import { SandboxWidget } from "./SandboxWidget";
 import { GateBar } from "./GateBar";
 
@@ -34,6 +35,7 @@ const REGISTRY = {
   fleet: { title: "Cells", subtitle: "loaded definitions", render: FleetWidget },
   activity: { title: "Activity", subtitle: "the record, live", render: ActivityWidget },
   runs: { title: "Runs", subtitle: "with 05's verbs", render: RunsWidget },
+  settings: { title: "Settings", subtitle: "the harness in front", render: SettingsWidget },
 } as const;
 
 type WidgetId = string;

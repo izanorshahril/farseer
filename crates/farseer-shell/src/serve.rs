@@ -14,29 +14,38 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use anyhow::Result;
+use axum::Json;
 use axum::Router;
 use axum::body::Body;
 use axum::extract::{Request, State};
 use axum::http::{HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
-use axum::routing::any;
+use axum::routing::{any, get};
 use tower_http::services::{ServeDir, ServeFile};
 
 pub struct Shell {
     pub farseer: String,
     pub token: String,
     pub client: reqwest::Client,
+    /// Where the cell definitions the operator edits actually live.
+    pub cells: PathBuf,
 }
 
 /// Serve the canvas and proxy `/v1`, on a port the OS chooses.
 ///
 /// Returns the bound address, because the shell has to tell its own webview
 /// where to look and guessing a port is how two instances collide.
-pub async fn start(canvas: PathBuf, farseer_port: u16, token: String) -> Result<(String, ())> {
+pub async fn start(
+    canvas: PathBuf,
+    cells: PathBuf,
+    farseer_port: u16,
+    token: String,
+) -> Result<String> {
     let state = Arc::new(Shell {
         farseer: format!("http://127.0.0.1:{farseer_port}"),
         token,
         client: reqwest::Client::new(),
+        cells,
     });
 
     // Any unknown path falls back to the canvas entry point, because the page
@@ -45,6 +54,11 @@ pub async fn start(canvas: PathBuf, farseer_port: u16, token: String) -> Result<
     let app = Router::new()
         .route("/v1/{*rest}", any(proxy))
         .route("/v1", any(proxy))
+        .route("/__settings/runners", get(list_runners))
+        .route(
+            "/__settings/top-manager",
+            get(read_top_manager).put(write_top_manager),
+        )
         .fallback_service(ServeDir::new(canvas).fallback(ServeFile::new(index)))
         .with_state(state);
 
@@ -55,7 +69,63 @@ pub async fn start(canvas: PathBuf, farseer_port: u16, token: String) -> Result<
             eprintln!("shell server stopped: {error}");
         }
     });
-    Ok((format!("http://127.0.0.1:{}", addr.port()), ()))
+    Ok(format!("http://127.0.0.1:{}", addr.port()))
+}
+
+/// What this machine could actually run, per `10 runner inventory`'s rule that
+/// reach is observed rather than advertised.
+async fn list_runners() -> Json<Vec<crate::settings::RunnerChoice>> {
+    Json(crate::settings::runners())
+}
+
+async fn read_top_manager(State(shell): State<Arc<Shell>>) -> Response {
+    match crate::settings::top_manager(&shell.cells) {
+        Ok(current) => Json(current).into_response(),
+        Err(error) => (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()).into_response(),
+    }
+}
+
+/// Write the definition, then ask the runtime to reload it.
+///
+/// The order is the decision: the file is the source of truth per `01 cell
+/// primitive`, and reload is how the runtime finds out. A shell that updated
+/// the runtime without the file would have created a second source that the
+/// next restart silently discards.
+async fn write_top_manager(
+    State(shell): State<Arc<Shell>>,
+    Json(request): Json<crate::settings::TopManagerRequest>,
+) -> Response {
+    let updated = match crate::settings::set_top_manager(&shell.cells, &request.runner) {
+        Ok(updated) => updated,
+        Err(error) => return (StatusCode::BAD_REQUEST, error.to_string()).into_response(),
+    };
+    let reload = shell
+        .client
+        .post(format!("{}/v1/cells/reload", shell.farseer))
+        .header(header::AUTHORIZATION, format!("Bearer {}", shell.token))
+        .send()
+        .await;
+    match reload {
+        // The runtime's own answer travels back untouched: it is the thing that
+        // validates a definition, and the shell paraphrasing it would be a
+        // second opinion with no authority.
+        Ok(response) => {
+            let status = response.status();
+            let body = response.text().await.unwrap_or_default();
+            Json(serde_json::json!({
+                "top_manager": updated,
+                "reload_status": status.as_u16(),
+                "reload": serde_json::from_str::<serde_json::Value>(&body)
+                    .unwrap_or(serde_json::Value::String(body)),
+            }))
+            .into_response()
+        }
+        Err(error) => (
+            StatusCode::BAD_GATEWAY,
+            format!("definition written, but farseer did not reload: {error}"),
+        )
+            .into_response(),
+    }
 }
 
 /// Pass a request through to farseer, adding the credential the page does not have.

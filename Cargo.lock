@@ -1127,11 +1127,13 @@ dependencies = [
  "anyhow",
  "axum",
  "farseer-api",
+ "farseer-runner",
  "reqwest 0.12.28",
  "serde",
  "serde_json",
  "tauri",
  "tauri-build",
+ "tempfile",
  "tokio",
  "tower-http",
 ]

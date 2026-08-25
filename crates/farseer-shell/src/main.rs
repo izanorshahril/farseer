@@ -12,6 +12,7 @@
 
 mod runtime;
 mod serve;
+mod settings;
 
 use std::path::PathBuf;
 
@@ -56,8 +57,12 @@ fn run() -> anyhow::Result<()> {
     let tokio = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?;
-    let (origin, _) =
-        tokio.block_on(serve::start(canvas, attached.port, attached.token.clone()))?;
+    let origin = tokio.block_on(serve::start(
+        canvas,
+        repo_relative("cells"),
+        attached.port,
+        attached.token.clone(),
+    ))?;
     println!("farseer-shell: canvas on {origin}");
 
     let url = tauri::WebviewUrl::External(origin.parse()?);
