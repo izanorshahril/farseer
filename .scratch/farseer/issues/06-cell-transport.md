@@ -154,3 +154,55 @@ The prose below is left as written. Read it with the final words substituted:
 Note that where this resolution says "A2A-shaped envelopes on an in-process bus", it is quoting `ARCHITECTURE.md`'s rejected proposal, and that wording stands as a quotation.
 
 Also renamed: **seat** is now **runner**, applied throughout.
+
+## Implementation note, 2026-08-25
+
+Built as `delegate_to_cell` on the MCP face, alongside `delegate_to_worker`.
+`28 operator surface`'s correction made this a blocking dependency of the operator surface rather than an open item, which is why it was built before the canvas.
+
+Four things this ticket left implicit had to be chosen, and each is a decision rather than a detail.
+
+### The caller's record entry is an event, not a second run row
+
+Section 6 says a cell call is a run in the calling cell, and section 5 adds that it carries its own `last_activity_at` so a silent callee is flagged `stalled`.
+
+A literal reading wants a second run row that mirrors the callee's execution.
+That was rejected: the callee's run already has a `last_activity_at`, and a mirror row would be **two rows describing one execution**, which is exactly the two-sources-of-truth problem `05 run state model` refused when it made liveness derived rather than stored.
+
+So the caller gets **one `cell_called` event on its own run**, carrying the whole envelope, and the callee gets a normal manager run in its own cell.
+What section 6 actually settled - that failure ownership stays with the caller - is unaffected: the caller holds the `call_id` and the callee's `run_id`, and all four verbs already work on that run through `/v1/runs/{id}`.
+
+The cost, stated plainly: **a caller is not itself flagged `stalled` because its callee went quiet.** The callee is, and the caller can see it.
+
+### The link `02` left open is the callee's run id
+
+`02 record scope` was handed the question of whether a caller's entry links to its callee's, and left it open.
+It is the `callee_run_id` field in the `cell_called` payload.
+That costs no schema, no join table and no second write, and it makes "what did this call actually do" one scan.
+
+### The task id is the caller's, so cost nests
+
+`22 cell addressing` section 2 argued delegation over routing partly on metrics: cell zero's cost should include the callee's, and the callee should still be queryable alone.
+
+The callee's run therefore carries the **caller's** `task_id` and the **callee's** `cell_id`.
+A query by task sums both; a query by cell isolates the callee. Both of `22`'s requirements, no new machinery.
+
+### Budget is reserved at call time, never drawn at return
+
+A synchronous worker draws its actual spend when it returns.
+A fire-and-forget call has no return to draw at, so the caller's remaining pool is **held for the whole effective cap** when the call is placed.
+
+Over-reserving fails closed and under-reserving does not, which decides it.
+An unbounded dimension stays unbounded - reserving against `None` would invent a limit the definition never set.
+The reservation is released only when the spawn itself fails, because that call never happened.
+
+### What is refused
+
+An ungranted name, per `22 cell addressing` section 3.
+A roster entry whose definition no longer exists, because a grant is not a definition.
+A `peer = true` entry, because section 2 keeps the A2A endpoint off by default and nothing has turned it on.
+
+### What is not proven
+
+The refusals, the narrowing and the contract construction are covered by tests over a real `rmcp` client.
+**A live cross-cell round trip is not.** It would spawn two real managers and spend real credit, so it belongs with the nine ignored tests and has not been run.

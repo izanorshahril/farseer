@@ -478,6 +478,7 @@ pub struct InstructResponse {
 ///
 /// A Claude Code manager receives a generated strict MCP config after the listener's real port is known.
 /// The live manager may call `delegate_to_worker`, which preserves this task while a named pinned-roster worker executes a child contract synchronously.
+/// It may also call `delegate_to_cell`, which preserves the task while a granted cell runs its own manager - fire-and-forget, per `06 cell transport`.
 /// Managers using another native runner still execute the goal directly because no equivalent MCP launch shape has been verified for those CLIs.
 ///
 /// [What is the local API surface?]: ../../../.scratch/farseer/issues/16-local-api-surface.md
@@ -656,16 +657,36 @@ fn manager_run_options(
         })
         .collect::<Vec<_>>()
         .join(", ");
+    // `22 cell addressing` section 3: the roster is the grant, so the prompt
+    // names exactly what is callable. A manager that has to guess will guess.
+    let callable_cells = cell
+        .roster
+        .iter()
+        .filter_map(|entry| match entry {
+            farseer_core::RosterEntry::Cell { name, peer, .. } if !peer => Some(name.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
     let mut prompt = format!(
         "You are the manager for farseer cell `{}`. Your manager_run_id is `{}` and your \
          manager_token is `{}`. The roster workers available to delegate to are: {}. \
+         The cells you may call are: {}. \
          Pass both credentials to every farseer MCP tool call. When you delegate, name a \
          roster worker and give it a precise sub-goal, then relay the returned result. \
-         The task remains yours to own.",
+         Calling a cell is different: delegate_to_cell is fire-and-forget, it returns a \
+         call_id rather than an answer, and the callee owns its own workspace, runner and \
+         tools. Anything not named above is not callable, and asking again will not make \
+         it callable. The task remains yours to own.",
         cell.cell_id,
         contract.run_id,
         manager_token.as_str(),
         if workers.is_empty() { "none" } else { &workers },
+        if callable_cells.is_empty() {
+            "none"
+        } else {
+            &callable_cells
+        },
     );
     if !cell.manager.prompt.trim().is_empty() {
         prompt.push_str("\n\nCell manager instructions:\n");
@@ -677,7 +698,7 @@ fn manager_run_options(
 }
 
 /// Create a workspace synchronously, run on a blocking task, then tear down.
-fn spawn_run(
+pub(crate) fn spawn_run(
     state: &Arc<AppState>,
     contract: WorkerContract,
     role: RunRole,
@@ -1301,6 +1322,56 @@ grants_shell = true
         dir
     }
 
+    /// `22 cell addressing` section 1: a callable cell is a third roster entry
+    /// kind, so granting one is an edit to the caller's definition.
+    const CELL_THAT_MAY_CALL: &str = r#"
+cell_id = "zero"
+name = "Cell Zero"
+workspace_strategy = "worktree"
+
+[manager]
+runner = "claude-code"
+
+[[roster]]
+kind = "tool"
+name = "shell"
+irreversibility = "reversible"
+grants_shell = true
+
+[[roster]]
+kind = "cell"
+name = "social"
+cell_id = "social"
+max_autonomy_ceiling = "undoable"
+
+[[roster]]
+kind = "cell"
+name = "abroad"
+cell_id = "abroad"
+max_autonomy_ceiling = "irreversible"
+peer = true
+
+[[roster]]
+kind = "cell"
+name = "ghost"
+cell_id = "ghost"
+max_autonomy_ceiling = "reversible"
+"#;
+
+    const CALLEE_CELL: &str = r#"
+cell_id = "social"
+name = "Social"
+workspace_strategy = "plain_directory"
+
+[manager]
+runner = "claude-code"
+
+[[roster]]
+kind = "worker"
+name = "writer"
+runner = "codex"
+"#;
+
     const CELL_WITH_A_WORKER: &str = r#"
 cell_id = "zero"
 name = "Cell Zero"
@@ -1358,8 +1429,14 @@ grants_shell = true
     }
 
     fn harness_with_cell(cell_toml: &str) -> Harness {
+        harness_with_cells(&[("zero", cell_toml)])
+    }
+
+    fn harness_with_cells(cells: &[(&str, &str)]) -> Harness {
         let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join("zero.toml"), cell_toml).unwrap();
+        for (name, toml) in cells {
+            std::fs::write(dir.path().join(format!("{name}.toml")), toml).unwrap();
+        }
         let runs_dir = tempfile::tempdir().unwrap();
         let repo = git_repo_with_a_commit();
         let token = RuntimeToken::generate();
@@ -2770,6 +2847,113 @@ grants_shell = true
             worker_row.task_id.to_string(),
             manager_row["task_id"],
             "the nested worker must stay on the manager's task"
+        );
+    }
+    /// `22 cell addressing` and `06 cell transport` through the real MCP face:
+    /// every refusal a cross-cell call owes the caller, checked over a real
+    /// `rmcp` client rather than a hand-written JSON-RPC frame. None of these
+    /// reach a process, which is why this is not one of the ignored tests.
+    #[tokio::test]
+    async fn a_cell_call_is_refused_unless_the_roster_granted_it_and_the_callee_exists() {
+        use rmcp::ServiceExt;
+        use rmcp::model::{CallToolRequestParams, ClientCapabilities, ClientInfo, Implementation};
+        use rmcp::transport::StreamableHttpClientTransport;
+        use rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig;
+
+        let h = harness_with_cells(&[("zero", CELL_THAT_MAY_CALL), ("social", CALLEE_CELL)]);
+        let (manager_run_id, _task_id, manager_token) = register_manager(&h);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let router = h.router.clone();
+        tokio::spawn(async move {
+            axum::serve(listener, router).await.unwrap();
+        });
+        let transport = StreamableHttpClientTransport::<reqwest::Client>::from_config(
+            StreamableHttpClientTransportConfig::with_uri(format!(
+                "http://127.0.0.1:{port}/v1/mcp"
+            ))
+            .auth_header(h.token.as_str().to_string()),
+        );
+        let client = ClientInfo::new(
+            ClientCapabilities::default(),
+            Implementation::new("farseer-api test client", "0.0.1"),
+        )
+        .serve(transport)
+        .await
+        .unwrap();
+
+        let tools = client.list_tools(Default::default()).await.unwrap();
+        assert!(
+            tools
+                .tools
+                .iter()
+                .any(|t| t.name.as_ref() == "delegate_to_cell"),
+            "the cross-cell path must be visible to a manager that has it"
+        );
+
+        let call = async |arguments: serde_json::Value| {
+            format!(
+                "{:?}",
+                client
+                    .call_tool(
+                        CallToolRequestParams::new("delegate_to_cell")
+                            .with_arguments(arguments.as_object().cloned().unwrap()),
+                    )
+                    .await
+            )
+        };
+        let base = |cell: &str| {
+            json!({
+                "manager_run_id": manager_run_id.to_string(),
+                "manager_token": manager_token,
+                "cell": cell,
+                "goal": "post the changelog",
+            })
+        };
+
+        // `22 cell addressing` section 3: naming it is not granting it.
+        let ungranted = call(base("finance")).await;
+        assert!(
+            ungranted.contains("not a callable cell"),
+            "an ungranted cell must stay ungranted however it is named: {ungranted}"
+        );
+
+        // `06 cell transport` section 2: the A2A endpoint is off by default.
+        let peer = call(base("abroad")).await;
+        assert!(
+            peer.contains("A2A endpoint is off"),
+            "a foreign peer must be refused while the endpoint is off: {peer}"
+        );
+
+        // A roster entry is a grant, not a definition.
+        let missing = call(base("ghost")).await;
+        assert!(
+            missing.contains("no definition declares"),
+            "a granted cell with no definition must say so: {missing}"
+        );
+
+        let empty_goal = call(json!({
+            "manager_run_id": manager_run_id.to_string(),
+            "manager_token": manager_token,
+            "cell": "social",
+            "goal": "   ",
+        }))
+        .await;
+        assert!(
+            empty_goal.contains("goal must not be empty"),
+            "{empty_goal}"
+        );
+
+        let impersonation = call(json!({
+            "manager_run_id": manager_run_id.to_string(),
+            "manager_token": "wrong",
+            "cell": "social",
+            "goal": "post the changelog",
+        }))
+        .await;
+        assert!(
+            impersonation.contains("manager_token"),
+            "a manager run id alone must not authorize a cell call: {impersonation}"
         );
     }
 }

@@ -17,18 +17,21 @@ All four manager verbs from `05 run state model` - cancel, rerun, rescope, and s
 A live Claude Code manager can call `delegate_to_worker`; the runtime validates its per-run capability, resolves the pinned roster, enforces the cell-wide worker cap, preserves the parent task, narrows the cell-root pool through the worker entry's cap and the manager request, draws down reported spend, and returns terminal text, outcome, cost, and tokens.
 Every current native LLM runner exposes shell-equivalent reach, so the API refuses to launch one unless the pinned cell explicitly grants a shell-capable tool.
 Every bounded budget dimension currently fails closed before spawn because no native runner has demonstrated pre-spend enforcement.
-Cross-cell delegation and verified MCP launch wiring for non-Claude managers remain open.
+Cross-cell delegation is implemented as the manager-scoped `delegate_to_cell`: a `kind = "cell"` roster grant, an ungranted name refused however it is phrased, a foreign `peer` refused while `06 cell transport`'s A2A endpoint is off, the ceiling narrowed by roster entry then callee policy, and the caller's budget **reserved** rather than drawn because the call is fire-and-forget.
+The callee's manager runs in the callee's cell with the callee's workspace, runner and tool grants, under the caller's task id, and the caller keeps one `cell_called` event naming the callee's run.
+A live cross-cell round trip has not been run; the refusals, the narrowing and the contract construction are covered by tests over a real `rmcp` client.
+Verified MCP launch wiring for non-Claude managers remains open.
 A `Worktree` cell uses the repository named by `--repo`, which defaults to the directory where `farseer serve` started because `13 harness build kit` keeps git paths out of `CellDefinition`.
 
 The operator surface is decided but not built: `28 operator surface` made the **canvas the home screen**, and anything that is not the canvas a **widget** on it.
 A widget is a **cell's face** - it renders, and the cell behind it thinks - so there is no second place agents run and no new API operation.
 A widget **displays** a cell and never **addresses** one: every AI input from every widget goes to the **top manager**, which decides where the work goes, while operator verbs on a run stay direct.
-That makes cross-cell delegation a **blocking dependency** of the operator surface rather than merely open, since a widget fronting any cell but zero needs the top manager to reach outward.
+That made cross-cell delegation a **blocking dependency** of the operator surface rather than merely open, since a widget fronting any cell but zero needs the top manager to reach outward, and it is why `delegate_to_cell` was built before the canvas.
 Widget code is authored by cell zero into `widgets/` in git and farseer never stores it, which keeps `01 cell primitive`'s no-plugin-ABI ruling intact: the loader lives in the client, and the runtime still loads nothing.
 
 The MCP face from `02 record scope` is nested at `/v1/mcp` in the same router and process because `09 store decision` requires one process and one writer.
 The exact-pinned `rmcp` streamable-HTTP service shares `AppState`'s `Store` and loopback/token guard; only `/v1/mcp` accepts the per-manager bearer, while operator routes still require the process-wide token.
-The three tools are manager-scoped `read_memory`, `write_memory`, and `delegate_to_worker`; every call derives identity and memory scope from the active pinned manager context, and no tool appends a raw event.
+The four tools are manager-scoped `read_memory`, `write_memory`, `delegate_to_worker`, and `delegate_to_cell`; every call derives identity and memory scope from the active pinned manager context, and no tool appends a raw event.
 `write_memory` refuses the `global` tier because `25 memory lifecycle` gates global promotion on the operator.
 The MCP tests use a real `rmcp` client over a real bound socket rather than hand-written JSON-RPC.
 The ignored `instructing_a_manager_reaches_a_roster_worker_through_farseers_mcp_face` test proves HTTP instruction -> Claude manager -> farseer MCP -> Goose worker -> tool result in one live manager turn.

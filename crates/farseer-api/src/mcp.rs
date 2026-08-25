@@ -5,7 +5,12 @@
 //! A live manager identifies itself with the `manager_run_id` injected into its system prompt.
 //! The runtime requires an active manager plus its per-run capability, resolves the worker against the pinned roster, enforces the cell-wide worker cap, keeps the parent task and policy, caps and draws down budget, links cancellation to the owning manager, and returns terminal text plus outcome and spend.
 //! `POST /v1/cells/{id}/instruct` gives a Claude Code manager a generated strict MCP config naming this endpoint after the listener binds.
-//! Cross-cell delegation through a `kind = "cell"` roster entry and equivalent verified launch wiring for non-Claude managers remain open.
+//! [`FarseerMcp::delegate_to_cell`] is the cross-cell half, through a `kind = "cell"` roster entry.
+//! It is fire-and-forget per [What transport carries a cell-to-cell call?]: the caller gets a `call_id` and the callee's `run_id` at once, the callee's own manager runs in the callee's cell with the callee's workspace, runner and tool grants, and the caller keeps the task id so cost nests instead of detaching.
+//! The caller's budget is **reserved** rather than drawn, because a fire-and-forget call has no terminal spend to draw when it returns.
+//! Equivalent verified launch wiring for non-Claude managers remains open.
+//!
+//! [What transport carries a cell-to-cell call?]: ../../../.scratch/farseer/issues/06-cell-transport.md
 //!
 //! The service is nested into the existing router, not a second process.
 //! [Is the cell the right primitive?] gives farseer one API and [Store: SQLite edge tables and CTEs, or an embedded graph engine?] gives the record one writer by construction: one process and one `Store`.
@@ -30,13 +35,15 @@ use rmcp::transport::streamable_http_server::session::local::LocalSessionManager
 use rmcp::transport::streamable_http_server::{StreamableHttpServerConfig, StreamableHttpService};
 use rmcp::{ErrorData as McpError, ServerHandler, tool, tool_handler, tool_router};
 
-use farseer_core::policy::Budget;
+use farseer_core::policy::{Budget, Irreversibility};
 use farseer_core::run::{WorkerContract, WorkerContractSpec};
-use farseer_core::{MemoryTier, RosterEntry, RunId, Spend};
+use farseer_core::{
+    Actor, CallId, CellCall, EventKind, MemoryTier, NewEvent, RosterEntry, RunId, Spend,
+};
 use farseer_store::{MemoryScope, NewMemory, StoreError};
 
 use crate::{
-    AppState, create_workspace, ensure_runner_authority, execute_run, now_ms,
+    AppState, RunRole, create_workspace, ensure_runner_authority, execute_run, now_ms, spawn_run,
     unenforceable_budget_dimension,
 };
 
@@ -340,6 +347,165 @@ impl FarseerMcp {
         )]))
     }
 
+    #[tool(
+        description = "Call another cell named in this manager's pinned roster. Fire-and-forget: returns a call_id and the callee's run_id immediately, and the result arrives on the event stream. The callee owns its own workspace, runner and tool grants; you state the goal, the ceiling and the budget."
+    )]
+    fn delegate_to_cell(
+        &self,
+        Parameters(args): Parameters<DelegateToCellArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        let manager = self.authorize_manager(&args.manager_run_id, &args.manager_token)?;
+        if manager
+            .cancel_requested
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
+            return Err(McpError::invalid_params(
+                "the owning manager is being cancelled",
+                None,
+            ));
+        }
+        if args.goal.trim().is_empty() {
+            return Err(McpError::invalid_params("goal must not be empty", None));
+        }
+
+        // `22 cell addressing` section 3: an ungranted cell stays ungranted even when
+        // the operator names it, because a mechanism that yields to
+        // conversational pressure is not a mechanism. The fix is to edit the
+        // definition and reload, which takes ten seconds and leaves a commit.
+        let (to_cell, roster_budget, peer) = manager
+            .cell
+            .roster
+            .iter()
+            .find_map(|entry| match entry {
+                RosterEntry::Cell {
+                    name,
+                    cell_id,
+                    max_budget,
+                    peer,
+                    ..
+                } if *name == args.cell => Some((cell_id.clone(), *max_budget, *peer)),
+                _ => None,
+            })
+            .ok_or_else(|| {
+                McpError::invalid_params(
+                    format!(
+                        "`{}` is not a callable cell in `{}`'s pinned roster",
+                        args.cell, manager.cell.cell_id
+                    ),
+                    None,
+                )
+            })?;
+        if peer {
+            // `06 cell transport` section 2 keeps the A2A endpoint off by default and
+            // nothing has turned it on. Refusing here beats mapping a call onto
+            // a boundary that is not listening.
+            return Err(McpError::invalid_params(
+                format!(
+                    "`{}` is a foreign A2A peer, and the A2A endpoint is off",
+                    args.cell
+                ),
+                None,
+            ));
+        }
+        let callee = self.state.cells().get(&to_cell).cloned().ok_or_else(|| {
+            McpError::invalid_params(
+                format!("roster names cell `{to_cell}`, which no definition declares"),
+                None,
+            )
+        })?;
+
+        // `22 cell addressing` section 4 caps the grant at the roster entry, `06 cell
+        // transport` lets a caller cap but never raise, and the callee's own
+        // policy is the floor neither of them can lift.
+        let offered = match args.autonomy_ceiling.as_deref() {
+            Some(level) => parse_ceiling(level)?,
+            None => manager.contract.autonomy_ceiling,
+        };
+        let ceiling = manager
+            .cell
+            .ceiling_for_cell_call(&args.cell, offered)
+            .ok_or_else(|| {
+                McpError::invalid_params(format!("`{}` is not a callable cell", args.cell), None)
+            })?
+            .min(callee.policy.autonomy_ceiling);
+
+        let mut remaining_budget = manager
+            .remaining_budget
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        if let Some(dimension) = exhausted_dimension(*remaining_budget) {
+            return Err(McpError::invalid_params(
+                format!("manager delegation budget is exhausted: {dimension}"),
+                None,
+            ));
+        }
+        let requested = args.budget.map(Budget::from).unwrap_or_default();
+        let budget = effective_delegation_budget(*remaining_budget, roster_budget, requested)
+            .cap_to(callee.budget);
+
+        let call_id = CallId::new();
+        let call = CellCall {
+            call_id,
+            from_cell: manager.cell.cell_id.clone(),
+            to_cell: to_cell.clone(),
+            goal: args.goal.clone(),
+            autonomy_ceiling: ceiling,
+            budget,
+            definition_of_done: args.definition_of_done.clone().unwrap_or_default(),
+            deadline_ms: args.deadline_ms,
+        };
+
+        let contract = cell_call_contract(&call, &callee, manager.contract.task_id);
+
+        // Reserved, not drawn: `06 cell transport` made this fire-and-forget, so
+        // there is no terminal spend to draw when the call returns. Reserving
+        // the cap up front is the only way the caller's pool still bounds a
+        // second call, and over-reserving fails closed where under-reserving
+        // does not.
+        reserve(&mut remaining_budget, budget);
+        drop(remaining_budget);
+
+        let run_id = match spawn_run(&self.state, contract, RunRole::Manager, callee) {
+            Ok(run_id) => run_id,
+            Err(error) => {
+                let mut pool = manager
+                    .remaining_budget
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner());
+                release(&mut pool, budget);
+                return Err(api_error(error));
+            }
+        };
+
+        // The caller's own record entry for the call, per `06 cell transport`
+        // section 6, and the link `02 record scope` left open between a
+        // caller's entry and its callee's.
+        self.state
+            .store()
+            .append(&NewEvent::new(
+                manager.cell.cell_id.clone(),
+                manager.contract.run_id,
+                EventKind::CELL_CALLED,
+                Actor::Manager,
+                now_ms(),
+                serde_json::json!({
+                    "call": call,
+                    "callee_run_id": run_id.to_string(),
+                }),
+            ))
+            .map_err(store_error)?;
+
+        let body = serde_json::json!({
+            "call_id": call_id.to_string(),
+            "run_id": run_id.to_string(),
+            "to_cell": to_cell.as_str(),
+            "autonomy_ceiling": ceiling.as_str(),
+        });
+        Ok(CallToolResult::success(vec![ContentBlock::text(
+            body.to_string(),
+        )]))
+    }
+
     /// Creates the workspace, runs the contract to completion, and tears the workspace down synchronously because the manager's turn is waiting for the answer.
     fn run_delegated_worker(
         &self,
@@ -434,6 +600,94 @@ impl From<DelegationBudgetArgs> for Budget {
     }
 }
 
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+struct DelegateToCellArgs {
+    /// The active manager identity injected into this manager's system prompt.
+    manager_run_id: String,
+    /// The per-manager capability injected beside `manager_run_id`.
+    manager_token: String,
+    /// Must name a `kind = "cell"` entry in the manager's pinned roster.
+    cell: String,
+    goal: String,
+    definition_of_done: Option<String>,
+    /// `reversible`, `undoable` or `irreversible`. A ceiling only ever
+    /// narrows: naming a level above the roster entry or the callee's own policy
+    /// lowers to theirs rather than raising to yours.
+    autonomy_ceiling: Option<String>,
+    /// Optional requested cap, always narrowed by the roster entry and the
+    /// caller's remaining pool.
+    budget: Option<DelegationBudgetArgs>,
+    /// Unix milliseconds. Absent means the caller set no deadline.
+    deadline_ms: Option<i64>,
+}
+
+/// What the callee actually runs, built from the call plus the callee's own definition.
+///
+/// The asymmetry against `delegate_to_worker` is the whole of `06 cell transport`
+/// section 4: **a manager-to-worker contract names the workspace, the runner and
+/// the tool grants, and a manager-to-cell contract must not.** All three come
+/// from the callee here, and that ownership is what makes it a cell rather than
+/// a worker.
+fn cell_call_contract(
+    call: &CellCall,
+    callee: &farseer_core::CellDefinition,
+    task_id: farseer_core::TaskId,
+) -> WorkerContract {
+    WorkerContract::seal(WorkerContractSpec {
+        run_id: RunId::new(),
+        // `22 cell addressing` section 2: one task, one owner. The task stays
+        // with the caller so `11 analytics questions`'s cost nests under it
+        // rather than detaching into a second task nobody asked for.
+        task_id,
+        cell_id: callee.cell_id.clone(),
+        goal: call.goal.clone(),
+        workspace: callee.workspace_strategy,
+        runner: callee.manager.runner.clone(),
+        tool_grants: callee.tool_grants(),
+        autonomy_ceiling: call.autonomy_ceiling,
+        budget: call.budget,
+        definition_of_done: call.definition_of_done.clone(),
+    })
+}
+
+fn parse_ceiling(level: &str) -> Result<Irreversibility, McpError> {
+    Irreversibility::parse(level).ok_or_else(|| {
+        McpError::invalid_params(
+            format!(
+                "`{level}` is not an autonomy ceiling; use reversible, undoable or irreversible"
+            ),
+            None,
+        )
+    })
+}
+
+/// Hold the whole cap against the caller's pool at call time.
+///
+/// An unbounded dimension in the call stays unbounded in the pool: reserving
+/// against `None` would invent a limit the definition did not set.
+fn reserve(pool: &mut Budget, held: Budget) {
+    fn hold(remaining: &mut Option<u64>, amount: Option<u64>) {
+        if let (Some(left), Some(amount)) = (remaining.as_mut(), amount) {
+            *left = left.saturating_sub(amount);
+        }
+    }
+    hold(&mut pool.usd_micros, held.usd_micros);
+    hold(&mut pool.tokens, held.tokens);
+    hold(&mut pool.wall_secs, held.wall_secs);
+}
+
+/// Give a reservation back when the call never started.
+fn release(pool: &mut Budget, held: Budget) {
+    fn give(remaining: &mut Option<u64>, amount: Option<u64>) {
+        if let (Some(left), Some(amount)) = (remaining.as_mut(), amount) {
+            *left = left.saturating_add(amount);
+        }
+    }
+    give(&mut pool.usd_micros, held.usd_micros);
+    give(&mut pool.tokens, held.tokens);
+    give(&mut pool.wall_secs, held.wall_secs);
+}
+
 struct ChildRunRegistration {
     child_runs: Arc<std::sync::Mutex<std::collections::HashSet<RunId>>>,
     run_id: RunId,
@@ -482,8 +736,9 @@ impl ServerHandler for FarseerMcp {
             .with_server_info(Implementation::from_build_env())
             .with_protocol_version(ProtocolVersion::V_2024_11_05)
             .with_instructions(
-                "farseer's MCP face: read_memory, write_memory, and manager-scoped \
-                 delegate_to_worker. Raw events are never appended through here."
+                "farseer's MCP face: read_memory, write_memory, and the manager-scoped \
+                 delegate_to_worker and delegate_to_cell. Raw events are never appended \
+                 through here."
                     .to_string(),
             )
     }
@@ -528,6 +783,88 @@ mod tests {
         assert_eq!(effective.usd_micros, Some(2_000_000));
         assert_eq!(effective.tokens, Some(40_000));
         assert_eq!(effective.wall_secs, Some(300));
+    }
+
+    #[test]
+    fn a_reservation_holds_the_cap_and_gives_it_back_when_the_call_never_started() {
+        // `06 cell transport` made a cell call fire-and-forget, so there is no
+        // terminal spend to draw later. The pool has to be held at call time or
+        // it bounds nothing.
+        let mut pool = Budget {
+            usd_micros: Some(5_000_000),
+            tokens: None,
+            wall_secs: Some(600),
+        };
+        let held = Budget {
+            usd_micros: Some(2_000_000),
+            tokens: Some(40_000),
+            wall_secs: Some(100),
+        };
+
+        reserve(&mut pool, held);
+        assert_eq!(pool.usd_micros, Some(3_000_000));
+        assert_eq!(pool.wall_secs, Some(500));
+        assert_eq!(
+            pool.tokens, None,
+            "an unbounded dimension must not gain a limit the definition never set"
+        );
+
+        release(&mut pool, held);
+        assert_eq!(pool.usd_micros, Some(5_000_000));
+        assert_eq!(pool.wall_secs, Some(600));
+        assert_eq!(pool.tokens, None);
+    }
+
+    #[test]
+    fn a_cell_call_contract_takes_workspace_runner_and_tools_from_the_callee() {
+        let (callee, _advisories) = farseer_core::CellDefinition::load(
+            r#"
+cell_id = "social"
+name = "Social"
+workspace_strategy = "plain_directory"
+
+[manager]
+runner = "goose"
+
+[[roster]]
+kind = "tool"
+name = "post"
+irreversibility = "undoable"
+"#,
+        )
+        .unwrap();
+        let task_id = farseer_core::TaskId::new();
+        let call = CellCall {
+            call_id: CallId::new(),
+            from_cell: farseer_core::CellId::new("zero"),
+            to_cell: callee.cell_id.clone(),
+            goal: "post the changelog".into(),
+            autonomy_ceiling: Irreversibility::Reversible,
+            budget: Budget::default(),
+            definition_of_done: "the post is live".into(),
+            deadline_ms: None,
+        };
+
+        let contract = cell_call_contract(&call, &callee, task_id);
+
+        assert_eq!(contract.runner, "goose", "the callee names its own runner");
+        assert_eq!(contract.tool_grants, ["post"]);
+        assert_eq!(
+            contract.workspace,
+            farseer_core::WorkspaceStrategy::PlainDirectory
+        );
+        assert_eq!(
+            contract.task_id, task_id,
+            "`22 cell addressing`: one task, one owner"
+        );
+        assert_eq!(contract.cell_id, callee.cell_id);
+        assert_eq!(contract.autonomy_ceiling, Irreversibility::Reversible);
+    }
+
+    #[test]
+    fn an_unknown_autonomy_level_is_refused_rather_than_defaulted() {
+        assert!(parse_ceiling("undoable").is_ok());
+        assert!(parse_ceiling("irreversible_gated").is_err());
     }
 
     #[test]

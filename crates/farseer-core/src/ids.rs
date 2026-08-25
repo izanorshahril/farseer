@@ -79,6 +79,10 @@ uuid_id!(
 );
 uuid_id!(TaskId, "Groups runs, per `11 analytics questions`.");
 uuid_id!(
+    CallId,
+    "One cell call, per `06 cell transport`. Returned to the caller immediately, because a cell call is fire-and-forget and its result arrives on the event stream."
+);
+uuid_id!(
     MemoryId,
     "One memory claim. `25 memory lifecycle` retracts by appending a superseding tombstone, so an id here is never reused and never removed."
 );

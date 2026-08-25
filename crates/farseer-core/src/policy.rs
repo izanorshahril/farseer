@@ -28,6 +28,29 @@ pub enum Irreversibility {
 }
 
 impl Irreversibility {
+    /// The wire name, matching the `snake_case` serde rename so a definition
+    /// file, a JSON payload and an MCP argument all spell a level the same way.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Reversible => "reversible",
+            Self::Undoable => "undoable",
+            Self::Irreversible => "irreversible",
+        }
+    }
+
+    /// The inverse of [`Irreversibility::as_str`], for arguments that arrive as text.
+    ///
+    /// Not `FromStr`: an unknown level is not an error worth a type, and every
+    /// caller here wants `Option` at the point of the match.
+    pub fn parse(level: &str) -> Option<Self> {
+        match level {
+            "reversible" => Some(Self::Reversible),
+            "undoable" => Some(Self::Undoable),
+            "irreversible" => Some(Self::Irreversible),
+            _ => None,
+        }
+    }
+
     /// Whether an action at this level needs operator approval before it runs.
     pub fn gated_by_default(self) -> bool {
         self > Self::Reversible

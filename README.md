@@ -6,7 +6,7 @@ One operator, one Rust binary, no required external services.
 **Status: the foundation is built, and a Claude Code manager can delegate to a real roster worker.**
 Twenty-eight decision tickets are closed, and the domain model, the record, the local API, four native runners, all four manager verbs from [Run state model and control semantics](.scratch/farseer/issues/05-run-state-model.md), and the MCP face from [Record scope](.scratch/farseer/issues/02-record-scope.md) are implemented against them.
 `POST /v1/cells/{id}/instruct` runs a cell's manager against a goal and returns a `run_id` immediately.
-A Claude Code manager receives farseer's own MCP face under a per-run capability and can call `delegate_to_worker` during the same live conversation; cancel and steer remain available through the run API.
+A Claude Code manager receives farseer's own MCP face under a per-run capability and can call `delegate_to_worker`, or `delegate_to_cell` for a granted cell, during the same live conversation; cancel and steer remain available through the run API.
 See [What runs today](#what-runs-today).
 
 ## The one idea
