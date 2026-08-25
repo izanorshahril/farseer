@@ -291,3 +291,27 @@ The contract lists the paths a widget may read and **not what they return**, whi
 
 Three runs, **$1.35** in total, and two of the three were spent discovering the two bugs above rather than doing the work.
 That is the price of the finding, and it is cheaper than shipping a contract nobody could satisfy.
+
+## Decided 2026-08-25: the desktop shell is Tauri, and `serve` stays
+
+This ticket left the framework open on purpose and said only that whatever packaged the canvas had to keep the token out of the browser.
+The operator has now fixed the shape: **the final product is a desktop application, and `farseer serve` is optional rather than the way in.**
+
+**Tauri**, for three reasons that are about this project rather than about Tauri:
+
+- **It is Rust.** The runtime is already a Rust binary, so the shell is one more crate in the same workspace rather than a second toolchain to keep current.
+- **The shell can own the runtime.** Farseer ships as a sidecar the app spawns, which is what makes `serve` optional: headless stays available for anyone who wants it, and nobody has to run it by hand to open a window.
+- **It keeps `28`'s gate 3 honest.** The token stays on the Rust side and the webview never holds it, which is the same property the dev proxy has today rather than a new one to invent.
+
+**Rejected: Electron.** Node is built in, so the widget compiler would move across unchanged, and it matches [baby-menu](https://github.com/kunchenguid/baby-menu), the operator's own reference.
+That is a real advantage and it buys **one dependency** at the price of a ~150MB installer and a second runtime beside the Rust one.
+Esbuild already ships as a standalone binary, so Tauri can have the same compiler as a sidecar without the runtime.
+
+**Rejected: farseer serves the page itself.**
+It is the smallest change and it is not a desktop application - no window, no tray, no single-click launch - and it would put rendering concerns inside the headless runtime that `01 cell primitive` spent a section keeping out.
+
+### What this obliges
+
+The widget host currently lives in a Vite plugin and uses Node for esbuild and git.
+Under Tauri it moves to the shell crate: git through `Command`, which farseer already does for worktrees, and esbuild as a sidecar binary.
+**The three gates do not change** - only what runs them.
