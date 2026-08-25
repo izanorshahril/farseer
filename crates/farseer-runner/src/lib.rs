@@ -2,19 +2,14 @@
 //!
 //! `20` and `10` chose two for v1 - an ACP runner as the default path, and a
 //! menu of native runners because "a runner interface with one
-//! implementation is not an interface, it is a wrapper". Two native runners
-//! ship here: **Claude Code** ([`claude_code`], [`invocation`]), the
+//! implementation is not an interface, it is a wrapper". Four native
+//! runners ship here: **Claude Code** ([`claude_code`], [`invocation`]), the
 //! strongest on `05`'s contract per `10` - quota and cost both arrive in
-//! band - and **Codex** ([`codex`]), `20`'s second choice, whose fine-grained
-//! `item.*` progress mapping stays shallow because no ticket captured a
-//! literal payload for it; only the verified terminal shape and its `usage`
-//! fields are mapped.
-//!
-//! Three native runners ship here: **Claude Code** ([`claude_code`],
-//! [`invocation`]), **Codex** ([`codex`]), and **cursor-agent**
-//! ([`cursor_agent`]) - `10`'s three evaluated CLIs, none of whose progress
-//! mapping past its verified terminal shape is guessed at beyond what a
-//! literal payload backs.
+//! band; **Codex** ([`codex`]), `20`'s second choice; **cursor-agent**
+//! ([`cursor_agent`]); and **goose** ([`goose`]), block/goose's own CLI.
+//! None of the three added after Claude Code has its progress mapping
+//! guessed at past its verified terminal shape - each ships only what a
+//! literal captured payload backs.
 //!
 //! What ships here: `PATHEXT`-safe executable resolution ([`resolve`]), each
 //! runner's invocation-building and stream-json mapping, and a
@@ -22,12 +17,14 @@
 //! ([`spawn`], Windows only). Together these can run and reap one process
 //! and read its lines - the primitive a runner needs. **Not yet built**: the
 //! ACP runner `20` chose as the default path. Only Claude Code has a steering
-//! path - Codex and cursor-agent both restart into a new process on
-//! resume/continue, per `10`.
+//! path - Codex, cursor-agent and goose all restart into a new process on
+//! resume/continue rather than continuing a live one, per `10` (Codex,
+//! cursor-agent) and this crate's own goose probe.
 
 pub mod claude_code;
 pub mod codex;
 pub mod cursor_agent;
+pub mod goose;
 pub mod invocation;
 pub mod resolve;
 

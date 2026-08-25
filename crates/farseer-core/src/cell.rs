@@ -3,8 +3,8 @@
 //! `13` assembled the minimum field list from six closed tickets and found it
 //! fits on one page, which is the falsification test `01` set and `08` passed.
 //! Adding a field here is not a small act - `08` proved the coding cell and the
-//! social cell differ only in roster, tools and policy values, and a new field
-//! reopens that.
+//! social cell differ only in roster, tools and policy values.
+//! `23 prototype loose ends` later required the task-root budget policy value and a per-worker cap; its correction to `13 harness build kit` records why those additions preserve the test rather than silently reopening it.
 //!
 //! Explicitly **not** here, per `13` section 7: no review mode, no scheduling,
 //! no credential store, no git flag, no delivery-gate field, no `cell_kind`.
@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 
 use crate::ids::CellId;
-use crate::policy::{Irreversibility, Policy};
+use crate::policy::{Budget, Irreversibility, Policy};
 use crate::run::WorkspaceStrategy;
 
 /// The mandatory manager. `01`: every cell has one, and only a manager may
@@ -37,7 +37,13 @@ pub struct Manager {
 pub enum RosterEntry {
     /// Supervised, has a run, is cancellable. `01` classifies by supervision,
     /// not by whether an LLM is involved.
-    Worker { name: String, runner: String },
+    Worker {
+        name: String,
+        runner: String,
+        /// `23 prototype loose ends` makes this the per-callee cap, narrowed again by the caller's remaining task budget.
+        #[serde(default)]
+        max_budget: Budget,
+    },
     /// A call that returns or errors. Declares its own irreversibility level,
     /// which policy then gates on, per `12`.
     Tool {
@@ -57,6 +63,10 @@ pub enum RosterEntry {
         /// narrows: effective is the minimum of this, whatever the caller
         /// passes, and the callee's own policy.
         max_autonomy_ceiling: Irreversibility,
+        /// `23 prototype loose ends` makes this the per-callee budget cap,
+        /// narrowed again by the caller's remaining task budget.
+        #[serde(default)]
+        max_budget: Budget,
         /// A foreign A2A orchestrator rather than a local cell. `21` found such
         /// a callee **silently ignores four of eight cell-call fields**, so `12`
         /// pins it at the top level and it cannot be lowered.
@@ -102,6 +112,9 @@ pub struct CellDefinition {
     #[serde(default)]
     pub version: String,
     pub manager: Manager,
+    /// `23 prototype loose ends` makes this the task-root pool that every delegated call draws down.
+    #[serde(default)]
+    pub budget: Budget,
     /// Zero entries is legal, per `01`. A worker may never spawn.
     #[serde(default)]
     pub roster: Vec<RosterEntry>,
@@ -216,6 +229,7 @@ impl CellDefinition {
                     cell_id,
                     max_autonomy_ceiling,
                     peer,
+                    ..
                 } => {
                     if *peer && *max_autonomy_ceiling != Irreversibility::Irreversible {
                         report.errors.push(ValidationError::PeerCeilingLowered(
@@ -247,6 +261,21 @@ impl CellDefinition {
         }
 
         report
+    }
+
+    /// Whether the roster explicitly grants a shell-reaching tool.
+    ///
+    /// `12 autonomy and deny list` says a shell grant is equivalent to every tool grant, so native LLM runner reach must be stated rather than assumed.
+    pub fn has_shell_grant(&self) -> bool {
+        self.roster.iter().any(|entry| {
+            matches!(
+                entry,
+                RosterEntry::Tool {
+                    grants_shell: true,
+                    ..
+                }
+            )
+        })
     }
 
     /// The tool grants this definition confers, for a worker contract.
@@ -297,6 +326,7 @@ name = "Cell Zero"
 description = "The builder harness."
 version = "1"
 workspace_strategy = "worktree"
+budget = { usd_micros = 5_000_000 }
 
 [manager]
 runner = "claude-code"
@@ -306,6 +336,7 @@ prompt = "You coordinate."
 kind = "worker"
 name = "coder"
 runner = "codex"
+max_budget = { tokens = 100_000 }
 
 [[roster]]
 kind = "tool"
@@ -318,6 +349,7 @@ kind = "cell"
 name = "social"
 cell_id = "social"
 max_autonomy_ceiling = "undoable"
+max_budget = { usd_micros = 2_000_000 }
 
 [policy]
 autonomy_ceiling = "reversible"
@@ -334,6 +366,16 @@ also_read = ["social"]
         assert_eq!(cell.cell_id.as_str(), "zero");
         assert_eq!(cell.manager.runner, "claude-code");
         assert_eq!(cell.roster.len(), 3);
+        assert_eq!(cell.budget.usd_micros, Some(5_000_000));
+        assert!(matches!(
+            cell.roster.first(),
+            Some(RosterEntry::Worker { max_budget, .. }) if max_budget.tokens == Some(100_000)
+        ));
+        assert!(matches!(
+            cell.roster.get(2),
+            Some(RosterEntry::Cell { max_budget, .. })
+                if max_budget.usd_micros == Some(2_000_000)
+        ));
         assert_eq!(cell.tool_grants(), ["shell"]);
         assert_eq!(cell.policy.worker_cap, 4);
         assert!(cell.record_scope.also_read.contains(&CellId::new("social")));
@@ -356,11 +398,77 @@ runner = "claude-code"
     }
 
     #[test]
+    fn omitted_task_and_worker_budgets_are_unbounded() {
+        let toml_text = r#"
+cell_id = "defaults"
+name = "Defaults"
+workspace_strategy = "plain_directory"
+
+[manager]
+runner = "claude-code"
+
+[[roster]]
+kind = "worker"
+name = "coder"
+runner = "codex"
+"#;
+        let (cell, _) = CellDefinition::load(toml_text).unwrap();
+        assert_eq!(cell.budget, Budget::default());
+        assert!(matches!(
+            cell.roster.first(),
+            Some(RosterEntry::Worker { max_budget, .. }) if *max_budget == Budget::default()
+        ));
+    }
+
+    #[test]
+    fn an_omitted_callable_cell_budget_is_unbounded() {
+        let toml_text = r#"
+cell_id = "zero"
+name = "Cell Zero"
+workspace_strategy = "plain_directory"
+
+[manager]
+runner = "claude-code"
+
+[[roster]]
+kind = "cell"
+name = "social"
+cell_id = "social"
+max_autonomy_ceiling = "undoable"
+"#;
+        let (cell, _) = CellDefinition::load(toml_text).unwrap();
+        assert!(matches!(
+            cell.roster.first(),
+            Some(RosterEntry::Cell { max_budget, .. }) if *max_budget == Budget::default()
+        ));
+    }
+
+    #[test]
     fn granting_a_shell_states_that_the_deny_list_is_advisory() {
-        let (_, advisories) = CellDefinition::load(CODING).unwrap();
+        let (cell, advisories) = CellDefinition::load(CODING).unwrap();
+        assert!(cell.has_shell_grant());
         assert!(advisories.contains(&Advisory::DenyListIsAdvisory {
             shell_tool: "shell".to_string()
         }));
+    }
+
+    #[test]
+    fn a_shell_reaching_runner_does_not_replace_an_explicit_shell_tool_grant() {
+        let toml_text = r#"
+cell_id = "implicit-shell"
+name = "Implicit shell"
+workspace_strategy = "plain_directory"
+
+[manager]
+runner = "claude-code"
+
+[[roster]]
+kind = "worker"
+name = "coder"
+runner = "codex"
+"#;
+        let (cell, _) = CellDefinition::load(toml_text).unwrap();
+        assert!(!cell.has_shell_grant());
     }
 
     #[test]

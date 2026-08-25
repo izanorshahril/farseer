@@ -103,8 +103,11 @@ pub struct Spend {
     pub wall_secs: u64,
 }
 
-/// What a run is allowed to consume. `None` in a dimension means unbounded.
+/// What a run is allowed to consume.
+///
+/// `23 prototype loose ends` makes `None` an unbounded dimension and permits partial serialized objects to omit such dimensions.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct Budget {
     pub usd_micros: Option<u64>,
     pub tokens: Option<u64>,
@@ -311,6 +314,27 @@ mod tests {
         let effective = a.narrow(&b).narrow(&c);
         assert_eq!(effective.autonomy_ceiling, Reversible);
         assert_eq!(effective.deny.len(), 3);
+    }
+
+    #[test]
+    fn partial_budget_objects_default_omitted_dimensions_in_toml_and_json() {
+        let from_toml: Budget = toml::from_str("tokens = 42").unwrap();
+        assert_eq!(
+            from_toml,
+            Budget {
+                tokens: Some(42),
+                ..Budget::default()
+            }
+        );
+
+        let from_json: Budget = serde_json::from_str(r#"{"wall_secs": 30}"#).unwrap();
+        assert_eq!(
+            from_json,
+            Budget {
+                wall_secs: Some(30),
+                ..Budget::default()
+            }
+        );
     }
 
     #[test]

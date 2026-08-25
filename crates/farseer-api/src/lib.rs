@@ -18,9 +18,10 @@
 //! may appear; existing fields never change meaning and never vanish; clients
 //! must ignore unknown fields.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use axum::extract::{Path as UrlPath, Query, State};
@@ -34,7 +35,9 @@ use serde::{Deserialize, Serialize};
 use farseer_core::policy::Budget;
 use farseer_core::run::{WorkerContract, WorkerContractSpec, WorkspaceStrategy};
 use farseer_core::{CellDefinition, CellId, LivenessThresholds, NewEvent, RunId, Seq, TaskId};
-use farseer_manager::{LivenessHandle, RunSink, SteerHandle};
+use farseer_manager::{
+    LivenessHandle, MANAGER_CELL_FIELD, RUN_ROLE_FIELD, RunOptions, RunRole, RunSink, SteerHandle,
+};
 use farseer_runner::spawn::CancelToken;
 use farseer_store::{RunRow, ScanFilter, Store, StoreError, UI_STATE_CAP_BYTES};
 
@@ -77,6 +80,15 @@ pub struct AppState {
     /// "already finished" or "farseer restarted since", and the run row is
     /// what still answers which.
     runs: Mutex<HashMap<RunId, RunHandle>>,
+    /// Active manager identities accepted by `delegate_to_worker`.
+    managers: Mutex<HashMap<RunId, ManagerContext>>,
+    /// Cancellation requested after a run id is returned but before its
+    /// process exposes a live [`CancelToken`].
+    pending_cancellations: Mutex<HashMap<RunId, Arc<AtomicBool>>>,
+    /// In-flight delegated workers per cell, enforcing the definition's cap.
+    worker_counts: Mutex<HashMap<CellId, u32>>,
+    /// Set exactly once after `serve` binds, including an OS-selected port.
+    mcp_endpoint: OnceLock<String>,
 }
 
 /// What `farseer_manager::run_worker`'s `on_started` callback hands back for
@@ -87,6 +99,51 @@ struct RunHandle {
     /// `None` when this run's runner has no steering path - Codex today,
     /// per `farseer_manager::start_worker`.
     steer: Option<SteerHandle>,
+}
+
+#[derive(Clone)]
+struct ManagerContext {
+    contract: WorkerContract,
+    cell: CellDefinition,
+    /// A per-manager capability used both as the MCP bearer and as the identity bound to every manager-scoped tool call.
+    manager_token: RuntimeToken,
+    /// Serialized across tool calls so two concurrent delegations cannot both
+    /// observe and spend the same remaining pool.
+    remaining_budget: Arc<Mutex<Budget>>,
+    child_runs: Arc<Mutex<HashSet<RunId>>>,
+    cancel_requested: Arc<AtomicBool>,
+}
+
+struct WorkerPermit {
+    state: Arc<AppState>,
+    cell_id: CellId,
+}
+
+struct SecretFileGuard(Option<PathBuf>);
+
+impl Drop for SecretFileGuard {
+    fn drop(&mut self) {
+        if let Some(path) = self.0.take() {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+}
+
+impl Drop for WorkerPermit {
+    fn drop(&mut self) {
+        let mut counts = self
+            .state
+            .worker_counts
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let remove = counts.get_mut(&self.cell_id).is_some_and(|count| {
+            *count = count.saturating_sub(1);
+            *count == 0
+        });
+        if remove {
+            counts.remove(&self.cell_id);
+        }
+    }
 }
 
 impl AppState {
@@ -108,6 +165,39 @@ impl AppState {
         self.runs.lock().unwrap_or_else(|e| e.into_inner())
     }
 
+    fn managers(&self) -> std::sync::MutexGuard<'_, HashMap<RunId, ManagerContext>> {
+        self.managers.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    fn manager(&self, run_id: RunId) -> Option<ManagerContext> {
+        self.managers().get(&run_id).cloned()
+    }
+
+    fn manager_token_matches(&self, presented: &str) -> bool {
+        self.managers()
+            .values()
+            .any(|manager| manager.manager_token.matches(presented))
+    }
+
+    fn acquire_worker(self: &Arc<Self>, cell_id: &CellId, worker_cap: u32) -> Option<WorkerPermit> {
+        let mut counts = self.worker_counts.lock().unwrap_or_else(|e| e.into_inner());
+        let count = counts.entry(cell_id.clone()).or_default();
+        if *count >= worker_cap {
+            return None;
+        }
+        *count += 1;
+        Some(WorkerPermit {
+            state: Arc::clone(self),
+            cell_id: cell_id.clone(),
+        })
+    }
+
+    fn set_mcp_endpoint(&self, port: u16) {
+        let _ = self
+            .mcp_endpoint
+            .set(format!("http://127.0.0.1:{port}/v1/mcp"));
+    }
+
     pub fn new(
         store: Store,
         cells_dir: impl Into<PathBuf>,
@@ -124,6 +214,10 @@ impl AppState {
             runs_dir: runs_dir.into(),
             repo_root: repo_root.into(),
             runs: Mutex::new(HashMap::new()),
+            managers: Mutex::new(HashMap::new()),
+            pending_cancellations: Mutex::new(HashMap::new()),
+            worker_counts: Mutex::new(HashMap::new()),
+            mcp_endpoint: OnceLock::new(),
         }
     }
 
@@ -236,6 +330,7 @@ pub async fn serve(state: Arc<AppState>, port: u16) -> std::io::Result<()> {
     // resolve to something routable.
     let listener = tokio::net::TcpListener::bind(("127.0.0.1", port)).await?;
     let bound = listener.local_addr()?.port();
+    state.set_mcp_endpoint(bound);
     write_runtime_file(&runtime_file_path(), bound, &state.token)?;
     axum::serve(listener, router(state)).await
 }
@@ -255,7 +350,10 @@ async fn guard(
     if !security::is_origin_allowed(host, origin) {
         return ApiError::Forbidden("request did not come from loopback").into_response();
     }
-    if !presented_token(headers).is_some_and(|t| state.token.matches(t)) {
+    let is_manager_mcp_request = request.uri().path().starts_with("/v1/mcp");
+    if !presented_token(headers).is_some_and(|token| {
+        state.token.matches(token) || (is_manager_mcp_request && state.manager_token_matches(token))
+    }) {
         return ApiError::Unauthorized.into_response();
     }
     next.run(request).await
@@ -279,6 +377,8 @@ enum ApiError {
     NotFound(&'static str),
     #[error("{0}")]
     BadRequest(&'static str),
+    #[error("{0}")]
+    Policy(String),
     #[error(transparent)]
     Store(#[from] StoreError),
     #[error("could not prepare a workspace for this run: {0}")]
@@ -295,7 +395,7 @@ impl IntoResponse for ApiError {
             Self::Forbidden(_) => StatusCode::FORBIDDEN,
             Self::Unauthorized => StatusCode::UNAUTHORIZED,
             Self::NotFound(_) => StatusCode::NOT_FOUND,
-            Self::BadRequest(_) => StatusCode::BAD_REQUEST,
+            Self::BadRequest(_) | Self::Policy(_) => StatusCode::BAD_REQUEST,
             // `24`: over 1 MiB per key, the answer is `413`.
             Self::Store(StoreError::UiStateTooLarge { .. }) => StatusCode::PAYLOAD_TOO_LARGE,
             Self::Store(_) => StatusCode::INTERNAL_SERVER_ERROR,
@@ -371,19 +471,13 @@ pub struct InstructResponse {
     pub run_id: String,
 }
 
-/// **The command half of the API, no longer absent.** `16`: an instruction is
-/// fire-and-forget - this returns `202` with a `run_id` the moment a process
-/// is spawned, and the record is where the result shows up, via
-/// `/v1/runs/{run_id}` or `/v1/stream`.
+/// [What is the local API surface?] makes an instruction fire-and-forget: this returns `202` with a `run_id`, and the record carries the run.
 ///
-/// **What this deliberately is not**, per `22`: an instruction *delegates* to
-/// exactly one owner, which `05`'s manager loop would decide by planning and
-/// calling workers. There is no manager loop yet, so this runs the cell's own
-/// **manager runner** directly against the goal - the only roster runner
-/// value guaranteed to be `claude-code`, the one runner this binary can
-/// execute. A worker roster entry naming `codex` or `cursor-agent` would fail
-/// with `UnsupportedRunner` today; that gap is `farseer-manager`'s, not
-/// hidden here.
+/// A Claude Code manager receives a generated strict MCP config after the listener's real port is known.
+/// The live manager may call `delegate_to_worker`, which preserves this task while a named pinned-roster worker executes a child contract synchronously.
+/// Managers using another native runner still execute the goal directly because no equivalent MCP launch shape has been verified for those CLIs.
+///
+/// [What is the local API surface?]: ../../../.scratch/farseer/issues/16-local-api-surface.md
 async fn instruct_cell(
     State(state): State<Arc<AppState>>,
     UrlPath(cell_id): UrlPath<String>,
@@ -397,7 +491,6 @@ async fn instruct_cell(
         .get(&CellId::new(cell_id))
         .cloned()
         .ok_or(ApiError::NotFound("cell"))?;
-
     let contract = WorkerContract::seal(WorkerContractSpec {
         run_id: RunId::new(),
         task_id: TaskId::new(),
@@ -407,13 +500,12 @@ async fn instruct_cell(
         runner: cell.manager.runner.clone(),
         tool_grants: cell.tool_grants(),
         autonomy_ceiling: cell.policy.autonomy_ceiling,
-        // `23`'s three narrowing layers - definition, roster cap, caller's
-        // remaining pool - are not wired to this entry point, so a run
-        // started here is unbounded rather than silently capped at a guess.
-        budget: Budget::default(),
+        // `23 prototype loose ends`: the task starts with the owning cell's
+        // pool; every delegated worker narrows and draws down from this root.
+        budget: cell.budget,
         definition_of_done: String::new(),
     });
-    let run_id = spawn_run(&state, contract)?;
+    let run_id = spawn_run(&state, contract, RunRole::Manager, cell)?;
 
     Ok((
         StatusCode::ACCEPTED,
@@ -423,71 +515,257 @@ async fn instruct_cell(
     ))
 }
 
-/// Shared by `instruct`, `rerun` and `rescope`: create the workspace
-/// synchronously (so a failure is a `500` before the caller ever gets a
-/// `run_id` to poll), then hand `contract` to `run_worker` on a blocking
-/// task and tear the workspace down once it returns.
-fn spawn_run(state: &Arc<AppState>, contract: WorkerContract) -> ApiResult<RunId> {
-    let run_id = contract.run_id;
-    let name = run_id.to_string();
+/// `12 autonomy and deny list`: every currently implemented native LLM runner has shell-equivalent reach, so launching one without an explicit shell-capable roster grant would silently widen authority.
+pub(crate) fn ensure_runner_authority(cell: &CellDefinition, runner: &str) -> ApiResult<()> {
+    if matches!(runner, "claude-code" | "codex" | "cursor-agent" | "goose")
+        && !cell.has_shell_grant()
+    {
+        return Err(ApiError::Policy(format!(
+            "runner `{runner}` exposes shell-equivalent reach, but cell `{}` grants no shell-capable tool",
+            cell.cell_id
+        )));
+    }
+    Ok(())
+}
 
-    // `04`: a `Worktree` cell gets a real `git worktree`, off `repo_root`; a
-    // `PlainDirectory` cell gets exactly that. Both are created synchronously
-    // here, before the `202` goes out, so a workspace failure is a `500`
-    // rather than a run that silently never starts.
-    let repo_for_teardown = match contract.workspace {
-        WorkspaceStrategy::Worktree => Some(state.repo_root.clone()),
-        WorkspaceStrategy::PlainDirectory => None,
-    };
-    let cwd = match contract.workspace {
+/// A bounded dimension must stop spend before it happens, not merely report an overrun afterward.
+pub(crate) fn unenforceable_budget_dimension(
+    _runner: &str,
+    budget: Budget,
+) -> Option<&'static str> {
+    if budget.tokens.is_some() {
+        return Some("tokens");
+    }
+    if budget.wall_secs.is_some() {
+        return Some("wall-clock");
+    }
+    if budget.usd_micros.is_some() {
+        // `10 runner inventory`: Claude Code 2.1.233 accepted a one-micro-dollar
+        // cap, reported $0.131195, then failed with `error_max_budget_usd`.
+        // Every current native runner therefore lacks pre-spend enforcement.
+        return Some("currency");
+    }
+    None
+}
+
+/// `04 spike workspace teardown`: a `Worktree` cell gets a real git worktree off `repo_root`, while a `PlainDirectory` cell gets exactly that.
+/// Shared by root and delegated runs so a workspace failure surfaces before anything is spawned.
+pub(crate) fn create_workspace(
+    state: &AppState,
+    strategy: WorkspaceStrategy,
+    run_id: RunId,
+) -> ApiResult<(PathBuf, Option<PathBuf>)> {
+    let name = run_id.to_string();
+    match strategy {
         WorkspaceStrategy::Worktree => {
-            farseer_runner::workspace::create_worktree(&state.repo_root, &state.runs_dir, &name)
-                .map_err(|e| ApiError::Workspace(e.to_string()))?
+            let cwd = farseer_runner::workspace::create_worktree(
+                &state.repo_root,
+                &state.runs_dir,
+                &name,
+            )
+            .map_err(|e| ApiError::Workspace(e.to_string()))?;
+            Ok((cwd, Some(state.repo_root.clone())))
         }
         WorkspaceStrategy::PlainDirectory => {
-            let dir = state.runs_dir.join(&name);
-            std::fs::create_dir_all(&dir).map_err(|e| ApiError::Workspace(e.to_string()))?;
-            dir
+            let cwd = state.runs_dir.join(&name);
+            std::fs::create_dir_all(&cwd).map_err(|e| ApiError::Workspace(e.to_string()))?;
+            Ok((cwd, None))
         }
+    }
+}
+
+pub(crate) fn execute_run(
+    state: &Arc<AppState>,
+    contract: &WorkerContract,
+    cwd: &Path,
+    options: &RunOptions,
+    cancel_requested: Option<&AtomicBool>,
+) -> Result<farseer_manager::RunReport, farseer_manager::ManagerError> {
+    let run_id = contract.run_id;
+    let result = farseer_manager::run_worker(
+        state.as_ref(),
+        contract,
+        cwd,
+        state.thresholds,
+        options,
+        now_ms,
+        |cancel, liveness, steer| {
+            state.runs().insert(
+                run_id,
+                RunHandle {
+                    cancel: cancel.clone(),
+                    liveness,
+                    steer,
+                },
+            );
+            if cancel_requested.is_some_and(|requested| requested.load(Ordering::Acquire)) {
+                cancel.cancel();
+            }
+        },
+    );
+    state.runs().remove(&run_id);
+    result
+}
+
+fn manager_run_options(
+    state: &AppState,
+    contract: &WorkerContract,
+    cell: &CellDefinition,
+    manager_token: &RuntimeToken,
+) -> ApiResult<RunOptions> {
+    let mut options = RunOptions {
+        actor: farseer_core::Actor::Operator,
+        role: RunRole::Manager,
+        manager_cell: Some(cell.clone()),
+        claude_mcp_config: None,
+        claude_append_system_prompt: None,
+    };
+    if contract.runner != "claude-code" {
+        return Ok(options);
+    }
+    let Some(endpoint) = state.mcp_endpoint.get() else {
+        return Ok(options);
     };
 
-    let thresholds = state.thresholds;
+    let config_path = security::manager_config_path(&contract.run_id.to_string());
+    let config = serde_json::json!({
+        "mcpServers": {
+            "farseer": {
+                "type": "http",
+                "url": endpoint,
+                "headers": {
+                    "Authorization": format!("Bearer {}", manager_token.as_str()),
+                },
+            },
+        },
+    });
+    let bytes = serde_json::to_vec_pretty(&config)
+        .map_err(|e| ApiError::Workspace(format!("serializing manager MCP config: {e}")))?;
+    security::write_user_only_file(&config_path, &bytes)
+        .map_err(|e| ApiError::Workspace(format!("writing manager MCP config: {e}")))?;
+
+    let workers = cell
+        .roster
+        .iter()
+        .filter_map(|entry| match entry {
+            farseer_core::RosterEntry::Worker { name, .. } => Some(name.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    let mut prompt = format!(
+        "You are the manager for farseer cell `{}`. Your manager_run_id is `{}` and your \
+         manager_token is `{}`. The roster workers available to delegate to are: {}. \
+         Pass both credentials to every farseer MCP tool call. When you delegate, name a \
+         roster worker and give it a precise sub-goal, then relay the returned result. \
+         The task remains yours to own.",
+        cell.cell_id,
+        contract.run_id,
+        manager_token.as_str(),
+        if workers.is_empty() { "none" } else { &workers },
+    );
+    if !cell.manager.prompt.trim().is_empty() {
+        prompt.push_str("\n\nCell manager instructions:\n");
+        prompt.push_str(&cell.manager.prompt);
+    }
+    options.claude_mcp_config = Some(config_path);
+    options.claude_append_system_prompt = Some(prompt);
+    Ok(options)
+}
+
+/// Create a workspace synchronously, run on a blocking task, then tear down.
+fn spawn_run(
+    state: &Arc<AppState>,
+    contract: WorkerContract,
+    role: RunRole,
+    pinned_cell: CellDefinition,
+) -> ApiResult<RunId> {
+    ensure_runner_authority(&pinned_cell, &contract.runner)?;
+    if let Some(dimension) = unenforceable_budget_dimension(&contract.runner, contract.budget) {
+        return Err(ApiError::Policy(format!(
+            "{} runner `{}` cannot enforce the cell's {dimension} budget before spending",
+            role.as_record_str(),
+            contract.runner
+        )));
+    }
+    let worker_permit = if role == RunRole::Worker {
+        Some(
+            state
+                .acquire_worker(&pinned_cell.cell_id, pinned_cell.policy.worker_cap)
+                .ok_or_else(|| {
+                    ApiError::Policy(format!(
+                        "cell `{}` is already at its worker cap of {}",
+                        pinned_cell.cell_id, pinned_cell.policy.worker_cap
+                    ))
+                })?,
+        )
+    } else {
+        None
+    };
+    let run_id = contract.run_id;
+    let (cwd, repo_for_teardown) = create_workspace(state, contract.workspace, run_id)?;
+    let cancel_requested = Arc::new(AtomicBool::new(false));
+    let manager_context = (role == RunRole::Manager).then(|| ManagerContext {
+        manager_token: RuntimeToken::generate(),
+        remaining_budget: Arc::new(Mutex::new(contract.budget)),
+        child_runs: Arc::new(Mutex::new(HashSet::new())),
+        cancel_requested: Arc::clone(&cancel_requested),
+        contract: contract.clone(),
+        cell: pinned_cell.clone(),
+    });
+    let options = if let Some(context) = &manager_context {
+        manager_run_options(state, &contract, &context.cell, &context.manager_token)
+    } else {
+        Ok(RunOptions {
+            actor: farseer_core::Actor::Operator,
+            role,
+            manager_cell: Some(pinned_cell),
+            claude_mcp_config: None,
+            claude_append_system_prompt: None,
+        })
+    };
+    let options = match options {
+        Ok(options) => options,
+        Err(error) => {
+            let _ = std::fs::remove_file(security::manager_config_path(&run_id.to_string()));
+            let _ =
+                farseer_runner::workspace::teardown_workspace(&cwd, repo_for_teardown.as_deref());
+            return Err(error);
+        }
+    };
+    let config_path = options.claude_mcp_config.clone();
+    if let Some(context) = manager_context.as_ref() {
+        // Register before returning the run id so an immediate cancel or the
+        // manager's first MCP call cannot race process startup and see 404/401.
+        state.managers().insert(run_id, context.clone());
+    }
+    state
+        .pending_cancellations
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert(run_id, Arc::clone(&cancel_requested));
     let background_state = Arc::clone(state);
     tokio::task::spawn_blocking(move || {
-        let result = farseer_manager::run_worker(
-            background_state.as_ref(),
+        let _config_guard = SecretFileGuard(config_path);
+        let _worker_permit = worker_permit;
+        let result = execute_run(
+            &background_state,
             &contract,
             &cwd,
-            thresholds,
-            now_ms,
-            |cancel, liveness, steer| {
-                background_state.runs().insert(
-                    run_id,
-                    RunHandle {
-                        cancel,
-                        liveness,
-                        steer,
-                    },
-                );
-            },
+            &options,
+            Some(cancel_requested.as_ref()),
         );
-        background_state.runs().remove(&run_id);
-        // The outcome is already the run row's problem: `run_worker` writes
-        // `Failed` on any error before returning it, so there is nothing this
-        // background task needs to do with `result` beyond letting it drop.
+        background_state.managers().remove(&run_id);
+        background_state
+            .pending_cancellations
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&run_id);
         drop(result);
 
-        // `04`'s ordering constraint is already satisfied here: `run_worker`
-        // has returned, which only happens once the process's stdout pipe
-        // closed, which happens at or after process exit - the cwd handle
-        // that blocks a delete is gone by construction, not by a race this
-        // code has to win.
         if let Err(e) =
             farseer_runner::workspace::teardown_workspace(&cwd, repo_for_teardown.as_deref())
         {
-            // `04`: a workspace that survives the backoff is the operator's
-            // problem to see, not this task's to keep retrying forever. No
-            // record surface for it yet - see the README's open gaps.
             eprintln!("workspace teardown for run {run_id} did not complete: {e}");
         }
     });
@@ -495,26 +773,50 @@ fn spawn_run(state: &Arc<AppState>, contract: WorkerContract) -> ApiResult<RunId
     Ok(run_id)
 }
 
-/// `05`'s simplest manager verb: end the process, no plan, no re-scope.
-/// Idempotent, and `404` rather than a silent no-op when there is nothing to
-/// cancel - a run that already finished, or one that never existed.
-///
-/// **Does not yet produce `05`'s `Cancelled` outcome** - see
-/// `farseer_manager`'s own doc comment. The run row this leaves behind reads
-/// `failed`.
+/// `05 run state model` cancellation ends the selected run as `cancelled`, never `failed`.
+/// Cancelling a manager also marks its ownership context and cancels every active delegated child, including a child racing with process startup.
 async fn cancel_run(
     State(state): State<Arc<AppState>>,
     UrlPath(run_id): UrlPath<String>,
 ) -> ApiResult<StatusCode> {
     let run_id: RunId = run_id.parse().map_err(|_| ApiError::NotFound("run"))?;
-    let token = state.runs().get(&run_id).map(|h| h.cancel.clone());
-    match token {
-        Some(token) => {
-            token.cancel();
-            Ok(StatusCode::ACCEPTED)
-        }
-        None => Err(ApiError::NotFound("run")),
+    let pending = state
+        .pending_cancellations
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(&run_id)
+        .cloned();
+    if let Some(requested) = &pending {
+        requested.store(true, Ordering::Release);
     }
+    let manager = state.manager(run_id);
+    let child_runs = manager
+        .as_ref()
+        .map(|context| {
+            context.cancel_requested.store(true, Ordering::Release);
+            context
+                .child_runs
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .iter()
+                .copied()
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let mut tokens = {
+        let runs = state.runs();
+        std::iter::once(run_id)
+            .chain(child_runs)
+            .filter_map(|id| runs.get(&id).map(|handle| handle.cancel.clone()))
+            .collect::<Vec<_>>()
+    };
+    if pending.is_none() && manager.is_none() && tokens.is_empty() {
+        return Err(ApiError::NotFound("run"));
+    }
+    for token in tokens.drain(..) {
+        token.cancel();
+    }
+    Ok(StatusCode::ACCEPTED)
 }
 
 #[derive(Debug, Deserialize)]
@@ -570,12 +872,15 @@ pub struct RespawnResponse {
     pub parent_run_id: String,
 }
 
-/// Reconstructs the `WorkerContractSpec` a past run was sealed with, from the
-/// `run_queued` event `farseer_manager::run_worker` writes before spawning
-/// anything. `05`: immutability is what makes this answer one answer - the
-/// run row itself never carried the goal or the grants, so this event is the
-/// only place a re-run or re-scope can read them back from.
-fn original_contract(state: &AppState, run_id: RunId) -> ApiResult<WorkerContractSpec> {
+/// Reconstructs a past run's sealed contract, role, and pinned manager definition from its `run_queued` event.
+/// `05 run state model` makes contract immutability the reason re-run and re-scope have one durable answer.
+struct OriginalRun {
+    spec: WorkerContractSpec,
+    role: RunRole,
+    manager_cell: Option<CellDefinition>,
+}
+
+fn original_run(state: &AppState, run_id: RunId) -> ApiResult<OriginalRun> {
     let events = {
         let store = state.store();
         store.scan(0, 5_000, &ScanFilter::run(run_id))?
@@ -584,8 +889,31 @@ fn original_contract(state: &AppState, run_id: RunId) -> ApiResult<WorkerContrac
         .iter()
         .find(|e| e.kind.as_str() == farseer_core::EventKind::RUN_QUEUED)
         .ok_or(ApiError::NotFound("run"))?;
-    serde_json::from_value(queued.payload.clone())
-        .map_err(|_| ApiError::Corrupt("run_queued event"))
+    let spec: WorkerContractSpec = serde_json::from_value(queued.payload.clone())
+        .map_err(|_| ApiError::Corrupt("run_queued event"))?;
+    let role = match queued
+        .payload
+        .get(RUN_ROLE_FIELD)
+        .and_then(serde_json::Value::as_str)
+    {
+        Some(value) => RunRole::from_record_str(value).ok_or(ApiError::Corrupt("run role"))?,
+        // Before run roles were recorded, every operator-queued run was the
+        // manager entry point; manager-authored worker runs did not exist yet.
+        None if queued.actor == farseer_core::Actor::Operator => RunRole::Manager,
+        None => RunRole::Worker,
+    };
+    let manager_cell = queued
+        .payload
+        .get(MANAGER_CELL_FIELD)
+        .cloned()
+        .map(serde_json::from_value)
+        .transpose()
+        .map_err(|_| ApiError::Corrupt("manager cell snapshot"))?;
+    Ok(OriginalRun {
+        spec,
+        role,
+        manager_cell,
+    })
 }
 
 /// `05`'s **re-run**: same contract, fresh run, fresh workspace. `16`:
@@ -597,9 +925,9 @@ async fn rerun_run(
     UrlPath(run_id): UrlPath<String>,
 ) -> ApiResult<(StatusCode, Json<RespawnResponse>)> {
     let parent_run_id: RunId = run_id.parse().map_err(|_| ApiError::NotFound("run"))?;
-    let mut spec = original_contract(&state, parent_run_id)?;
-    spec.run_id = RunId::new();
-    respawn(&state, spec, parent_run_id).await
+    let mut original = original_run(&state, parent_run_id)?;
+    original.spec.run_id = RunId::new();
+    respawn(&state, original, parent_run_id).await
 }
 
 /// `05`'s **re-scope**: a new run against the same task, with a changed
@@ -612,7 +940,7 @@ async fn rescope_run(
     Json(body): Json<RescopeBody>,
 ) -> ApiResult<(StatusCode, Json<RespawnResponse>)> {
     let parent_run_id: RunId = run_id.parse().map_err(|_| ApiError::NotFound("run"))?;
-    let mut spec = original_contract(&state, parent_run_id)?;
+    let mut original = original_run(&state, parent_run_id)?;
     let Some(goal) = body.goal else {
         return Err(ApiError::BadRequest(
             "rescope needs a changed field - pass goal, or use rerun to repeat the same contract",
@@ -621,24 +949,32 @@ async fn rescope_run(
     if goal.trim().is_empty() {
         return Err(ApiError::BadRequest("goal must not be empty"));
     }
-    if goal == spec.goal {
+    if goal == original.spec.goal {
         return Err(ApiError::BadRequest(
             "goal is unchanged - use rerun, not rescope, to repeat the same contract",
         ));
     }
-    spec.run_id = RunId::new();
-    spec.goal = goal;
-    respawn(&state, spec, parent_run_id).await
+    original.spec.run_id = RunId::new();
+    original.spec.goal = goal;
+    respawn(&state, original, parent_run_id).await
 }
 
 async fn respawn(
     state: &Arc<AppState>,
-    spec: WorkerContractSpec,
+    original: OriginalRun,
     parent_run_id: RunId,
 ) -> ApiResult<(StatusCode, Json<RespawnResponse>)> {
-    let run_id = spec.run_id;
+    let pinned_cell = original.manager_cell.ok_or(ApiError::BadRequest(
+        "this legacy run has no pinned cell definition and cannot be rerun safely",
+    ))?;
+    let run_id = original.spec.run_id;
     state.store().record_rescope(run_id, parent_run_id)?;
-    let run_id = spawn_run(state, WorkerContract::seal(spec))?;
+    let run_id = spawn_run(
+        state,
+        WorkerContract::seal(original.spec),
+        original.role,
+        pinned_cell,
+    )?;
     Ok((
         StatusCode::ACCEPTED,
         Json(RespawnResponse {
@@ -923,6 +1259,12 @@ workspace_strategy = "worktree"
 
 [manager]
 runner = "claude-code"
+
+[[roster]]
+kind = "tool"
+name = "shell"
+irreversibility = "reversible"
+grants_shell = true
 "#;
 
     struct Harness {
@@ -956,9 +1298,65 @@ runner = "claude-code"
         dir
     }
 
+    const CELL_WITH_A_WORKER: &str = r#"
+cell_id = "zero"
+name = "Cell Zero"
+workspace_strategy = "worktree"
+
+[manager]
+runner = "claude-code"
+
+[[roster]]
+kind = "worker"
+name = "coder"
+runner = "goose"
+
+[[roster]]
+kind = "tool"
+name = "shell"
+irreversibility = "reversible"
+grants_shell = true
+"#;
+
     fn harness() -> Harness {
+        harness_with_cell(CELL)
+    }
+
+    fn register_manager(h: &Harness) -> (RunId, TaskId, String) {
+        let cell = h.state.cells().get(&CellId::new("zero")).cloned().unwrap();
+        let run_id = RunId::new();
+        let task_id = TaskId::new();
+        let contract = WorkerContract::seal(WorkerContractSpec {
+            run_id,
+            task_id,
+            cell_id: cell.cell_id.clone(),
+            goal: "manage the task".into(),
+            workspace: cell.workspace_strategy,
+            runner: cell.manager.runner.clone(),
+            tool_grants: cell.tool_grants(),
+            autonomy_ceiling: cell.policy.autonomy_ceiling,
+            budget: cell.budget,
+            definition_of_done: String::new(),
+        });
+        let manager_token = RuntimeToken::generate();
+        let token_text = manager_token.as_str().to_string();
+        h.state.managers().insert(
+            run_id,
+            ManagerContext {
+                manager_token,
+                remaining_budget: Arc::new(Mutex::new(contract.budget)),
+                child_runs: Arc::new(Mutex::new(HashSet::new())),
+                cancel_requested: Arc::new(AtomicBool::new(false)),
+                contract,
+                cell,
+            },
+        );
+        (run_id, task_id, token_text)
+    }
+
+    fn harness_with_cell(cell_toml: &str) -> Harness {
         let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join("zero.toml"), CELL).unwrap();
+        std::fs::write(dir.path().join("zero.toml"), cell_toml).unwrap();
         let runs_dir = tempfile::tempdir().unwrap();
         let repo = git_repo_with_a_commit();
         let token = RuntimeToken::generate();
@@ -1019,14 +1417,12 @@ runner = "claude-code"
             self.send(request).await
         }
 
-        /// Cancels immediately, then polls until the run row reads
-        /// `finished` - bounding how long a real `claude` invocation (if
-        /// installed) gets to run before a test asserts against a terminal
-        /// row.
-        async fn cancel_and_wait_for_finished(&self, run_id: &str) -> serde_json::Value {
-            self.post(&format!("/v1/runs/{run_id}/cancel"), json!({}))
-                .await;
-            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        async fn wait_for_finished(
+            &self,
+            run_id: &str,
+            timeout: std::time::Duration,
+        ) -> serde_json::Value {
+            let deadline = std::time::Instant::now() + timeout;
             loop {
                 let (status, row) = self.get(&format!("/v1/runs/{run_id}")).await;
                 if status == StatusCode::OK && row["lifecycle"] == "finished" {
@@ -1038,6 +1434,14 @@ runner = "claude-code"
                 );
                 tokio::time::sleep(std::time::Duration::from_millis(50)).await;
             }
+        }
+
+        /// Cancels immediately, then polls until the run row reads `finished`.
+        async fn cancel_and_wait_for_finished(&self, run_id: &str) -> serde_json::Value {
+            self.post(&format!("/v1/runs/{run_id}/cancel"), json!({}))
+                .await;
+            self.wait_for_finished(run_id, std::time::Duration::from_secs(30))
+                .await
         }
     }
 
@@ -1059,6 +1463,19 @@ runner = "claude-code"
             .uri("/v1/health")
             .header(header::HOST, "127.0.0.1:9000")
             .header(header::AUTHORIZATION, "Bearer nope")
+            .body(Body::empty())
+            .unwrap();
+        assert_eq!(h.send(request).await.0, StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn a_manager_bearer_cannot_call_operator_routes() {
+        let h = harness();
+        let (_, _, manager_token) = register_manager(&h);
+        let request = Request::builder()
+            .uri("/v1/cells")
+            .header(header::HOST, "127.0.0.1:9000")
+            .header(header::AUTHORIZATION, format!("Bearer {manager_token}"))
             .body(Body::empty())
             .unwrap();
         assert_eq!(h.send(request).await.0, StatusCode::UNAUTHORIZED);
@@ -1284,6 +1701,173 @@ runner = "claude-code"
     }
 
     #[tokio::test]
+    async fn a_native_manager_without_an_explicit_shell_grant_is_refused_before_workspace_creation()
+    {
+        let h = harness_with_cell(
+            r#"
+cell_id = "zero"
+name = "Cell Zero"
+workspace_strategy = "worktree"
+
+[manager]
+runner = "claude-code"
+"#,
+        );
+        let (status, body) = h
+            .post("/v1/cells/zero/instruct", json!({ "goal": "do the thing" }))
+            .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        assert!(
+            std::fs::read_dir(&h.state.runs_dir)
+                .unwrap()
+                .next()
+                .is_none(),
+            "authority refusal must happen before creating a workspace"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_currency_budget_is_refused_before_claude_can_overspend_it() {
+        let h = harness_with_cell(
+            r#"
+cell_id = "zero"
+name = "Cell Zero"
+workspace_strategy = "worktree"
+budget = { usd_micros = 1 }
+
+[manager]
+runner = "claude-code"
+
+[[roster]]
+kind = "tool"
+name = "shell"
+irreversibility = "reversible"
+grants_shell = true
+"#,
+        );
+        let (status, body) = h
+            .post("/v1/cells/zero/instruct", json!({ "goal": "do the thing" }))
+            .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        assert!(
+            body["error"].as_str().unwrap().contains("currency"),
+            "the refusal must name the dimension Claude cannot enforce: {body}"
+        );
+        assert!(
+            std::fs::read_dir(&h.state.runs_dir)
+                .unwrap()
+                .next()
+                .is_none(),
+            "budget refusal must happen before creating a workspace"
+        );
+    }
+
+    #[test]
+    fn manager_mcp_config_is_outside_the_git_worktree() {
+        let h = harness_with_cell(CELL_WITH_A_WORKER);
+        h.state.set_mcp_endpoint(8787);
+        let (run_id, _, manager_token) = register_manager(&h);
+        let manager = h.state.manager(run_id).unwrap();
+
+        let options = manager_run_options(
+            &h.state,
+            &manager.contract,
+            &manager.cell,
+            &manager.manager_token,
+        )
+        .unwrap();
+        let config_path = options.claude_mcp_config.unwrap();
+        assert!(
+            config_path.starts_with(
+                security::runtime_file_path()
+                    .parent()
+                    .unwrap()
+                    .join("manager-configs")
+            )
+        );
+        assert!(!config_path.starts_with(h._repo.path()));
+        let config: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&config_path).unwrap()).unwrap();
+        assert_eq!(config["mcpServers"]["farseer"]["type"], "http");
+        assert_eq!(
+            config["mcpServers"]["farseer"]["headers"]["Authorization"],
+            format!("Bearer {manager_token}")
+        );
+        assert!(
+            !std::fs::read_to_string(&config_path)
+                .unwrap()
+                .contains(h.token.as_str()),
+            "a manager config must not disclose the process-wide operator token"
+        );
+        std::fs::remove_file(config_path).unwrap();
+    }
+
+    #[test]
+    fn the_cell_worker_cap_is_shared_across_manager_runs() {
+        let h = harness();
+        let cell_id = CellId::new("zero");
+        let first = h.state.acquire_worker(&cell_id, 1).unwrap();
+        assert!(h.state.acquire_worker(&cell_id, 1).is_none());
+        drop(first);
+        assert!(h.state.acquire_worker(&cell_id, 1).is_some());
+    }
+
+    #[tokio::test]
+    async fn cancelling_a_manager_also_cancels_its_active_delegated_worker() {
+        let h = harness_with_cell(CELL_WITH_A_WORKER);
+        let (manager_run_id, _, _) = register_manager(&h);
+        let child_run_id = RunId::new();
+        h.state
+            .manager(manager_run_id)
+            .unwrap()
+            .child_runs
+            .lock()
+            .unwrap()
+            .insert(child_run_id);
+
+        let spawn = || {
+            farseer_manager::StartedWorker::spawn(
+                std::path::Path::new(r"C:\Windows\System32\cmd.exe"),
+                &["/c".into(), "ping -n 30 127.0.0.1 >nul".into()],
+                &std::env::current_dir().unwrap(),
+                LivenessThresholds::default(),
+                farseer_runner::claude_code::parse_line,
+                None,
+            )
+            .unwrap()
+        };
+        let manager_worker = spawn();
+        let child_worker = spawn();
+        let manager_token = manager_worker.cancel_token();
+        let child_token = child_worker.cancel_token();
+        h.state.runs().insert(
+            manager_run_id,
+            RunHandle {
+                cancel: manager_token.clone(),
+                liveness: manager_worker.liveness_handle(),
+                steer: None,
+            },
+        );
+        h.state.runs().insert(
+            child_run_id,
+            RunHandle {
+                cancel: child_token.clone(),
+                liveness: child_worker.liveness_handle(),
+                steer: None,
+            },
+        );
+
+        assert_eq!(
+            h.post(&format!("/v1/runs/{manager_run_id}/cancel"), json!({}))
+                .await
+                .0,
+            StatusCode::ACCEPTED
+        );
+        assert!(manager_token.was_cancelled());
+        assert!(child_token.was_cancelled());
+    }
+
+    #[tokio::test]
     async fn cancelling_an_unknown_run_is_a_404() {
         let h = harness();
         assert_eq!(
@@ -1295,6 +1879,28 @@ runner = "claude-code"
         assert_eq!(
             h.post("/v1/runs/not-a-uuid/cancel", json!({})).await.0,
             StatusCode::NOT_FOUND
+        );
+    }
+
+    #[tokio::test]
+    async fn cancellation_is_accepted_before_the_process_exposes_a_live_handle() {
+        let h = harness();
+        let run_id = RunId::new();
+        let requested = Arc::new(AtomicBool::new(false));
+        h.state
+            .pending_cancellations
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(run_id, Arc::clone(&requested));
+
+        let (status, body) = h
+            .post(&format!("/v1/runs/{run_id}/cancel"), json!({}))
+            .await;
+
+        assert_eq!(status, StatusCode::ACCEPTED, "{body}");
+        assert!(
+            requested.load(Ordering::Acquire),
+            "the request must be waiting for the process startup callback"
         );
     }
 
@@ -1313,6 +1919,8 @@ runner = "claude-code"
     }
 
     #[tokio::test]
+    #[ignore = "spawns a real headless `claude` process - see the note on \
+                `steering_a_claude_code_run_reaches_its_live_stdin`"]
     async fn steering_with_an_empty_message_is_a_400() {
         let h = harness();
         let (_, body) = h
@@ -1337,6 +1945,9 @@ runner = "claude-code"
     }
 
     #[tokio::test]
+    #[ignore = "spawns a real headless `claude` process - slow (cold-start plugin \
+                load cost per AGENTS.md) and excluded from `cargo test --workspace` \
+                so the default run stays fast; run with `-- --ignored` to include it"]
     async fn steering_a_claude_code_run_reaches_its_live_stdin() {
         // `claude_code::steer_envelope`'s 2026-08-23 probe verified the wire
         // format; this proves the seam - a later HTTP request reaching a
@@ -1374,18 +1985,20 @@ runner = "claude-code"
         h.cancel_and_wait_for_finished(&run_id).await;
     }
 
-    /// This is the one test in the suite that actually spawns a process - the
-    /// mechanics of spawning, reaping and mapping stream-json are already
-    /// proven against `cmd.exe` fixtures in `farseer-runner` and
-    /// `farseer-manager`'s own tests, so this only needs to prove the HTTP
-    /// wiring around them: fire-and-forget returns a `run_id` before the run
-    /// finishes, the record picks it up, and a workspace directory exists.
-    /// Whether `claude` is actually installed on the machine running this
-    /// test is deliberately not asserted either way - `10` confirms it is on
-    /// the dev machine, but the row this test waits for reaches a terminal
-    /// state either way: `ok`/`failed` if it ran, `failed` immediately via
-    /// `ExecutableNotFound` if it did not.
+    /// One of several tests in this suite that spawn a real process - see the
+    /// `#[ignore]` on each for why. The mechanics of spawning, reaping and
+    /// mapping stream-json are already proven against `cmd.exe` fixtures in
+    /// `farseer-runner` and `farseer-manager`'s own tests, so this only needs
+    /// to prove the HTTP wiring around them: fire-and-forget returns a
+    /// `run_id` before the run finishes, the record picks it up, and a
+    /// workspace directory exists. Whether `claude` is actually installed on
+    /// the machine running this test is deliberately not asserted either way
+    /// - `10` confirms it is on the dev machine, but the row this test waits
+    /// for reaches a terminal state either way: `ok`/`failed` if it ran,
+    /// `failed` immediately via `ExecutableNotFound` if it did not.
     #[tokio::test]
+    #[ignore = "spawns a real headless `claude` process - see the note on \
+                `steering_a_claude_code_run_reaches_its_live_stdin`"]
     async fn instructing_a_cell_returns_a_run_id_that_becomes_a_real_queryable_run() {
         let h = harness();
         let (status, body) = h
@@ -1417,6 +2030,8 @@ runner = "claude-code"
     }
 
     #[tokio::test]
+    #[ignore = "spawns a real headless `claude` process - see the note on \
+                `steering_a_claude_code_run_reaches_its_live_stdin`"]
     async fn a_running_run_reports_liveness_and_a_finished_one_reports_none() {
         let h = harness();
         let (_, body) = h
@@ -1459,6 +2074,210 @@ runner = "claude-code"
         );
     }
 
+    #[test]
+    fn a_pre_manager_loop_run_remains_reconstructable_without_gaining_delegation() {
+        let h = harness();
+        let run_id = RunId::new();
+        let spec = WorkerContractSpec {
+            run_id,
+            task_id: TaskId::new(),
+            cell_id: CellId::new("zero"),
+            goal: "legacy goal".into(),
+            workspace: WorkspaceStrategy::Worktree,
+            runner: "claude-code".into(),
+            tool_grants: Vec::new(),
+            autonomy_ceiling: farseer_core::policy::Irreversibility::Reversible,
+            budget: Budget::default(),
+            definition_of_done: String::new(),
+        };
+        h.state
+            .store()
+            .append(&NewEvent::new(
+                CellId::new("zero"),
+                run_id,
+                farseer_core::EventKind::RUN_QUEUED,
+                Actor::Operator,
+                1,
+                serde_json::to_value(&spec).unwrap(),
+            ))
+            .unwrap();
+
+        let original = original_run(&h.state, run_id).unwrap();
+        assert_eq!(original.role, RunRole::Manager);
+        assert!(original.manager_cell.is_none());
+        assert_eq!(original.spec.goal, "legacy goal");
+    }
+
+    #[tokio::test]
+    async fn a_pinned_delegated_worker_can_be_rerun_by_the_operator() {
+        let h = harness_with_cell(CELL_WITH_A_WORKER);
+        let cell = h.state.cells().get(&CellId::new("zero")).cloned().unwrap();
+        let run_id = RunId::new();
+        let spec = WorkerContractSpec {
+            run_id,
+            task_id: TaskId::new(),
+            cell_id: CellId::new("zero"),
+            goal: "delegated goal".into(),
+            workspace: WorkspaceStrategy::Worktree,
+            runner: "not-a-real-runner".into(),
+            tool_grants: vec!["shell".into()],
+            autonomy_ceiling: farseer_core::policy::Irreversibility::Reversible,
+            budget: Budget::default(),
+            definition_of_done: String::new(),
+        };
+        let mut payload = serde_json::to_value(&spec).unwrap();
+        payload.as_object_mut().unwrap().insert(
+            RUN_ROLE_FIELD.into(),
+            serde_json::Value::String(RunRole::Worker.as_record_str().into()),
+        );
+        payload.as_object_mut().unwrap().insert(
+            MANAGER_CELL_FIELD.into(),
+            serde_json::to_value(cell).unwrap(),
+        );
+        h.state
+            .store()
+            .append(&NewEvent::new(
+                CellId::new("zero"),
+                run_id,
+                farseer_core::EventKind::RUN_QUEUED,
+                Actor::Manager,
+                1,
+                payload,
+            ))
+            .unwrap();
+
+        let (status, body) = h.post(&format!("/v1/runs/{run_id}/rerun"), json!({})).await;
+        assert_eq!(status, StatusCode::ACCEPTED, "{body}");
+        let rerun_id = body["run_id"].as_str().unwrap();
+        let row = h
+            .wait_for_finished(rerun_id, std::time::Duration::from_secs(10))
+            .await;
+        assert_eq!(row["outcome"], "failed", "{row}");
+
+        let reconstructed = original_run(&h.state, rerun_id.parse().unwrap()).unwrap();
+        assert_eq!(reconstructed.role, RunRole::Worker);
+        assert!(
+            reconstructed.manager_cell.is_some(),
+            "the operator's rerun must retain the worker's pinned cell authority"
+        );
+    }
+
+    #[tokio::test]
+    async fn legacy_runs_without_a_pinned_definition_fail_closed_on_respawn() {
+        let h = harness();
+        for (role, actor, endpoint) in [
+            (RunRole::Manager, Actor::Operator, "rerun"),
+            (RunRole::Worker, Actor::Manager, "rescope"),
+        ] {
+            let run_id = RunId::new();
+            let spec = WorkerContractSpec {
+                run_id,
+                task_id: TaskId::new(),
+                cell_id: CellId::new("zero"),
+                goal: "legacy goal".into(),
+                workspace: WorkspaceStrategy::Worktree,
+                runner: "not-a-real-runner".into(),
+                tool_grants: Vec::new(),
+                autonomy_ceiling: farseer_core::policy::Irreversibility::Reversible,
+                budget: Budget::default(),
+                definition_of_done: String::new(),
+            };
+            let mut payload = serde_json::to_value(&spec).unwrap();
+            payload.as_object_mut().unwrap().insert(
+                RUN_ROLE_FIELD.into(),
+                serde_json::Value::String(role.as_record_str().into()),
+            );
+            h.state
+                .store()
+                .append(&NewEvent::new(
+                    CellId::new("zero"),
+                    run_id,
+                    farseer_core::EventKind::RUN_QUEUED,
+                    actor,
+                    1,
+                    payload,
+                ))
+                .unwrap();
+
+            let body = if endpoint == "rerun" {
+                json!({})
+            } else {
+                json!({ "goal": "changed goal" })
+            };
+            let (status, response) = h.post(&format!("/v1/runs/{run_id}/{endpoint}"), body).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{response}");
+            assert!(
+                response["error"]
+                    .as_str()
+                    .is_some_and(|error| error.contains("pinned")),
+                "legacy authority must fail closed: {response}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_worker_rerun_reacquires_the_pinned_cells_worker_permit() {
+        let h = harness_with_cell(CELL_WITH_A_WORKER);
+        let cell = h.state.cells().get(&CellId::new("zero")).cloned().unwrap();
+        let run_id = RunId::new();
+        let spec = WorkerContractSpec {
+            run_id,
+            task_id: TaskId::new(),
+            cell_id: cell.cell_id.clone(),
+            goal: "delegated goal".into(),
+            workspace: WorkspaceStrategy::Worktree,
+            runner: "not-a-real-runner".into(),
+            tool_grants: vec!["shell".into()],
+            autonomy_ceiling: farseer_core::policy::Irreversibility::Reversible,
+            budget: Budget::default(),
+            definition_of_done: String::new(),
+        };
+        let mut payload = serde_json::to_value(&spec).unwrap();
+        payload.as_object_mut().unwrap().insert(
+            RUN_ROLE_FIELD.into(),
+            serde_json::Value::String(RunRole::Worker.as_record_str().into()),
+        );
+        payload.as_object_mut().unwrap().insert(
+            MANAGER_CELL_FIELD.into(),
+            serde_json::to_value(&cell).unwrap(),
+        );
+        h.state
+            .store()
+            .append(&NewEvent::new(
+                cell.cell_id.clone(),
+                run_id,
+                farseer_core::EventKind::RUN_QUEUED,
+                Actor::Manager,
+                1,
+                payload,
+            ))
+            .unwrap();
+
+        let permit = h
+            .state
+            .acquire_worker(&cell.cell_id, cell.policy.worker_cap)
+            .unwrap();
+        let mut remaining = Vec::new();
+        for _ in 1..cell.policy.worker_cap {
+            remaining.push(
+                h.state
+                    .acquire_worker(&cell.cell_id, cell.policy.worker_cap)
+                    .unwrap(),
+            );
+        }
+
+        let (status, body) = h.post(&format!("/v1/runs/{run_id}/rerun"), json!({})).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        assert!(
+            body["error"]
+                .as_str()
+                .is_some_and(|error| error.contains("worker cap")),
+            "the pinned cell-wide cap must be enforced: {body}"
+        );
+        drop(remaining);
+        drop(permit);
+    }
+
     #[tokio::test]
     async fn rerunning_an_unknown_run_is_a_404() {
         let h = harness();
@@ -1471,6 +2290,8 @@ runner = "claude-code"
     }
 
     #[tokio::test]
+    #[ignore = "spawns a real headless `claude` process - see the note on \
+                `steering_a_claude_code_run_reaches_its_live_stdin`"]
     async fn rescoping_without_a_goal_is_refused() {
         let h = harness();
         let (_, body) = h
@@ -1486,6 +2307,8 @@ runner = "claude-code"
     }
 
     #[tokio::test]
+    #[ignore = "spawns a real headless `claude` process - see the note on \
+                `steering_a_claude_code_run_reaches_its_live_stdin`"]
     async fn rescoping_with_the_unchanged_goal_is_refused() {
         let h = harness();
         let (_, body) = h
@@ -1504,6 +2327,8 @@ runner = "claude-code"
     }
 
     #[tokio::test]
+    #[ignore = "spawns a real headless `claude` process - see the note on \
+                `steering_a_claude_code_run_reaches_its_live_stdin`"]
     async fn rerun_and_rescope_start_a_fresh_run_linked_to_the_original() {
         let h = harness();
         let (_, body) = h
@@ -1563,6 +2388,23 @@ runner = "claude-code"
         use rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig;
 
         let h = harness();
+        let (manager_run_id, task_id, manager_token) = register_manager(&h);
+        h.state
+            .store()
+            .upsert_run(&RunRow {
+                run_id: manager_run_id,
+                task_id,
+                cell_id: CellId::new("zero"),
+                runner: "claude-code".into(),
+                model: String::new(),
+                outcome: None,
+                usd_micros: 0,
+                tokens: 0,
+                operator_touched: false,
+                started_ts: 1,
+                finished_ts: None,
+            })
+            .unwrap();
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
         let router = h.router.clone();
@@ -1589,13 +2431,35 @@ runner = "claude-code"
         assert!(names.contains(&"read_memory"));
         assert!(names.contains(&"write_memory"));
 
+        let impersonation = client
+            .call_tool(
+                CallToolRequestParams::new("read_memory").with_arguments(
+                    json!({
+                        "manager_run_id": manager_run_id.to_string(),
+                        "manager_token": "wrong"
+                    })
+                    .as_object()
+                    .cloned()
+                    .unwrap(),
+                ),
+            )
+            .await;
+        assert!(
+            format!("{impersonation:?}").contains("manager_token"),
+            "a manager run id alone must not authorize memory: {impersonation:?}"
+        );
+
         let write = client
             .call_tool(
                 CallToolRequestParams::new("write_memory").with_arguments(
-                    json!({ "cell_id": "zero", "body": "prefer MSVC" })
-                        .as_object()
-                        .cloned()
-                        .unwrap(),
+                    json!({
+                        "manager_run_id": manager_run_id.to_string(),
+                        "manager_token": manager_token,
+                        "body": "prefer MSVC"
+                    })
+                    .as_object()
+                    .cloned()
+                    .unwrap(),
                 ),
             )
             .await
@@ -1608,8 +2472,15 @@ runner = "claude-code"
 
         let read = client
             .call_tool(
-                CallToolRequestParams::new("read_memory")
-                    .with_arguments(json!({ "cell_id": "zero" }).as_object().cloned().unwrap()),
+                CallToolRequestParams::new("read_memory").with_arguments(
+                    json!({
+                        "manager_run_id": manager_run_id.to_string(),
+                        "manager_token": manager_token
+                    })
+                    .as_object()
+                    .cloned()
+                    .unwrap(),
+                ),
             )
             .await
             .unwrap();
@@ -1619,35 +2490,19 @@ runner = "claude-code"
             "the claim just written should read back: {read_text}"
         );
 
-        // `02`'s "Carried from 11": a run-scoped read marks each returned
-        // claim consulted - the `consulted` edge `11`'s lessons-against-
-        // outcome query joins on, not a separate event. A bare `RunRow`,
-        // upserted directly the way `farseer_manager::RunSink` does it, is
-        // enough to give that join a real run to find - no process needed.
-        let run_id = farseer_core::RunId::new();
-        h.state
-            .store()
-            .upsert_run(&RunRow {
-                run_id,
-                task_id: farseer_core::TaskId::new(),
-                cell_id: CellId::new("zero"),
-                runner: "claude-code".into(),
-                model: String::new(),
-                outcome: Some("ok".into()),
-                usd_micros: 0,
-                tokens: 0,
-                operator_touched: false,
-                started_ts: 1,
-                finished_ts: Some(2),
-            })
-            .unwrap();
+        // `02`'s "Carried from 11": a manager-scoped read marks each returned
+        // claim consulted by the authenticated manager run - the `consulted`
+        // edge `11`'s lessons-against-outcome query joins on.
         client
             .call_tool(
                 CallToolRequestParams::new("read_memory").with_arguments(
-                    json!({ "cell_id": "zero", "run_id": run_id.to_string() })
-                        .as_object()
-                        .cloned()
-                        .unwrap(),
+                    json!({
+                        "manager_run_id": manager_run_id.to_string(),
+                        "manager_token": manager_token
+                    })
+                    .as_object()
+                    .cloned()
+                    .unwrap(),
                 ),
             )
             .await
@@ -1670,10 +2525,15 @@ runner = "claude-code"
         let global_attempt = client
             .call_tool(
                 CallToolRequestParams::new("write_memory").with_arguments(
-                    json!({ "cell_id": "zero", "body": "should not land", "tier": "global" })
-                        .as_object()
-                        .cloned()
-                        .unwrap(),
+                    json!({
+                        "manager_run_id": manager_run_id.to_string(),
+                        "manager_token": manager_token,
+                        "body": "should not land",
+                        "tier": "global"
+                    })
+                    .as_object()
+                    .cloned()
+                    .unwrap(),
                 ),
             )
             .await;
@@ -1683,5 +2543,217 @@ runner = "claude-code"
         );
 
         client.cancel().await.unwrap();
+    }
+
+    /// `22 cell addressing`: an ungranted worker stays ungranted even when named.
+    /// The default fixture has no roster, so refusal must happen before workspace or process creation.
+    #[tokio::test]
+    async fn delegating_to_a_worker_not_in_the_roster_is_refused() {
+        use rmcp::ServiceExt;
+        use rmcp::model::{CallToolRequestParams, ClientCapabilities, ClientInfo, Implementation};
+        use rmcp::transport::StreamableHttpClientTransport;
+        use rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig;
+
+        let h = harness();
+        let (manager_run_id, _, manager_token) = register_manager(&h);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let router = h.router.clone();
+        tokio::spawn(async move {
+            axum::serve(listener, router).await.unwrap();
+        });
+        let transport = StreamableHttpClientTransport::<reqwest::Client>::from_config(
+            StreamableHttpClientTransportConfig::with_uri(format!(
+                "http://127.0.0.1:{port}/v1/mcp"
+            ))
+            .auth_header(manager_token.clone()),
+        );
+        let client = ClientInfo::new(
+            ClientCapabilities::default(),
+            Implementation::new("farseer-api test client", "0.0.1"),
+        )
+        .serve(transport)
+        .await
+        .unwrap();
+
+        let unauthorized = client
+            .call_tool(
+                CallToolRequestParams::new("delegate_to_worker").with_arguments(
+                    json!({ "manager_run_id": manager_run_id.to_string(), "manager_token": "wrong", "worker": "nope", "goal": "anything" })
+                        .as_object()
+                        .cloned()
+                        .unwrap(),
+                ),
+            )
+            .await;
+        assert!(
+            format!("{unauthorized:?}").contains("manager_token"),
+            "an active manager UUID is not sufficient without its capability: {unauthorized:?}"
+        );
+
+        let attempt = client
+            .call_tool(
+                CallToolRequestParams::new("delegate_to_worker").with_arguments(
+                    json!({ "manager_run_id": manager_run_id.to_string(), "manager_token": manager_token, "worker": "nope", "goal": "anything" })
+                        .as_object()
+                        .cloned()
+                        .unwrap(),
+                ),
+            )
+            .await;
+        assert!(
+            attempt.is_err(),
+            "a worker absent from the roster must be refused before anything spawns: {attempt:?}"
+        );
+
+        client.cancel().await.unwrap();
+    }
+
+    /// Proves direct delegation end to end with a real worktree, a real Goose invocation, and the resulting run row.
+    /// `10 runner inventory` records why Goose is the cheapest real worker on this machine: subscription reuse and no trust gate.
+    /// Ignored because it still starts a real external process.
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore = "spawns a real `goose` process - see the note on \
+                `steering_a_claude_code_run_reaches_its_live_stdin`"]
+    async fn delegating_to_a_roster_worker_runs_it_and_reports_back() {
+        use rmcp::ServiceExt;
+        use rmcp::model::{CallToolRequestParams, ClientCapabilities, ClientInfo, Implementation};
+        use rmcp::transport::StreamableHttpClientTransport;
+        use rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig;
+
+        let h = harness_with_cell(CELL_WITH_A_WORKER);
+        let (manager_run_id, task_id, manager_token) = register_manager(&h);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let router = h.router.clone();
+        tokio::spawn(async move {
+            axum::serve(listener, router).await.unwrap();
+        });
+        let transport = StreamableHttpClientTransport::<reqwest::Client>::from_config(
+            StreamableHttpClientTransportConfig::with_uri(format!(
+                "http://127.0.0.1:{port}/v1/mcp"
+            ))
+            .auth_header(h.token.as_str().to_string()),
+        );
+        let client = ClientInfo::new(
+            ClientCapabilities::default(),
+            Implementation::new("farseer-api test client", "0.0.1"),
+        )
+        .serve(transport)
+        .await
+        .unwrap();
+
+        let result = client
+            .call_tool(
+                CallToolRequestParams::new("delegate_to_worker").with_arguments(
+                    json!({ "manager_run_id": manager_run_id.to_string(), "manager_token": manager_token, "worker": "coder", "goal": "reply with a short confirmation" })
+                        .as_object()
+                        .cloned()
+                        .unwrap(),
+                ),
+            )
+            .await
+            .unwrap();
+        let text = format!("{result:?}");
+        assert!(
+            text.contains("\\\"outcome\\\":\\\"ok\\\"") || text.contains("\"outcome\":\"ok\""),
+            "a successful delegated worker should report outcome ok: {text}"
+        );
+        assert!(
+            text.contains("\\\"result\\\":\\\"") || text.contains("\"result\":\""),
+            "the worker's non-null terminal text must be relayed: {text}"
+        );
+        assert!(
+            text.contains(&task_id.to_string()),
+            "the delegated run must stay on the manager's task: {text}"
+        );
+
+        client.cancel().await.unwrap();
+    }
+
+    /// The complete manager loop: HTTP instruction -> Claude manager -> farseer
+    /// MCP -> Goose roster worker -> tool result -> the same Claude turn.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[ignore = "spawns real `claude` and `goose` processes - slow and consumes \
+                the configured subscriptions; run explicitly to verify the manager loop"]
+    async fn instructing_a_manager_reaches_a_roster_worker_through_farseers_mcp_face() {
+        let h = harness_with_cell(CELL_WITH_A_WORKER);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        h.state.set_mcp_endpoint(port);
+        let router = h.router.clone();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, router).await.unwrap();
+        });
+
+        let (status, body) = h
+            .post(
+                "/v1/cells/zero/instruct",
+                json!({
+                    "goal": "Call the farseer delegate_to_worker tool exactly once. Ask the coder worker to reply with exactly worker-ok. Then return exactly the worker's result."
+                }),
+            )
+            .await;
+        assert_eq!(status, StatusCode::ACCEPTED, "{body}");
+        let manager_run_id = body["run_id"].as_str().unwrap().to_string();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
+        let delegated_run_id = loop {
+            let events = h
+                .state
+                .store()
+                .scan(0, 5_000, &ScanFilter::default())
+                .unwrap();
+            let delegated = events.iter().find(|event| {
+                event.actor == Actor::Manager
+                    && event.kind.as_str() == farseer_core::EventKind::RUN_QUEUED
+            });
+            let completed = delegated.and_then(|event| {
+                h.state
+                    .store()
+                    .run(event.run_id)
+                    .unwrap()
+                    .filter(|row| row.outcome.as_deref() == Some("ok"))
+                    .map(|_| event)
+            });
+            let relayed = completed.is_some_and(|delegated| {
+                events.iter().any(|event| {
+                    event.seq > delegated.seq
+                        && event.actor == Actor::Manager
+                        && event.run_id.to_string() == manager_run_id
+                        && event.kind.as_str() == farseer_core::EventKind::TOOL_RESULT
+                })
+            });
+            if let Some(delegated) = completed.filter(|_| relayed) {
+                break delegated.run_id;
+            }
+            if std::time::Instant::now() >= deadline {
+                let summary = events
+                    .iter()
+                    .map(|event| {
+                        format!("{}:{}:{}", event.actor.as_str(), event.run_id, event.kind)
+                    })
+                    .collect::<Vec<_>>();
+                let row = h.cancel_and_wait_for_finished(&manager_run_id).await;
+                server.abort();
+                panic!("manager loop timed out; row={row}; events={summary:?}");
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        };
+
+        let manager_row = h.cancel_and_wait_for_finished(&manager_run_id).await;
+        server.abort();
+        assert_eq!(manager_row["outcome"], "cancelled", "{manager_row}");
+        assert!(
+            !security::manager_config_path(&manager_run_id).exists(),
+            "the bearer-bearing manager config must be removed independently"
+        );
+        let worker_row = h.state.store().run(delegated_run_id).unwrap().unwrap();
+        assert_eq!(worker_row.runner, "goose");
+        assert_eq!(worker_row.outcome.as_deref(), Some("ok"));
+        assert_eq!(
+            worker_row.task_id.to_string(),
+            manager_row["task_id"],
+            "the nested worker must stay on the manager's task"
+        );
     }
 }

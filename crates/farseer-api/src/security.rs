@@ -104,18 +104,37 @@ pub fn runtime_file_path() -> PathBuf {
     base.join("farseer").join("runtime.json")
 }
 
-/// Write the port and token where the CLI can find them, readable by nobody else.
-pub fn write_runtime_file(path: &Path, port: u16, token: &RuntimeToken) -> io::Result<()> {
+/// `10 runner inventory`: keep a manager's generated bearer-bearing MCP
+/// config outside the git worktree and delete it independently when the run
+/// exits, so neither the secret nor cleanup depends on workspace teardown.
+pub(crate) fn manager_config_path(run_id: &str) -> PathBuf {
+    runtime_file_path()
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join("manager-configs")
+        .join(format!("{run_id}.json"))
+}
+
+/// Write sensitive bytes under a current-user-only DACL.
+///
+/// `10 runner inventory` records that a native runner inherits operator
+/// configuration unless its adapter prevents it, so a generated manager
+/// capability must never rely on inherited directory permissions.
+pub(crate) fn write_user_only_file(path: &Path, contents: &[u8]) -> io::Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    // Lock the file down while it is still empty. Writing first would put the
-    // token on disk under whatever the parent directory happens to grant, and a
-    // kill in that window would leave it there permanently.
+    // Lock the file down while it is still empty. Writing first would expose
+    // the secret under inherited permissions if the process died in between.
     std::fs::write(path, b"")?;
     restrict_to_current_user(path)?;
+    std::fs::write(path, contents)
+}
+
+/// Write the port and token where the CLI can find them, readable by nobody else.
+pub fn write_runtime_file(path: &Path, port: u16, token: &RuntimeToken) -> io::Result<()> {
     let body = serde_json::json!({ "port": port, "token": token.as_str() });
-    std::fs::write(path, serde_json::to_vec(&body)?)
+    write_user_only_file(path, &serde_json::to_vec(&body)?)
 }
 
 /// Replace the file's DACL with one entry: full control for the current user.
