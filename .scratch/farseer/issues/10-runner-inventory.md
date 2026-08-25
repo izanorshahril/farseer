@@ -392,3 +392,17 @@ The full ignored manager-loop test also ran the production Claude invocation suc
 That verifies the combined manager launch shape against the real CLI rather than argv construction alone.
 The same run's `system/init` event still listed Claude's ordinary built-in tools, so `--allowedTools` auto-authorizes the named MCP tools but is not an exclusive tool allowlist.
 Farseer therefore requires the pinned cell to state an explicit shell-capable tool grant before launching any of the current native LLM runners, matching `12 autonomy and deny list`'s rule that a shell grant means everything is granted.
+
+
+## Corrected by 29 (2026-08-26)
+
+**The fails column names invocations, not products - and two of its entries are now stale.**
+
+`20` scored **Gemini CLI** and **opencode** as failing `05`'s activity test, and this ticket carried that forward so nobody would re-evaluate a tool already ruled out.
+Both now ship a mode that streams:
+
+- `gemini --acp` (formerly `--experimental-acp`) emits `session/update` notifications throughout the turn. **It passes.**
+- `opencode serve` grew ACP session support. This ticket had already flagged it as "a different surface and was not evaluated"; it is still unevaluated, but it is no longer ruled out.
+
+So the fails column must record **the mode tested**, and re-open when a harness ships a new one.
+`29` also widened the inventory from five harnesses to sixteen, and found that no other host of these binaries parses per-harness dialects the way farseer does.

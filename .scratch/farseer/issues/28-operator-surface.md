@@ -399,3 +399,19 @@ Two things were being thrown away.
 - **Thinking level.** Neither runner reports one and farseer does not set one, so there is nothing to show. Codex does report `reasoning_output_tokens`, which is the nearest observable thing.
 - **A token breakdown.** Codex reports `input_tokens`, `cached_input_tokens`, `output_tokens` and `reasoning_output_tokens` separately, and `codex.rs` **sums them into one number**. The breakdown is the honest answer to "context info" and it is being discarded at the adapter.
 - **The provider.** The account is in `runners.toml` and the shell already serves it to the settings widget; the conversation does not ask for it yet.
+
+
+## Corrected by 29 (2026-08-26)
+
+**The token breakdown this ticket left open is the wrong thing to build.**
+
+I wrote here that `codex.rs` summing `input_tokens`, `cached_input_tokens`, `output_tokens` and `reasoning_output_tokens` into one number was "discarding the honest answer to context info".
+
+ACP faced the same choice and went the other way on purpose: its `usage_update` carries **`used` and `size`** plus an optional cumulative `cost`, and the per-turn breakdown sits in a separate proposal.
+The reason is that `used`/`size` is the number a surface can act on - a percentage, a warning threshold, a prompt to start a new session - and shipped clients render 75-90% yellow and above 95% red.
+A four-way split of a single turn answers an analytics question, which belongs to `11`.
+
+The meta strip should therefore grow **`used` / `size`**, and `size` is the field farseer has no source for at all today.
+
+**And "thinking level" was unrequested, not unavailable.**
+This ticket recorded that neither runner reports one. Codex's `app-server` accepts a per-turn reasoning `effort` of `none | minimal | low | medium | high | xhigh`; `codex exec --json`, which farseer drives, does not.

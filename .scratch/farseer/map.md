@@ -118,6 +118,7 @@ graph TD
   T26[26 routing policy]
   T27[27 quota accounting]
   T28[28 operator surface]
+  T29[29 harness protocol]
 
   T01 --> T02
   T01 --> T06
@@ -165,6 +166,11 @@ graph TD
   T05 -.-> T26
   T23 -.-> T27
   T24 -.-> T27
+  T10 -.-> T29
+  T20 -.-> T29
+  T29 -.-> T27
+  T29 -.-> T28
+
   T24 -.-> T28
   T01 -.-> T28
   T05 -.-> T28
@@ -241,6 +247,7 @@ Every correction is recorded on the corrected ticket itself as well as here, so 
 - `23` **amended `05`, `11`, `13`, `16` and `22`** - a fourth terminal outcome, an honest cost metric, the task-root and per-roster budget fields missing from `13`'s earlier field table, one fewer API verb, and a downgraded cycle refusal.
 - `24` corrected **this map** - a fog paragraph claimed UI state "should not get" a home, conflating *not in the record* with *not persisted*. The operator caught it. Recorded here because the correction was to the map's own prose rather than to a ticket, which is the one place a stale claim has nothing pointing at it.
 - `16 local api surface`'s promise that **the answer arrives on the event stream was never kept**, and building the conversation surface on 2026-08-25 is what found it: a manager's words went back to a delegating manager over MCP and nowhere else. `manager_answered` and `run_finished` carry them now. Underneath sat a worse one, in `spawn.rs`: **every child got a piped stdin held open for its lifetime**, and `codex exec` waits for EOF before it starts, so a run spawned a process and then never began - live, silent, and indistinguishable from a hang. The steer frame now decides whether a stdin exists at all.
+- `29 harness protocol` **corrected `10 runner inventory`'s fails column on 2026-08-26**, and the correction is about modes rather than products: `10` disqualified **Gemini CLI** and **opencode** on the activity test, and both now ship a mode that streams - `gemini --acp` and `opencode serve`. A harness fails in one invocation and passes in another, so the fails column must name the mode it tested. The same research reversed one of `28`'s own open items: ACP considered the per-turn token breakdown farseer was about to build and **chose `used`/`size` instead**, because a context percentage is what a surface can act on and a four-way split of one turn is `11`'s question, not the operator's. It also found the one thing farseer would **lose** by standardising: ACP has no `rate_limit_event` and no compaction boundary, which is `27`'s foundation and a column `10` scored, so ACP lands as a fifth runner kind beside the native adapters rather than in place of them.
 - `28 operator surface` **grew a settings surface on 2026-08-25, and it is not an API operation**: `16` gave definitions read, validate and reload with no edit path, so the **shell** writes `cells/zero.toml` and asks the runtime to reload it. The change leaves a git diff, which is exactly what `22` relied on when it refused an in-conversation override. One line changes and the file keeps its own line endings, both pinned by tests.
 - `28 operator surface` **chose its desktop shell on 2026-08-25: Tauri**, with `farseer serve` demoted to optional rather than the way in. The reasons are about this project - it is Rust, the shell can own the runtime as a sidecar, and the token stays off the webview exactly as it stays off the browser today. Electron was rejected at a ~150MB installer and a second runtime for one dependency, since esbuild ships standalone; farseer-serves-the-page was rejected for putting rendering inside the headless runtime `01` kept clear.
 - `28 operator surface` **section 3 turned out to be unimplementable as written**, and one live run on 2026-08-25 is what showed it: cell zero could not write a file at all, because `--allowedTools` named only the MCP tools and every built-in write waited on a permission prompt nobody answers. Fixed by granting `Write`/`Edit`/`Bash` to a manager whose cell grants a shell, per `12`. Two more facts came out of the same attempt - a manager reads a worktree of **HEAD**, so its contract must be committed, and it must leave a **branch** because the detached worktree is deleted. Cell zero has now written a widget end to end.
