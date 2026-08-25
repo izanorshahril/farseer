@@ -45,8 +45,23 @@ Routing is a decision, not a click.
 Farseer's own spend is a **lower bound** on a window that other sessions also drain, so a bar would be wrong in a way the operator could not detect - and most wrong exactly near exhaustion, when they would trust it most.
 It shows what is true instead: `allowed` or `exhausted`, a countdown, and what the fleet itself spent.
 
+## The three gates
+
+Widgets under [`../widgets/`](../widgets) are discovered, compiled and sandboxed here - never by the runtime, which is what keeps `01 cell primitive`'s no-plugin-ABI ruling intact.
+
+| Gate | Where | What it refuses |
+| --- | --- | --- |
+| import allowlist | [`plugins/widget-host.ts`](plugins/widget-host.ts) | `node:fs`, `node:http`, anything outside the widget's own directory |
+| sandboxed render | [`src/SandboxWidget.tsx`](src/SandboxWidget.tsx) | the host page, `localStorage`, cookies, and every direct `fetch` |
+| keep or undo | [`src/GateBar.tsx`](src/GateBar.tsx) | nothing - it makes the turn reversible, scoped to `widgets/` |
+
+The sandbox is an iframe with `sandbox="allow-scripts"` and **no** `allow-same-origin`, so the widget has an opaque origin and its only channel is a `MessagePort`.
+A widget written to attack the host reached the bridge and nothing else; the table of what it tried is on `28`.
+
+Adding `allow-same-origin` would hand a widget the host's origin and undo every one of those properties at once.
+
 ## Not built yet
 
-- **Agent-authored widgets.** `28` puts widget code in `widgets/` in git, written by cell zero, behind three gates: keep-or-undo per turn, an import allowlist at compile, and a sandboxed render. The registry in `App.tsx` is static until those exist, which is the honest order - the host contract gets proven by two hand-written widgets before it is asked to compile one a manager wrote.
+- **Cell zero writing one.** `widgets/run-tally` is hand-written on purpose - the contract gets proven before a manager is asked to satisfy it. The manager-facing half is a prompt that teaches the widget contract plus the file-writing turn.
 - **The event stream.** `ask` returns a run id; the answer arrives on `/v1/stream`, which nothing here reads yet.
 - **Run verbs.** `28`'s table puts `steer`, `cancel`, `observe`, `take over` and `release` inline on a run line, and there is no run-line widget yet.

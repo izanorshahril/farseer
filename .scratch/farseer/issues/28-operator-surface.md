@@ -163,3 +163,60 @@ Under the correction that request lands on the top manager and has to travel out
 `AGENTS.md` records it as "remains open"; this correction makes it a **blocking dependency of the operator surface**, and it should be built before the second widget rather than after.
 
 Sections 1, 3 and 4 are unaffected.
+
+## Implementation note, 2026-08-25: the three gates, and what an attack actually reached
+
+Built, and each gate was tested by trying to get past it rather than by reading the code and agreeing with it.
+
+### Gate 2, the import allowlist
+
+`ui/plugins/widget-host.ts` compiles a widget with esbuild and refuses to resolve anything outside `react`, `react/jsx-runtime`, `react/jsx-dev-runtime`, `react-dom/client` and the widget's own local files.
+
+A widget importing `../../ui/src/bridge` is told it *reaches outside the widget's own directory*.
+A widget importing `node:fs` and `node:http` is told they are *not on the import allowlist*, and is given the list.
+Neither mounts, and the operator gets the compiler's own words rather than "failed".
+
+Two things the build taught, both now comments in the file.
+The gate governs what the **widget** reaches, not what an allowed dependency does inside itself - policing React's own relative imports meant the allowlist could not allow anything real.
+And an allowed bare import resolves from the **host's** dependencies, because `widgets/` holds source and nothing else; the cost is that a widget shares the host's React version.
+
+### Gate 3, the sandboxed render
+
+An iframe with `sandbox="allow-scripts"` and deliberately no `allow-same-origin`, so the widget has an **opaque origin**.
+Its only channel is a `MessagePort` handed to it once.
+
+A widget was written to compile cleanly and then attack at runtime, and it reported what it managed to reach through the one channel it had:
+
+| It tried | It got |
+| --- | --- |
+| the host page (`window.parent.location.href`) | `blocked: SecurityError` |
+| `localStorage` | `blocked: SecurityError` |
+| `document.cookie` | `blocked: SecurityError` |
+| `fetch("/v1/quota")` | `blocked: TypeError` |
+| `fetch("http://127.0.0.1:9077/v1/quota")` | `blocked: TypeError` |
+| the host bridge | **reached** - which is the one thing it is for |
+
+The isolation is **bidirectional**: the host's own `frame.contentDocument` is `null` for the same reason.
+
+Two properties are narrower than the frame alone:
+
+- **The anchor is stamped by the host.** A widget may ask the top manager for something; it cannot claim to be a different widget while doing it.
+- **State is namespaced per widget**, so one widget cannot overwrite another's slice or the canvas layout itself.
+
+### Gate 1, keep or undo
+
+`git status --porcelain -- widgets`, `git add -- widgets`, and `git restore` plus a scoped `git clean`.
+
+Verified both directions: keep staged four files; undo reverted a modified **kept** widget to its committed state and removed an untracked one, while leaving everything outside `widgets/` untouched.
+The bar names the files that changed rather than announcing that something did, because a bar saying "changes were made" is one the operator learns to click through.
+
+### Two bugs the gates caused, both real
+
+**A height-report feedback loop** took the dev server's heap: the frame reported its height, the host resized the frame, the resize changed the document height, which reported again. It now reports only a height that actually changed.
+
+**Base64 of a megabyte** - the bundle carries React, and encoding it by spreading a million-element array into `String.fromCharCode` is a memory hazard for nothing. The source now rides in an inert element and the frame imports a blob it makes itself, which an opaque origin is allowed to do even though it cannot fetch a URL.
+
+### What is still not built
+
+Cell zero has not written a widget. `widgets/run-tally` was written by hand, deliberately: the contract gets proven before a manager is asked to satisfy it.
+The manager-facing half - a prompt that teaches the widget contract, and the file-writing turn - is the next piece.

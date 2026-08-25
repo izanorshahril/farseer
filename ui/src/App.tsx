@@ -2,6 +2,8 @@ import { useCallback, useEffect, useState } from "react";
 import { createBridge, type Anchor } from "./bridge";
 import { QuotaWidget } from "./widgets/quota";
 import { FleetWidget } from "./widgets/fleet";
+import { SandboxWidget } from "./SandboxWidget";
+import { GateBar } from "./GateBar";
 
 /**
  * The canvas.
@@ -30,7 +32,14 @@ const REGISTRY = {
   fleet: { title: "Cells", subtitle: "loaded definitions", render: FleetWidget },
 } as const;
 
-type WidgetId = keyof typeof REGISTRY;
+type WidgetId = string;
+
+/**
+ * A widget cell zero wrote, discovered from `widgets/` rather than compiled into
+ * this build. `28 operator surface`'s three gates apply to exactly these: the
+ * import allowlist at compile, the sandboxed render, and keep-or-undo per turn.
+ */
+type AgentWidget = { id: string; title: string; subtitle: string; cell?: string };
 
 /** The blob. Farseer never reads this shape; only the canvas does. */
 type Layout = { mounted: WidgetId[]; wide: WidgetId[] };
@@ -39,6 +48,7 @@ const DEFAULT_LAYOUT: Layout = { mounted: ["quota", "fleet"], wide: ["quota"] };
 
 export function App() {
   const [layout, setLayout] = useState<Layout | null>(null);
+  const [agentWidgets, setAgentWidgets] = useState<AgentWidget[]>([]);
   const [anchor, setAnchor] = useState<Anchor>({ widget: "canvas" });
   const [asking, setAsking] = useState(false);
   const [lastRun, setLastRun] = useState<string | null>(null);
@@ -49,11 +59,25 @@ export function App() {
       .loadState<Layout>("canvas")
       .then((stored) => setLayout(stored ?? DEFAULT_LAYOUT))
       .catch(() => setLayout(DEFAULT_LAYOUT));
+    // Discovered, not imported: a widget appears because a file exists, which
+    // is what makes "ask for a widget" a thing the operator can do.
+    fetch("/__widgets")
+      .then((response) => response.json() as Promise<AgentWidget[]>)
+      .then(setAgentWidgets)
+      .catch(() => setAgentWidgets([]));
   }, []);
 
-  const persist = useCallback((next: Layout) => {
-    setLayout(next);
-    bridge.saveState("canvas", next).catch((e: Error) => setError(e.message));
+  /**
+   * Layout edits compose: two toggles in the same tick must not race, and a
+   * closure over the last render's `layout` is exactly how one silently loses.
+   */
+  const persist = useCallback((change: (current: Layout) => Layout) => {
+    setLayout((current) => {
+      if (!current) return current;
+      const next = change(current);
+      bridge.saveState("canvas", next).catch((e: Error) => setError(e.message));
+      return next;
+    });
   }, []);
 
   const ask = useCallback(
@@ -73,6 +97,15 @@ export function App() {
 
   if (!layout) return <main className="loading">loading the canvas...</main>;
 
+  const built = Object.entries(REGISTRY).map(([id, widget]) => ({
+    id,
+    title: widget.title,
+    subtitle: widget.subtitle,
+    agent: false as const,
+  }));
+  const authored = agentWidgets.map((widget) => ({ ...widget, agent: true as const }));
+  const available = [...built, ...authored];
+
   return (
     <div className="app">
       <header>
@@ -83,29 +116,30 @@ export function App() {
           canvas - arrangement saved to farseer, not to this browser
         </span>
         <span className="grow" />
-        {REGISTRY &&
-          (Object.keys(REGISTRY) as WidgetId[]).map((id) => (
-            <button
-              key={id}
-              className={layout.mounted.includes(id) ? "chip on" : "chip"}
-              onClick={() =>
-                persist({
-                  ...layout,
-                  mounted: layout.mounted.includes(id)
-                    ? layout.mounted.filter((m) => m !== id)
-                    : [...layout.mounted, id],
-                })
-              }
-            >
-              {REGISTRY[id].title}
-            </button>
-          ))}
+        {available.map(({ id, title }) => (
+          <button
+            key={id}
+            className={layout.mounted.includes(id) ? "chip on" : "chip"}
+            onClick={() =>
+              persist((current) => ({
+                ...current,
+                mounted: current.mounted.includes(id)
+                  ? current.mounted.filter((m) => m !== id)
+                  : [...current.mounted, id],
+              }))
+            }
+          >
+            {title}
+          </button>
+        ))}
       </header>
+
+      <GateBar />
 
       <main className="canvas">
         {layout.mounted.map((id) => {
-          const widget = REGISTRY[id];
-          const Render = widget.render;
+          const widget = available.find((candidate) => candidate.id === id);
+          if (!widget) return null;
           const wide = layout.wide.includes(id);
           return (
             <section
@@ -120,22 +154,41 @@ export function App() {
                 </span>
                 <b>{widget.title}</b>
                 <span className="dim small">{widget.subtitle}</span>
+                {widget.agent && (
+                  <span className="badge agent" title="written into widgets/ and compiled here, sandboxed">
+                    authored
+                  </span>
+                )}
                 <span className="grow" />
                 <button
                   className="chip"
                   title={wide ? "make it narrow" : "make it wide"}
                   onClick={() =>
-                    persist({
-                      ...layout,
-                      wide: wide ? layout.wide.filter((w) => w !== id) : [...layout.wide, id],
-                    })
+                    persist((current) => ({
+                      ...current,
+                      wide: current.wide.includes(id)
+                        ? current.wide.filter((w) => w !== id)
+                        : [...current.wide, id],
+                    }))
                   }
                 >
                   {wide ? "narrow" : "wide"}
                 </button>
               </div>
               <div className="body">
-                <Render bridge={bridge} />
+                {widget.agent ? (
+                  <SandboxWidget
+                    id={widget.id}
+                    title={widget.title}
+                    bridge={bridge}
+                    {...("cell" in widget && widget.cell ? { cell: widget.cell } : {})}
+                  />
+                ) : (
+                  (() => {
+                    const Render = REGISTRY[widget.id as keyof typeof REGISTRY].render;
+                    return <Render bridge={bridge} />;
+                  })()
+                )}
               </div>
             </section>
           );

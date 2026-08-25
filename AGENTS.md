@@ -35,7 +35,9 @@ Widget code is authored by cell zero into `widgets/` in git and farseer never st
 
 The canvas from `28 operator surface` lives in [`ui/`](ui/README.md) - Vite, React and TypeScript, run with `bun`, and a client of `/v1` like any other per `01 cell primitive`'s headless ruling.
 The dev proxy attaches the operator token so **the browser never holds it**, widgets reach farseer only through `src/bridge.ts`, and the canvas arrangement round-trips through `PUT /v1/ui-state/canvas` rather than `localStorage`.
-The widget registry is static: `28`'s agent-authored widgets, and their three gates, are not built.
+`28`'s three gates are built and each was tested by attacking it: the **import allowlist** refuses `node:fs` and any path outside the widget's own directory at compile; the **sandboxed render** is an opaque-origin iframe where a hostile widget reached the host bridge and nothing else - not the parent page, not `localStorage`, not cookies, not a direct fetch of farseer; **keep or undo** is git scoped to `widgets/`.
+Widgets in `widgets/` are discovered and compiled by `ui/plugins/widget-host.ts`, never by the runtime, so `01 cell primitive`'s no-plugin-ABI ruling still holds.
+Cell zero has not yet written one: `widgets/run-tally` is hand-written, because the contract gets proven before a manager is asked to satisfy it.
 
 The MCP face from `02 record scope` is nested at `/v1/mcp` in the same router and process because `09 store decision` requires one process and one writer.
 The exact-pinned `rmcp` streamable-HTTP service shares `AppState`'s `Store` and loopback/token guard; only `/v1/mcp` accepts the per-manager bearer, while operator routes still require the process-wide token.
