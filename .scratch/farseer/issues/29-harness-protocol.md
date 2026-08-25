@@ -209,3 +209,35 @@ So `parse_line` **surfaces it as `permission_requested`** rather than dropping i
 `acp.rs` ships the frames and the parse it will need, proven against a real agent; nothing yet sends them in anger.
 
 Also unbuilt: `configOptions` parsing, and a `size` for the native runners, which have no source for one and should keep showing nothing.
+
+
+## Implementation note, 2026-08-26: the driver, and the bug it walked straight into
+
+`AcpSession` ([`acp_drive.rs`]) holds the conversation: spawn on a live stdin, `initialize`, `session/new`, `session/set_mode`, `session/prompt`.
+It takes **the same sink `drive` takes**, so a line arriving while farseer waits on a response it asked for is still activity - `goose acp` sends a `usage_update` before the first prompt, and it reaches the record through that path rather than being eaten by the handshake.
+
+### `drive()` cannot drive an ACP agent, and the first live run proved it by hanging
+
+`drive` drains stdout **until end of stream**, which is right for every runner farseer had: spawn, read, exit.
+An ACP agent **does not exit when a turn ends** - the session stays open for the next prompt, which is the entire point of a session.
+So waiting for EOF is waiting forever, and the first live test sat there until it was killed.
+
+This is the same family as the stdin bug on `28 operator surface`: **machinery that is correct for a one-shot runner and silently wrong for a conversational one**, presenting as a live process producing nothing.
+Farseer has now hit that shape twice from opposite directions - once writing, once reading - which is worth naming as a class rather than fixing twice.
+`drive_turn` returns at the terminal signal and leaves the session usable.
+
+### Proven live, against `goose acp`
+
+`cargo test -p farseer-runner acp_drive -- --ignored`, 2.2 seconds:
+
+- the handshake completed with `fs` and `terminal` **declined**,
+- the agent offered `auto`, `approve`, `smart_approve`, `chat`, and farseer asked for `auto` explicitly rather than trusting the default,
+- the turn answered as text,
+- and a `usage_update` named a window `size` greater than zero, which is the assertion the whole runner exists to satisfy.
+
+The test is `#[ignore]`d for the reason every live test here is: it spends a real subscription.
+Claude Code was not involved, per the operator's standing request.
+
+### Still not built
+
+Nothing **calls** `AcpSession` yet. `StartedWorker::spawn` chooses a native adapter by runner name and knows nothing about ACP, so wiring it is the next step and it needs a decision the map does not have: an ACP runner in `runners.toml` names an executable **and a subcommand** (`goose acp`, `opencode acp`), which is a shape `10 runner inventory`'s inventory has not carried before.

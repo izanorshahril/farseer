@@ -18,9 +18,9 @@
 //! and read its lines - the primitive a runner needs. The ACP runner
 //! `20 worker control channel` chose as the default path is now here
 //! ([`acp`]), built against a captured `goose acp` transcript rather than
-//! against the spec alone; **not yet built** is the stateful driver that
-//! sends its handshake, since every native runner here is one-shot and ACP is
-//! a conversation. Only Claude Code has a steering
+//! against the spec alone, with [`acp_drive`] holding the conversation it
+//! needs - every other runner here is one-shot, so `drive` reads stdout and
+//! never writes, and ACP's handshake had to grow its own counterpart. Only Claude Code has a steering
 //! path - Codex, cursor-agent and goose all restart into a new process on
 //! resume/continue rather than continuing a live one, per `10 runner inventory` (Codex,
 //! cursor-agent) and this crate's own goose probe.
@@ -33,6 +33,8 @@ pub mod goose;
 pub mod invocation;
 pub mod resolve;
 
+#[cfg(windows)]
+pub mod acp_drive;
 #[cfg(windows)]
 pub mod drive;
 #[cfg(windows)]
