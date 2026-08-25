@@ -478,10 +478,11 @@ impl StartedWorker {
         // recorded rather than a second way of recording it.
         let opened = self.acp_opened.take().map(|opened| {
             farseer_runner::claude_code::SessionInfo {
-                // ACP has a `session/set_model`, but `29 harness protocol`
-                // found it unstable upstream and broken in shipped clients, and
-                // `goose acp` names no model at all. Absent rather than guessed.
-                model: None,
+                // Not from `session/set_model`, which `29 harness protocol`
+                // found unstable upstream and broken in shipped clients - from
+                // the agent's own `configOptions`. `opencode acp` names a model
+                // there and no provider; `goose acp` does the reverse.
+                model: opened.model().map(str::to_string),
                 provider: opened.provider().map(str::to_string),
                 session_id: Some(opened.session_id),
             }
@@ -1562,7 +1563,24 @@ mod tests {
     /// Run with: `cargo test -p farseer-manager acp -- --ignored --nocapture`
     #[test]
     #[ignore = "spawns a real `goose acp` and spends a subscription"]
-    fn an_acp_run_reaches_the_record_with_a_context_window() {
+    fn an_acp_run_on_goose_reaches_the_record_with_a_context_window() {
+        one_acp_run("goose-acp");
+    }
+
+    /// The second agent, and the reason `ACP_RUNNERS` claims farseer has *seen*
+    /// each entry's output rather than that ACP agents work in general.
+    ///
+    /// `opencode acp` advertises **no modes**, streams a separate
+    /// `agent_thought_chunk`, and names a **model** where goose names a
+    /// **provider** - three differences a one-agent adapter would have called
+    /// the protocol.
+    #[test]
+    #[ignore = "spawns a real `opencode acp` and spends a subscription"]
+    fn an_acp_run_on_opencode_reaches_the_record_with_a_context_window() {
+        one_acp_run("opencode-acp");
+    }
+
+    fn one_acp_run(runner: &str) {
         let store = Store::open_in_memory().unwrap();
         let spec = WorkerContractSpec {
             run_id: RunId::new(),
@@ -1570,7 +1588,7 @@ mod tests {
             cell_id: CellId::new("zero"),
             goal: "Say hello in one short sentence.".into(),
             workspace: WorkspaceStrategy::Worktree,
-            runner: "goose-acp".into(),
+            runner: runner.into(),
             tool_grants: vec![],
             autonomy_ceiling: Irreversibility::Reversible,
             budget: Budget::default(),

@@ -97,7 +97,17 @@ where
     )?;
     let opened = acp::session_opened(&answer.to_string()).ok_or(AcpError::NoSession)?;
 
-    if let Some(mode) = mode {
+    // Only if the agent said it would take it. `opencode acp` advertises **no
+    // modes at all**, and asking it to set one is a JSON-RPC error that kills
+    // the handshake before the goal is ever sent - so a `goose`-shaped
+    // assumption would have failed every `opencode-acp` run, which is what
+    // running the second agent is for.
+    //
+    // The consequence is recorded rather than hidden: an agent with no modes
+    // runs in whatever it opened in, and `29 harness protocol` notes that ACP
+    // does not standardise the names, so farseer cannot ask for the equivalent
+    // by guessing at a synonym.
+    if let Some(mode) = mode.filter(|mode| opened.accepts_mode(mode)) {
         let id = take(next_id);
         let frame = acp::set_mode_frame(id, &opened.session_id, mode);
         request(process, &frame, id, "session/set_mode", on_line)?;

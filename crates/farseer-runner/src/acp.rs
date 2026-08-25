@@ -159,9 +159,33 @@ impl SessionOpened {
     /// so an agent using another word reports nothing here rather than farseer
     /// guessing at a synonym.
     pub fn provider(&self) -> Option<&str> {
+        self.setting("provider")
+    }
+
+    /// The model this session will actually use, if the agent names one.
+    ///
+    /// `opencode acp` answers this and names no provider; `goose acp` does the
+    /// opposite. Neither is a gap in the other - they are different agents
+    /// answering the questions they can, which is why both are read out of the
+    /// same untouched `configOptions` rather than from a shape farseer imposed.
+    pub fn model(&self) -> Option<&str> {
+        self.setting("model")
+    }
+
+    /// Whether the agent will accept a mode change to `mode_id`.
+    ///
+    /// An agent that advertises **no modes at all** returns false for every id,
+    /// which is the point: `opencode acp` has no `modes` in its `session/new`
+    /// result, and asking it to set one is a JSON-RPC error that fails the run
+    /// before the goal is ever sent.
+    pub fn accepts_mode(&self, mode_id: &str) -> bool {
+        self.available_modes.iter().any(|mode| mode == mode_id)
+    }
+
+    fn setting(&self, id: &str) -> Option<&str> {
         self.config
             .iter()
-            .find(|(id, _)| id == "provider")
+            .find(|(key, _)| key == id)
             .map(|(_, value)| value.as_str())
     }
 }
@@ -464,6 +488,8 @@ mod tests {
             opened.available_modes,
             vec!["auto", "approve", "smart_approve", "chat"]
         );
+        assert!(opened.accepts_mode("auto"));
+        assert!(!opened.accepts_mode("yolo"));
     }
 
     /// Trimmed from the real `session/new` result, which carried a
@@ -475,6 +501,20 @@ mod tests {
         assert_eq!(opened.provider(), Some("chatgpt_codex"));
         // Kept whole: which keys an agent offers is an observation too.
         assert_eq!(opened.config.len(), 2);
+    }
+
+    /// Trimmed from the real `opencode acp` 1.18.22 `session/new` result on
+    /// 2026-08-26, which named a model, offered **no modes at all**, and named
+    /// no provider.
+    #[test]
+    fn a_second_agent_answers_the_other_half_of_the_same_question() {
+        let line = r#"{"jsonrpc":"2.0","id":2,"result":{"sessionId":"ses_fc4f","configOptions":[{"id":"model","name":"Model","category":"model","type":"select","currentValue":"opencode/big-pickle"}]}}"#;
+        let opened = session_opened(line).unwrap();
+        assert_eq!(opened.model(), Some("opencode/big-pickle"));
+        assert_eq!(opened.provider(), None);
+        // And the thing that would have failed every run: no modes advertised.
+        assert!(opened.available_modes.is_empty());
+        assert!(!opened.accepts_mode("auto"));
     }
 
     #[test]

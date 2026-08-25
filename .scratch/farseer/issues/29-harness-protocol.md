@@ -350,3 +350,37 @@ That value is goose delegating through the already-authenticated `codex` CLI, wh
 `SessionOpened.config` keeps the agent's whole `configOptions` as `id -> currentValue`, and `provider()` reads the one key farseer displays. ACP does not standardise those ids, so an agent that names its account something else reports nothing rather than farseer guessing at a synonym - and the map is still there to see what it *did* offer.
 
 `SessionInfo` growing a third field pushed `ManagerError::Cancelled` past clippy's size threshold, so `session` is boxed exactly as `window` already was, for the reason `window`'s own doc comment gives.
+
+
+## Implementation note, 2026-08-26: the second agent, which found the first one's assumptions
+
+`ACP_RUNNERS` claims an entry means farseer has **seen that agent's output**. `opencode-acp` was in the table having never been run, so the claim was false for half of it.
+
+Running it found three differences, and **one of them would have failed every `opencode-acp` run**.
+
+### It advertises no modes at all
+
+`opencode acp` 1.18.22 returns a `session/new` result with **no `modes` key**. The handshake was sending `session/set_mode` unconditionally, which is a JSON-RPC error against an agent that has no modes - and it arrives **before the goal is ever sent**, so the run dies in `bootstrap` having done nothing.
+
+A `goose`-shaped assumption, generalised into "the protocol". The handshake now asks only when the agent said it would accept that id, and an agent with no modes runs in whatever it opened in.
+
+That is a real gap rather than a fix: `29` already recorded that ACP does not standardise mode names, and this is the same hole seen from the other side - farseer cannot request "do not ask" from an agent that never named it, and must not guess at a synonym.
+
+### It names a model where goose names a provider
+
+```json
+{"model":"opencode/big-pickle","provider":null,"runner":"opencode-acp","session_id":"ses_fc4e..."}
+{"model":null,"provider":"chatgpt_codex","runner":"goose-acp","session_id":"20260825_17"}
+```
+
+Both out of the same untouched `configOptions`. Neither is a gap in the other - two agents answering the questions they can - and this is what `SessionOpened.config` being kept whole was for.
+
+It also fills `RunRow.model` from an ACP runner, which no native runner but Claude Code manages.
+
+### It streams its thinking separately
+
+`agent_thought_chunk`, distinct from `agent_message_chunk`. Unmapped, and correctly so: `05 run state model` says token streams are activity. Worth noting that it is the nearest observable to the **thinking level** `28 operator surface` asked for - the presence and volume of reasoning, rather than a setting farseer chose.
+
+### And the trade this ticket named holds
+
+`opencode acp` reports `used: 12352, size: 200000` and `cost: {"amount": 0}` - a context window and a subscription cost of nothing, with **no subscription window** anywhere. Same shape as goose. `27 quota accounting` stays blind on ACP, exactly as section 3 predicted.
