@@ -6,6 +6,8 @@
 #
 # Note what makes it differ from `zero.toml`: roster, tools and policy values.
 # Nothing else. That is `08`'s falsification test, in the repository.
+# No shell-capable tool is granted here intentionally.
+# Current native LLM runners expose shell-equivalent reach, so farseer fails closed before launching a native runner in this cell.
 
 cell_id = "social"
 name = "Social"

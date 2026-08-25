@@ -1,10 +1,9 @@
-//! Maps Claude Code's stream-json line stream onto the contract `05` wrote
-//! and `20`/`10` scored this runner against. [`crate::invocation::build_args`]
-//! is the production invocation - `--print --output-format stream-json
-//! --verbose`, no `--input-format` or `--include-partial-messages` - and this
-//! module parses whatever that emits, so a `content_block_start`/`stream_event`
-//! line is only ever seen when a caller opts into `--include-partial-messages`
-//! separately.
+//! Maps Claude Code's stream-json line stream onto the contract `05` wrote and `20`/`10` scored this runner against.
+//! [`crate::invocation::build_args`] selects the production invocation for the process role.
+//! A manager uses `--input-format stream-json` and receives its initial goal plus later steer messages through live stdin.
+//! A worker omits `--input-format` and receives one positional goal so its invocation ends after one turn.
+//! Neither production invocation uses `--include-partial-messages`.
+//! A `content_block_start` or `stream_event` line is therefore seen only when another caller opts into partial messages.
 //!
 //! **Every successfully parsed line is activity**, full stop - that is what
 //! solves `05`'s twenty-minute-reasoning problem, and it does not depend on
@@ -29,8 +28,9 @@
 //! first, under the same `session_id`, and each turn produced its **own**
 //! terminal `result` event rather than one at the very end. `invocation.rs`'s
 //! doc comment previously called this envelope unobserved; it is now
-//! observed and cited here, though wiring a live process's stdin to a later
-//! HTTP request is real remaining work this probe did not attempt.
+//! observed and cited here. Production wires the live process's stdin to later
+//! HTTP steer requests through the manager's `SteerHandle`; this probe covered
+//! Claude Code's protocol, not the API path around it.
 
 use farseer_core::event::EventKind;
 use farseer_core::run::Outcome;
@@ -45,6 +45,8 @@ pub enum RunnerSignal {
         payload: Value,
     },
     RateLimit(RateLimitInfo),
+    /// User-visible terminal text which a supervising manager can relay.
+    Output(String),
     Finished(FinishedSignal),
 }
 
@@ -97,12 +99,20 @@ pub fn parse_line(line: &str) -> Result<Vec<RunnerSignal>, ParseError> {
         return Ok(Vec::new());
     };
 
+    if kind == "result" {
+        let mut signals = Vec::new();
+        if let Some(result) = v.get("result").and_then(Value::as_str) {
+            signals.push(RunnerSignal::Output(result.to_string()));
+        }
+        signals.push(RunnerSignal::Finished(finished(&v)));
+        return Ok(signals);
+    }
+
     let signal = match kind {
         "rate_limit_event" => v
             .get("rate_limit_info")
             .and_then(rate_limit)
             .map(RunnerSignal::RateLimit),
-        "result" => Some(RunnerSignal::Finished(finished(&v))),
         "system" if v.get("subtype").and_then(Value::as_str) == Some("compact_boundary") => {
             Some(RunnerSignal::Progress {
                 kind: EventKind::new(EventKind::CONTEXT_COMPACTED),
@@ -241,17 +251,20 @@ mod tests {
 
     #[test]
     fn a_successful_result_reports_ok_and_the_cost_in_micros() {
-        let line = r#"{"type":"result","subtype":"success","total_cost_usd":0.32266,
+        let line = r#"{"type":"result","subtype":"success","result":"ok","total_cost_usd":0.32266,
                         "usage":{"input_tokens":100,"output_tokens":50}}"#;
 
         let signals = parse_line(line).unwrap();
         assert_eq!(
             signals,
-            [RunnerSignal::Finished(FinishedSignal {
-                outcome: Outcome::Ok,
-                cost_usd_micros: Some(322_660),
-                tokens: Some(150),
-            })]
+            [
+                RunnerSignal::Output("ok".into()),
+                RunnerSignal::Finished(FinishedSignal {
+                    outcome: Outcome::Ok,
+                    cost_usd_micros: Some(322_660),
+                    tokens: Some(150),
+                })
+            ]
         );
     }
 

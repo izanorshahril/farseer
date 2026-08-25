@@ -14,14 +14,10 @@
 //! and the exact failure mode `10` warns reads as a hang to anything
 //! watching only for activity.
 //!
-//! **Progress mapping is intentionally shallow.** `20` names the `item.*`
-//! and `turn.*` families but no ticket captured a literal payload for
-//! anything but the terminal `turn.completed`/`turn.failed` and the four
-//! `usage` field names on it. Guessing the rest would break `10`'s own rule:
-//! what a runner exposes must be observed, not read off a page. Every
-//! `item.*` line - tool calls included - counts as activity only, same as
-//! an unrecognised Claude Code line, until a real payload is captured to map
-//! it properly.
+//! Progress mapping remains intentionally shallow.
+//! `10 runner inventory` records the 2026-08-25 local Codex probe which captured one answer shape exactly: `{"type":"item.completed","item":{"id":"item_0","type":"agent_message","text":"codex-ok"}}`.
+//! That shape becomes terminal text for a supervising manager.
+//! Other `item.*` lines, including tool calls, remain activity-only until a literal payload is captured.
 
 use farseer_core::run::{Outcome, WorkerContractSpec};
 use serde_json::Value;
@@ -50,10 +46,19 @@ pub fn parse_line(line: &str) -> Result<Vec<RunnerSignal>, ParseError> {
     let signal = match kind {
         "turn.completed" => Some(RunnerSignal::Finished(finished(&v, Outcome::Ok))),
         "turn.failed" => Some(RunnerSignal::Finished(finished(&v, Outcome::Failed))),
-        // `item.*`: activity only, per the module doc comment.
+        "item.completed" => agent_message(&v).map(RunnerSignal::Output),
+        // Other `item.*` shapes are activity only, per the module doc comment.
         _ => None,
     };
     Ok(signal.into_iter().collect())
+}
+
+fn agent_message(v: &Value) -> Option<String> {
+    let item = v.get("item")?;
+    if item.get("type").and_then(Value::as_str) != Some("agent_message") {
+        return None;
+    }
+    item.get("text").and_then(Value::as_str).map(str::to_string)
 }
 
 /// `10`: Codex reports tokens only, never cost - `total_cost_usd` has no
@@ -146,9 +151,16 @@ mod tests {
     }
 
     #[test]
-    fn an_item_line_is_activity_only_and_yields_no_signal() {
-        // The exact case the module doc comment names: no ticket captured a
-        // literal item.* payload, so this must not be guessed at.
+    fn a_completed_agent_message_carries_the_text_the_manager_must_relay() {
+        let line = r#"{"type":"item.completed","item":{"id":"item_0","type":"agent_message","text":"codex-ok"}}"#;
+        assert_eq!(
+            parse_line(line).unwrap(),
+            [RunnerSignal::Output("codex-ok".into())]
+        );
+    }
+
+    #[test]
+    fn an_unverified_item_shape_is_activity_only() {
         let line = r#"{"type":"item.command_execution","command":"ls"}"#;
         assert_eq!(parse_line(line).unwrap(), Vec::new());
     }

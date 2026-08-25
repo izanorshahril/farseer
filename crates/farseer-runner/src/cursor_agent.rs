@@ -63,13 +63,17 @@ pub fn parse_line(line: &str) -> Result<Vec<RunnerSignal>, ParseError> {
     let Some(kind) = v.get("type").and_then(Value::as_str) else {
         return Ok(Vec::new());
     };
-    let signal = match kind {
-        "result" => Some(RunnerSignal::Finished(finished(&v))),
-        // `system`, `user`, `assistant`, `thinking`, and any `tool_call` -
-        // activity only, per the module doc comment.
-        _ => None,
-    };
-    Ok(signal.into_iter().collect())
+    if kind == "result" {
+        let mut signals = Vec::new();
+        if let Some(result) = v.get("result").and_then(Value::as_str) {
+            signals.push(RunnerSignal::Output(result.to_string()));
+        }
+        signals.push(RunnerSignal::Finished(finished(&v)));
+        return Ok(signals);
+    }
+    // `system`, `user`, `assistant`, `thinking`, and any `tool_call` are
+    // activity only, per the module doc comment.
+    Ok(Vec::new())
 }
 
 /// `10`: cursor-agent reports tokens only, never cost - there is no
@@ -145,11 +149,14 @@ mod tests {
         let signals = parse_line(line).unwrap();
         assert_eq!(
             signals,
-            [RunnerSignal::Finished(FinishedSignal {
-                outcome: Outcome::Ok,
-                cost_usd_micros: None,
-                tokens: Some(14228 + 45 + 4992),
-            })]
+            [
+                RunnerSignal::Output("ok".into()),
+                RunnerSignal::Finished(FinishedSignal {
+                    outcome: Outcome::Ok,
+                    cost_usd_micros: None,
+                    tokens: Some(14228 + 45 + 4992),
+                })
+            ]
         );
     }
 

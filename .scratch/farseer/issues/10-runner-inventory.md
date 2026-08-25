@@ -350,3 +350,45 @@ Both fog entries can now graduate:
 
 - **Routing policy** - exhaustion is observable in advance on the primary runner, and inferable only after failure on the other two. That asymmetry is the shape a routing design has to accommodate.
 - **Credit and quota accounting** - the quantity, the window and the reset are all available, from one runner, for free.
+
+## Implementation probes added 2026-08-25
+
+These observations extend the runner inventory with wire formats needed by the manager loop.
+They do not change the ticket's routing or quota conclusions.
+
+### Claude Code project HTTP MCP config
+
+The installed Claude Code 2.1.233 generated a project-scoped config through `claude mcp add --transport http --scope project`.
+The generated shape was:
+
+```json
+{"mcpServers":{"farseer":{"type":"http","url":"http://127.0.0.1:<port>/v1/mcp","headers":{"Authorization":"Bearer <token>"}}}}
+```
+
+Production may therefore pass that file through `--mcp-config <file> --strict-mcp-config` without guessing the schema.
+The disposable probe directory was deleted after capture.
+
+### Codex terminal answer
+
+The installed Codex CLI emitted this line for a one-word answer:
+
+```json
+{"type":"item.completed","item":{"id":"item_0","type":"agent_message","text":"codex-ok"}}
+```
+
+A `turn.completed` line followed with usage.
+The adapter maps only this verified `item.completed` `agent_message` text and leaves other `item.*` shapes activity-only.
+
+### Claude Code budget enforcement and manager launch flags
+
+The installed Claude Code 2.1.233 was run with `--max-budget-usd 0.000001` and a one-word goal.
+It generated the answer, reported `total_cost_usd: 0.131195`, and only then returned terminal subtype `error_max_budget_usd` with `terminal_reason: budget_exhausted`.
+The requested cap was exceeded by more than five orders of magnitude before the flag acted.
+
+So `--max-budget-usd` is post-spend detection on this version, not a worker-contract boundary.
+Farseer must refuse a bounded currency budget before spawning any current native runner rather than pretend this flag enforces it.
+
+The full ignored manager-loop test also ran the production Claude invocation successfully with `--input-format stream-json`, `--append-system-prompt`, `--mcp-config`, `--strict-mcp-config`, and `--allowedTools` before the manager called farseer's MCP face and reached a Goose worker.
+That verifies the combined manager launch shape against the real CLI rather than argv construction alone.
+The same run's `system/init` event still listed Claude's ordinary built-in tools, so `--allowedTools` auto-authorizes the named MCP tools but is not an exclusive tool allowlist.
+Farseer therefore requires the pinned cell to state an explicit shell-capable tool grant before launching any of the current native LLM runners, matching `12 autonomy and deny list`'s rule that a shell grant means everything is granted.

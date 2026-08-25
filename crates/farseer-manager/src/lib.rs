@@ -1,31 +1,23 @@
-//! The manager loop's first slice: run one [`WorkerContract`] against the
-//! Claude Code runner, end to end, with the run row and its progress events
-//! landing in the [`Store`].
+//! Executes one sealed [`WorkerContract`] against a native runner, with the run row and progress events landing in the [`Store`].
 //!
-//! **What this is not.** There is no manager loop here deciding delegation;
-//! this is the synchronous execution path `farseer-api`'s handlers for `05`'s
-//! four manager verbs - cancel, rerun, rescope, and now steer, via
-//! [`SteerHandle`] - call into.
+//! The manager's delegation decision remains in the live LLM conversation rather than this crate.
+//! `farseer-api` exposes `delegate_to_worker` through MCP, then calls this same synchronous engine for the selected roster worker.
+//! The four verbs from [Run state model and control semantics] also call this engine.
 //!
-//! **The watchdog only reports.** `18` and `05` are explicit: `120s` marks a
-//! run `stalled`, `600s` flags `likely-hung`, and there is **no auto-kill** -
-//! a run reasoning for twenty minutes is not a bug to correct by force. So
-//! [`LivenessHandle`] answers "how long has this run been silent", queryable
-//! from any thread while [`StartedWorker::run_to_completion`] blocks inside
-//! `read_line` on another one; nothing in this crate ever calls
-//! [`CancelToken`] on the watchdog's behalf. Only a human, through a manager
-//! verb this crate does not implement yet, does that.
+//! [Run state model and control semantics]: ../../../.scratch/farseer/issues/05-run-state-model.md
 //!
-//! **`CancelToken::cancel` produces `05`'s `Cancelled` outcome, not `Failed`.**
-//! Closing the job ends the process before its terminal `result` line ever
-//! arrives, so [`StartedWorker::run_to_completion`] sees end-of-stream with
-//! no [`RunnerSignal::Finished`] - indistinguishable, on its own, from a
-//! crash. `CancelToken::was_cancelled` is the missing fact: every clone of a
-//! token shares one flag, so asking any of them - including a fresh one
-//! fetched after the process has already exited - answers whether ending it
-//! was deliberate. `05` is explicit that `cancelled` is never `failed`, and
-//! this is what makes the record honest about a human choosing not to
-//! proceed rather than something having broken.
+//! **The watchdog only reports.**
+//! [Hang detection prior art] and [Run state model and control semantics] make `120s` stalled, `600s` likely-hung, and no auto-kill.
+//! [`LivenessHandle`] remains queryable while [`StartedWorker::run_to_completion`] blocks on another thread, and only the API's explicit cancel verb closes the job.
+//!
+//! **`CancelToken::cancel` produces `Cancelled`, not `Failed`.**
+//! Closing the job can happen before any terminal result or after a live stream-json session emitted a successful earlier turn and stayed open for steering.
+//! [`CancelToken::was_cancelled`] is authoritative in both cases because every clone shares one flag.
+//! A terminal report observed before cancellation keeps its cost, tokens, and result while its outcome becomes `Cancelled`.
+//! Cancellation before any terminal result carries unknown report values and records zero usage.
+//! This keeps the record honest about a human choosing not to proceed rather than something breaking.
+//!
+//! [Hang detection prior art]: ../../../.scratch/farseer/issues/18-hang-detection-prior-art.md
 //!
 //! Windows only, like the runner it drives - `farseer-runner`'s `spawn` and
 //! `drive` modules are themselves `cfg(windows)`, so this crate would fail to
@@ -44,12 +36,12 @@
 
 #![cfg(windows)]
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use farseer_core::run::{ActivityClock, Liveness, LivenessThresholds, WorkerContract};
-use farseer_core::{Actor, EventKind, NewEvent, Outcome, Seq};
+use farseer_core::{Actor, CellDefinition, EventKind, NewEvent, Outcome, Seq};
 use farseer_runner::claude_code::{ParseError, RunnerSignal};
 use farseer_runner::drive::drive;
 use farseer_runner::resolve::resolve;
@@ -88,10 +80,10 @@ pub enum ManagerError {
     Store(#[from] StoreError),
     #[error("the process exited without ever emitting a terminal result")]
     NoResult,
-    /// `05`: never `Failed`. A human, via `CancelToken::cancel`, decided not
-    /// to proceed - nothing broke.
+    /// [Run state model and control semantics] says explicit cancellation is never `Failed`.
+    /// The report preserves any terminal cost, tokens, and result observed before cancellation.
     #[error("the run was cancelled")]
-    Cancelled,
+    Cancelled(RunReport),
 }
 
 #[derive(Debug)]
@@ -99,6 +91,64 @@ pub struct RunReport {
     pub outcome: Outcome,
     pub cost_usd_micros: Option<i64>,
     pub tokens: Option<i64>,
+    /// User-visible terminal text for a supervising manager to relay.
+    pub result: Option<String>,
+}
+
+/// Which role the process has in the cell.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum RunRole {
+    Manager,
+    #[default]
+    Worker,
+}
+
+pub const RUN_ROLE_FIELD: &str = "_farseer_role";
+pub const MANAGER_CELL_FIELD: &str = "_farseer_manager_cell";
+
+impl RunRole {
+    pub fn as_record_str(self) -> &'static str {
+        match self {
+            Self::Manager => "manager",
+            Self::Worker => "worker",
+        }
+    }
+
+    pub fn from_record_str(value: &str) -> Option<Self> {
+        match value {
+            "manager" => Some(Self::Manager),
+            "worker" => Some(Self::Worker),
+            _ => None,
+        }
+    }
+}
+
+/// Process launch facts which are not fields of the immutable worker contract.
+#[derive(Debug, Clone)]
+pub struct RunOptions {
+    /// Who caused this run to be queued in farseer's record.
+    pub actor: Actor,
+    pub role: RunRole,
+    /// The run's pinned cell definition snapshot, never a live reload lookup.
+    /// Managers use it to build their runtime context; delegated workers retain
+    /// it so an operator rerun can reapply the same authority and worker cap.
+    pub manager_cell: Option<CellDefinition>,
+    /// Manager-only Claude Code MCP config generated after the API binds.
+    pub claude_mcp_config: Option<PathBuf>,
+    /// Manager identity and roster guidance, separate from the operator's goal.
+    pub claude_append_system_prompt: Option<String>,
+}
+
+impl Default for RunOptions {
+    fn default() -> Self {
+        Self {
+            actor: Actor::Operator,
+            role: RunRole::Worker,
+            manager_cell: None,
+            claude_mcp_config: None,
+            claude_append_system_prompt: None,
+        }
+    }
 }
 
 /// A worker process, spawned and waiting to be driven.
@@ -240,9 +290,11 @@ impl StartedWorker {
         mut self,
         sink: &impl RunSink,
         contract: &WorkerContract,
+        progress_actor: Actor,
         mut now_ms: impl FnMut() -> i64,
     ) -> Result<RunReport, ManagerError> {
         let mut report = None;
+        let mut output = None;
         let mut store_err = None;
         let cancel_on_store_failure = self.proc.cancel_token();
         let activity = Arc::clone(&self.activity);
@@ -273,7 +325,7 @@ impl StartedWorker {
                             contract.cell_id.clone(),
                             contract.run_id,
                             kind,
-                            Actor::Worker,
+                            progress_actor,
                             now_ms(),
                             payload,
                         );
@@ -285,11 +337,13 @@ impl StartedWorker {
                             return;
                         }
                     }
+                    RunnerSignal::Output(text) => output = Some(text),
                     RunnerSignal::Finished(f) => {
                         report = Some(RunReport {
                             outcome: f.outcome,
                             cost_usd_micros: f.cost_usd_micros,
                             tokens: f.tokens,
+                            result: output.clone(),
                         });
                     }
                     // `27`'s quota accounting is not wired yet: observed,
@@ -302,31 +356,44 @@ impl StartedWorker {
         if let Some(e) = store_err {
             return Err(e.into());
         }
+        // A stream-json process can emit a terminal result for one turn and
+        // remain alive waiting for a later steer message. If the operator then
+        // closes that live session, the explicit cancellation is authoritative
+        // for the run even though an earlier turn completed successfully.
+        let was_cancelled = self.proc.cancel_token().was_cancelled();
         match report {
-            Some(report) => Ok(report),
-            // A fresh token still answers correctly: the flag it reads is
-            // shared with every clone, including whichever one an API
-            // handler or another thread actually called `cancel()` on.
-            None if self.proc.cancel_token().was_cancelled() => Err(ManagerError::Cancelled),
+            Some(mut report) => {
+                if report.result.is_none() {
+                    report.result = output;
+                }
+                if was_cancelled {
+                    report.outcome = Outcome::Cancelled;
+                    Err(ManagerError::Cancelled(report))
+                } else {
+                    Ok(report)
+                }
+            }
+            None if was_cancelled => Err(ManagerError::Cancelled(RunReport {
+                outcome: Outcome::Cancelled,
+                cost_usd_micros: None,
+                tokens: None,
+                result: None,
+            })),
             None => Err(ManagerError::NoResult),
         }
     }
 }
 
-/// `contract.runner` picks the process and the stream-json dialect:
-/// `claude-code`, `codex`, or `cursor-agent` - the three native runners `10`
-/// measured. The ACP runner `20` chose as the default path is not
-/// implemented, so anything else is `UnsupportedRunner`.
+/// `contract.runner` selects one of the four verified native stream-json dialects: Claude Code, Codex, cursor-agent, or Goose.
+/// The ACP runner from `20 worker control channel` remains unimplemented, so anything else is `UnsupportedRunner`.
 ///
-/// **Bootstraps here, before returning.** [`StartedWorker::bootstrap`]'s doc
-/// comment explains why: the goal has to be on stdin before this worker's
-/// [`SteerHandle`] is ever exposed to a caller, and `run_worker`'s
-/// `on_started` - the callback that does that - only fires once this
-/// function has already returned.
+/// A Claude Code manager bootstraps the goal onto live stdin before exposing its steer handle.
+/// A Claude Code worker receives one positional goal and no live-input mode, so a synchronous delegation returns after one turn instead of waiting forever for steering.
 pub fn start_worker(
     contract: &WorkerContract,
     cwd: &Path,
     thresholds: LivenessThresholds,
+    options: &RunOptions,
 ) -> Result<StartedWorker, ManagerError> {
     let started = match contract.runner.as_str() {
         "claude-code" => {
@@ -334,11 +401,19 @@ pub fn start_worker(
                 .ok_or_else(|| ManagerError::ExecutableNotFound("claude".into()))?;
             StartedWorker::spawn(
                 &exe,
-                &farseer_runner::invocation::build_args(contract),
+                &farseer_runner::invocation::build_args(
+                    contract,
+                    farseer_runner::invocation::ClaudeCodeLaunch {
+                        live_input: options.role == RunRole::Manager,
+                        mcp_config: options.claude_mcp_config.as_deref(),
+                        append_system_prompt: options.claude_append_system_prompt.as_deref(),
+                    },
+                ),
                 cwd,
                 thresholds,
                 farseer_runner::claude_code::parse_line,
-                Some(farseer_runner::claude_code::steer_envelope),
+                (options.role == RunRole::Manager)
+                    .then_some(farseer_runner::claude_code::steer_envelope as fn(&str) -> String),
             )
         }
         "codex" => {
@@ -407,56 +482,84 @@ pub fn run_worker(
     contract: &WorkerContract,
     cwd: &Path,
     thresholds: LivenessThresholds,
+    options: &RunOptions,
     mut now_ms: impl FnMut() -> i64,
     on_started: impl FnOnce(CancelToken, LivenessHandle, Option<SteerHandle>),
 ) -> Result<RunReport, ManagerError> {
     let started_ts = now_ms();
     sink.upsert_run(&row(contract, None, 0, 0, started_ts, None))?;
-    // `05`: immutability is what makes "what was this worker allowed to do"
-    // have one answer after the fact. The run row does not carry the goal or
-    // the grants, so this event is the only place that answer survives the
-    // process exiting - and it is what a re-run or re-scope reads back to
-    // reconstruct the contract. Actor is `Operator` because every caller
-    // today is HTTP-instructed; this hardcodes the current truth rather than
-    // guessing at a manager-attributed one that does not exist yet.
+    // `05 run state model`: immutability makes the sealed contract one durable
+    // answer after the process exits. The same payload pins whether this was a
+    // manager or worker and snapshots the manager definition used for later
+    // re-run or re-scope. The caller supplies who caused the queue operation.
+    let mut queued_payload = serde_json::to_value(contract).unwrap_or(serde_json::Value::Null);
+    if let Some(payload) = queued_payload.as_object_mut() {
+        payload.insert(
+            RUN_ROLE_FIELD.into(),
+            serde_json::Value::String(options.role.as_record_str().into()),
+        );
+        if let Some(cell) = &options.manager_cell {
+            payload.insert(
+                MANAGER_CELL_FIELD.into(),
+                serde_json::to_value(cell).unwrap_or(serde_json::Value::Null),
+            );
+        }
+    }
     sink.append(&NewEvent::new(
         contract.cell_id.clone(),
         contract.run_id,
         EventKind::new(EventKind::RUN_QUEUED),
-        Actor::Operator,
+        options.actor,
         started_ts,
-        serde_json::to_value(contract).unwrap_or(serde_json::Value::Null),
+        queued_payload,
     ))?;
 
-    let result = start_worker(contract, cwd, thresholds).and_then(|started| {
+    let result = start_worker(contract, cwd, thresholds, options).and_then(|started| {
         on_started(
             started.cancel_token(),
             started.liveness_handle(),
             started.steer_handle(),
         );
-        started.run_to_completion(sink, contract, &mut now_ms)
+        let progress_actor = match options.role {
+            RunRole::Manager => Actor::Manager,
+            RunRole::Worker => Actor::Worker,
+        };
+        started.run_to_completion(sink, contract, progress_actor, &mut now_ms)
     });
 
     let finished_ts = now_ms();
-    let (outcome, usd_micros, tokens) = match &result {
+    sink.upsert_run(&finished_row(contract, &result, started_ts, finished_ts))?;
+
+    result
+}
+
+fn finished_row(
+    contract: &WorkerContract,
+    result: &Result<RunReport, ManagerError>,
+    started_ts: i64,
+    finished_ts: i64,
+) -> RunRow {
+    let (outcome, usd_micros, tokens) = match result {
         Ok(report) => (
             report.outcome,
             report.cost_usd_micros.unwrap_or(0).max(0) as u64,
             report.tokens.unwrap_or(0).max(0) as u64,
         ),
-        Err(ManagerError::Cancelled) => (Outcome::Cancelled, 0, 0),
+        Err(ManagerError::Cancelled(report)) => (
+            Outcome::Cancelled,
+            report.cost_usd_micros.unwrap_or(0).max(0) as u64,
+            report.tokens.unwrap_or(0).max(0) as u64,
+        ),
         Err(_) => (Outcome::Failed, 0, 0),
     };
-    sink.upsert_run(&row(
+    row(
         contract,
         Some(outcome),
         usd_micros,
         tokens,
         started_ts,
         Some(finished_ts),
-    ))?;
-
-    result
+    )
 }
 
 fn row(
@@ -545,11 +648,14 @@ mod tests {
             r#"{"type":"result","subtype":"success","total_cost_usd":0.05,"usage":{"input_tokens":10,"output_tokens":5}}"#,
         ]);
 
-        let report = started.run_to_completion(&store, &contract, || 1).unwrap();
+        let report = started
+            .run_to_completion(&store, &contract, Actor::Worker, || 1)
+            .unwrap();
 
         assert_eq!(report.outcome, Outcome::Ok);
         assert_eq!(report.cost_usd_micros, Some(50_000));
         assert_eq!(report.tokens, Some(15));
+        assert_eq!(report.result, None);
 
         let events = store.scan(0, 10, &ScanFilter::default()).unwrap();
         assert_eq!(
@@ -571,7 +677,9 @@ mod tests {
             r#"{"type":"result","subtype":"success"}"#,
         ]);
 
-        let report = started.run_to_completion(&store, &contract, || 1).unwrap();
+        let report = started
+            .run_to_completion(&store, &contract, Actor::Worker, || 1)
+            .unwrap();
         assert_eq!(report.outcome, Outcome::Ok);
         assert!(
             store
@@ -610,6 +718,7 @@ mod tests {
             &contract,
             &std::env::temp_dir(),
             LivenessThresholds::default(),
+            &RunOptions::default(),
             || {
                 tick += 1;
                 tick
@@ -622,6 +731,40 @@ mod tests {
         assert_eq!(row.outcome.as_deref(), Some("failed"));
         assert!(row.finished_ts.is_some());
         assert!(row.started_ts < row.finished_ts.unwrap());
+    }
+
+    #[test]
+    fn a_cancelled_run_row_preserves_usage_from_an_observed_terminal_result() {
+        let contract = contract();
+        let result = Err(ManagerError::Cancelled(RunReport {
+            outcome: Outcome::Cancelled,
+            cost_usd_micros: Some(123_456),
+            tokens: Some(789),
+            result: Some("reported result".into()),
+        }));
+
+        let row = finished_row(&contract, &result, 1, 2);
+
+        assert_eq!(row.outcome.as_deref(), Some("cancelled"));
+        assert_eq!(row.usd_micros, 123_456);
+        assert_eq!(row.tokens, 789);
+    }
+
+    #[test]
+    fn a_cancelled_run_row_without_a_terminal_result_records_zero_usage() {
+        let contract = contract();
+        let result = Err(ManagerError::Cancelled(RunReport {
+            outcome: Outcome::Cancelled,
+            cost_usd_micros: None,
+            tokens: None,
+            result: None,
+        }));
+
+        let row = finished_row(&contract, &result, 1, 2);
+
+        assert_eq!(row.outcome.as_deref(), Some("cancelled"));
+        assert_eq!(row.usd_micros, 0);
+        assert_eq!(row.tokens, 0);
     }
 
     #[test]
@@ -652,6 +795,7 @@ mod tests {
             &contract,
             &std::env::temp_dir(),
             LivenessThresholds::default(),
+            &RunOptions::default(),
             || 1,
             |_, _, _| {},
         );
@@ -670,8 +814,67 @@ mod tests {
         assert_eq!(rebuilt.definition_of_done, contract.definition_of_done);
     }
 
+    fn completed_turn_fixture(line: &str) -> Result<Vec<RunnerSignal>, ParseError> {
+        if line != "done" {
+            return Ok(Vec::new());
+        }
+        Ok(vec![
+            RunnerSignal::Output("ok".into()),
+            RunnerSignal::Finished(farseer_runner::claude_code::FinishedSignal {
+                outcome: Outcome::Ok,
+                cost_usd_micros: Some(1),
+                tokens: Some(1),
+            }),
+        ])
+    }
+
     #[test]
-    fn cancelling_ends_the_run_as_cancelled_not_failed_and_not_hanging() {
+    fn cancelling_after_a_completed_turn_returns_cancelled_with_the_turn_report() {
+        let store = Store::open_in_memory().unwrap();
+        let contract = contract();
+        let dir = tempfile::tempdir().unwrap();
+        let result_path = dir.path().join("result.txt");
+        std::fs::write(&result_path, "done\r\n").unwrap();
+        let script_path = dir.path().join("result-then-wait.cmd");
+        std::fs::write(
+            &script_path,
+            format!(
+                "@echo off\r\ntype \"{}\"\r\nping -n 30 127.0.0.1 >nul\r\n",
+                result_path.display()
+            ),
+        )
+        .unwrap();
+        let started = StartedWorker::spawn(
+            Path::new(r"C:\Windows\System32\cmd.exe"),
+            &[
+                "/d".into(),
+                "/c".into(),
+                script_path.to_string_lossy().into_owned(),
+            ],
+            &std::env::current_dir().unwrap(),
+            LivenessThresholds::default(),
+            completed_turn_fixture,
+            None,
+        )
+        .unwrap();
+        let token = started.cancel_token();
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(200));
+            token.cancel();
+        });
+
+        let result = started.run_to_completion(&store, &contract, Actor::Worker, || 1);
+        let Err(ManagerError::Cancelled(report)) = result else {
+            panic!("expected cancellation with the completed turn report, got {result:?}");
+        };
+        assert_eq!(report.outcome, Outcome::Cancelled);
+        assert_eq!(report.cost_usd_micros, Some(1));
+        assert_eq!(report.tokens, Some(1));
+        assert_eq!(report.result.as_deref(), Some("ok"));
+    }
+
+    #[test]
+    fn cancelling_before_any_result_returns_cancelled_with_an_unknown_report() {
         let store = Store::open_in_memory().unwrap();
         let contract = contract();
         let started = StartedWorker::spawn(
@@ -699,8 +902,14 @@ mod tests {
         // `05`: cancelled is never failed. Without the result line a crash
         // and a deliberate cancel look identical on the wire; `Cancelled`
         // proves the distinction survived rather than collapsing to `NoResult`.
-        let result = started.run_to_completion(&store, &contract, || 1);
-        assert!(matches!(result, Err(ManagerError::Cancelled)));
+        let result = started.run_to_completion(&store, &contract, Actor::Worker, || 1);
+        let Err(ManagerError::Cancelled(report)) = result else {
+            panic!("expected cancellation with an unknown report, got {result:?}");
+        };
+        assert_eq!(report.outcome, Outcome::Cancelled);
+        assert_eq!(report.cost_usd_micros, None);
+        assert_eq!(report.tokens, None);
+        assert_eq!(report.result, None);
     }
 
     #[test]
@@ -730,6 +939,7 @@ mod tests {
             &contract,
             &std::env::temp_dir(),
             LivenessThresholds::default(),
+            &RunOptions::default(),
             || 1,
             |token, _liveness, steer| {
                 assert!(
@@ -768,6 +978,7 @@ mod tests {
             &contract,
             &std::env::temp_dir(),
             LivenessThresholds::default(),
+            &RunOptions::default(),
             || 1,
             |token, _liveness, steer| {
                 assert!(
@@ -821,7 +1032,9 @@ mod tests {
         let (_dir, started) = fixture_process(&[r#"{"type":"result","subtype":"success"}"#]);
         let handle = started.liveness_handle();
 
-        started.run_to_completion(&store, &contract, || 1).unwrap();
+        started
+            .run_to_completion(&store, &contract, Actor::Worker, || 1)
+            .unwrap();
 
         assert_eq!(
             handle.liveness(),

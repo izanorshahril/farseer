@@ -241,4 +241,12 @@ A cell definition's **roster must hold three entry kinds**: workers, tools and *
 
 A callable-cell entry carries a maximum `autonomy_ceiling` the caller may grant it, and per `21` a **foreign peer cell entry is pinned at `irreversible`** and cannot be lowered.
 
-Note this does **not** add a top-level field - `roster` already existed - which is why `08`'s falsification test survived. A cell whose roster holds no cell entries is coherent.
+Note this does **not** add a top-level field - `roster` already existed - which is why `08`'s falsification test survived.
+A cell whose roster holds no cell entries is coherent.
+
+## Corrected by 23
+
+`23 prototype loose ends` added one top-level policy value that the minimum field table above predates: the owning cell's task-root `budget`.
+It also added an optional `max_budget` cap to each worker roster entry, parallel to the callable-cell entry's maximum autonomy ceiling.
+Both are quantities already present in the worker contract rather than new domain concepts, and both are required for `23`'s three narrowing layers: owning definition, roster entry, and caller remaining.
+The section 2 table is historical rather than current on this point; a build kit must emit the task-root budget and may emit a per-worker cap.

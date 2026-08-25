@@ -62,10 +62,26 @@ pub fn parse_line(line: &str) -> Result<Vec<RunnerSignal>, ParseError> {
     };
     let signal = match kind {
         "complete" => Some(RunnerSignal::Finished(finished(&v))),
-        // "message" - activity only, the only other shape this probe saw.
+        "message" => assistant_text(&v).map(RunnerSignal::Output),
         _ => None,
     };
     Ok(signal.into_iter().collect())
+}
+
+fn assistant_text(v: &Value) -> Option<String> {
+    let message = v.get("message")?;
+    if message.get("role").and_then(Value::as_str) != Some("assistant") {
+        return None;
+    }
+    let text = message
+        .get("content")?
+        .as_array()?
+        .iter()
+        .filter(|block| block.get("type").and_then(Value::as_str) == Some("text"))
+        .filter_map(|block| block.get("text").and_then(Value::as_str))
+        .collect::<Vec<_>>()
+        .join("\n");
+    (!text.is_empty()).then_some(text)
 }
 
 fn finished(v: &Value) -> FinishedSignal {
@@ -134,9 +150,12 @@ mod tests {
     }
 
     #[test]
-    fn a_message_line_is_activity_only_and_yields_no_signal() {
+    fn an_assistant_message_carries_the_text_the_manager_must_relay() {
         let line = r#"{"type":"message","message":{"id":"x","role":"assistant","content":[{"type":"text","text":"ok"}]}}"#;
-        assert_eq!(parse_line(line).unwrap(), Vec::new());
+        assert_eq!(
+            parse_line(line).unwrap(),
+            [RunnerSignal::Output("ok".into())]
+        );
     }
 
     #[test]
