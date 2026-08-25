@@ -25,6 +25,8 @@ Whatever packages this later - served by farseer itself, Tauri, Electron - has t
 | [`src/bridge.ts`](src/bridge.ts) | **everything a widget may reach, and nothing else** |
 | [`src/widgets/quota.tsx`](src/widgets/quota.tsx) | `27 quota accounting`'s utilisation surface |
 | [`src/widgets/fleet.tsx`](src/widgets/fleet.tsx) | the loaded cell definitions |
+| [`src/stream.ts`](src/stream.ts) | follows `/v1/stream`, reconnecting on its own |
+| [`src/widgets/activity.tsx`](src/widgets/activity.tsx) | the record, live - where an answer lands |
 
 ### The bridge is the seam
 
@@ -63,5 +65,4 @@ Adding `allow-same-origin` would hand a widget the host's origin and undo every 
 ## Not built yet
 
 - **Cell zero writing one.** `widgets/run-tally` is hand-written on purpose - the contract gets proven before a manager is asked to satisfy it. The manager-facing half is a prompt that teaches the widget contract plus the file-writing turn.
-- **The event stream.** `ask` returns a run id; the answer arrives on `/v1/stream`, which nothing here reads yet.
 - **Run verbs.** `28`'s table puts `steer`, `cancel`, `observe`, `take over` and `release` inline on a run line, and there is no run-line widget yet.

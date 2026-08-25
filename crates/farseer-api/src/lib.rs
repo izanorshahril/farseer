@@ -3354,9 +3354,19 @@ account = "anthropic-max"
                 .unwrap()
         };
 
-        assert!(observe(&observation(Availability::Allowed), 1_000));
+        assert!(observe(
+            &observation(Availability::Allowed {
+                resets_at: Some(1_787_003_600)
+            }),
+            1_000
+        ));
         assert!(
-            !observe(&observation(Availability::Allowed), 2_000),
+            !observe(
+                &observation(Availability::Allowed {
+                    resets_at: Some(1_787_003_600)
+                }),
+                2_000
+            ),
             "`10 runner inventory` measured this arriving on every run; only \
              transitions are history"
         );
@@ -3396,9 +3406,9 @@ account = "anthropic-max"
         );
         assert_eq!(window["farseer_usd_micros"], 300_000);
         assert_eq!(window["farseer_tokens"], 1_000);
-        assert!(
-            window["resets_at"].is_null(),
-            "an allowed window has no reset to count down to"
+        assert_eq!(
+            window["resets_at"], 1_787_003_600i64,
+            "`10 runner inventory` measured `resetsAt` on every report, so an              allowed window still has a countdown - dropping it left the widget              blank in the only case an operator sees on a good day"
         );
 
         let exhausted = observation(Availability::ExhaustedUntil {
