@@ -6,6 +6,8 @@ One operator, one Rust binary, no required external services.
 **Status: the foundation is built, and a Claude Code manager can delegate to a real roster worker.**
 Twenty-eight decision tickets are closed, and the domain model, the record, the local API, four native runners, all four manager verbs from [Run state model and control semantics](.scratch/farseer/issues/05-run-state-model.md), and the MCP face from [Record scope](.scratch/farseer/issues/02-record-scope.md) are implemented against them.
 `POST /v1/cells/{id}/instruct` runs a cell's manager against a goal and returns a `run_id` immediately.
+The operator surface is a separate client under [`ui/`](ui/README.md): a canvas of widgets whose arrangement farseer stores as an opaque blob, one composer addressed to the top manager, and a host bridge that is the only thing a widget may reach.
+
 A Claude Code manager receives farseer's own MCP face under a per-run capability and can call `delegate_to_worker`, or `delegate_to_cell` for a granted cell, during the same live conversation; cancel and steer remain available through the run API.
 See [What runs today](#what-runs-today).
 
@@ -79,9 +81,13 @@ An external protocol is spoken at a boundary, never shaped into internals.
 │  ├─ farseer-runner/  runners: Claude Code, Codex, cursor-agent and goose, PATHEXT resolution, Job-Object spawn, stream-json mapping, worktree lifecycle
 │  ├─ farseer-manager/ runs one sealed contract, captures terminal text, and records what happened
 │  └─ farseer/         the binary: runtime and CLI in one
+├─ ui/                 the canvas: the operator surface, a client of /v1 like any other
+│  ├─ src/bridge.ts    everything a widget may reach, and nothing else
+│  └─ src/widgets/     quota and fleet, hand-written until 28's gates exist
 ├─ cells/              cell definitions, hand-written, in git
 │  ├─ zero.toml        cell #0, the builder harness
 │  └─ social.toml      the second cell, thinner on purpose
+├─ runners.toml        machine-wide runner facts: which account each signs in with
 ├─ BRIEF.md            landscape research, Windows failure catalogue, operator questions
 ├─ ARCHITECTURE.md     the cell model this map decided on
 ├─ AGENTS.md           conventions for agents working here (CLAUDE.md points at it)
