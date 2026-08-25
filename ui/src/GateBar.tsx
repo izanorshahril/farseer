@@ -17,19 +17,29 @@ import { useCallback, useEffect, useState } from "react";
  */
 type Change = { state: string; file: string };
 
+/** A widget cell zero wrote, waiting on the operator. */
+type Pending = { branch: string; subject: string; id: string };
+
 const label = (state: string) =>
   state === "??" ? "added" : state.includes("D") ? "deleted" : "changed";
 
 export function GateBar() {
   const [changes, setChanges] = useState<Change[]>([]);
+  const [pending, setPending] = useState<Pending[]>([]);
   const [busy, setBusy] = useState(false);
 
   const refresh = useCallback(
     () =>
-      fetch("/__widgets/changes")
-        .then((response) => response.json() as Promise<Change[]>)
-        .then(setChanges)
-        .catch(() => setChanges([])),
+      Promise.all([
+        fetch("/__widgets/changes")
+          .then((response) => response.json() as Promise<Change[]>)
+          .then(setChanges)
+          .catch(() => setChanges([])),
+        fetch("/__widgets/pending")
+          .then((response) => response.json() as Promise<Pending[]>)
+          .then(setPending)
+          .catch(() => setPending([])),
+      ]).then(() => undefined),
     [],
   );
 
@@ -53,8 +63,60 @@ export function GateBar() {
     }
   };
 
-  if (changes.length === 0) return null;
+  const decide = async (id: string, verb: "keep" | "undo") => {
+    if (verb === "undo" && !confirm(`Delete the ${id} widget branch?`)) return;
+    setBusy(true);
+    try {
+      await fetch(`/__widgets/pending/${id}/${verb}`, { method: "POST" });
+      await refresh();
+      location.reload();
+    } finally {
+      setBusy(false);
+    }
+  };
 
+  if (changes.length === 0 && pending.length === 0) return null;
+
+  return (
+    <>
+      {pending.map((widget) => (
+        <div className="gate" key={widget.branch}>
+          <b>cell zero wrote a widget</b>
+          <span className="files">
+            {widget.id} - {widget.subject}
+          </span>
+          <span className="grow" />
+          <button
+            className="chip undo"
+            disabled={busy}
+            onClick={() => void decide(widget.id, "undo")}
+          >
+            undo
+          </button>
+          <button
+            className="chip on"
+            disabled={busy}
+            onClick={() => void decide(widget.id, "keep")}
+          >
+            keep
+          </button>
+        </div>
+      ))}
+      {changes.length > 0 && <WorkingTreeGate changes={changes} busy={busy} act={act} />}
+    </>
+  );
+}
+
+/** Uncommitted edits under `widgets/`, which is the other way widget code moves. */
+function WorkingTreeGate({
+  changes,
+  busy,
+  act,
+}: {
+  changes: Change[];
+  busy: boolean;
+  act: (verb: "keep" | "undo") => Promise<void>;
+}) {
   return (
     <div className="gate">
       <b>

@@ -16,6 +16,11 @@ prompt = """
 You are the manager of cell zero.
 You plan, delegate to workers, and call other cells that appear in your roster.
 You never do the work yourself when a worker can.
+
+When the operator asks for a widget on their canvas, read widgets/AGENTS.md
+first and follow it exactly. It is short, it is the whole contract, and the
+build refuses anything outside it. Writing one widget is small enough to do
+yourself rather than delegate.
 """
 
 [[roster]]

@@ -155,6 +155,32 @@ async function bundle(widgetsDir: string, id: string, hostDir: string): Promise<
   return result.outputFiles?.[0]?.text ?? "";
 }
 
+/**
+ * Widgets cell zero wrote, waiting on the operator.
+ *
+ * A run's workspace is a **detached** worktree that `04 spike workspace
+ * teardown` deletes when the run ends, so a plain commit there is unreachable
+ * the moment it is pruned. A branch is not: worktrees share one object store,
+ * so a ref outlives the directory it was made in.
+ *
+ * That is the whole delivery mechanism, and it costs nothing new - `13 harness
+ * build kit` already put versioning in plain git.
+ */
+async function pendingBranches(repo: string) {
+  const listed = await git(repo, [
+    "for-each-ref",
+    "--format=%(refname:short)%09%(subject)",
+    "refs/heads/farseer/widget",
+  ]);
+  return listed
+    .split("\n")
+    .filter(Boolean)
+    .map((line) => {
+      const [branch = "", subject = ""] = line.split("\t");
+      return { branch, subject, id: branch.replace("farseer/widget/", "") };
+    });
+}
+
 function json(response: Parameters<Connect.NextHandleFunction>[1], status: number, body: unknown) {
   response.statusCode = status;
   response.setHeader("content-type", "application/json");
@@ -185,9 +211,32 @@ export function widgetHost(options: { widgetsDir: string; repo: string; hostDir:
             return json(response, 200, changes);
           }
 
+          if (url === "/__widgets/pending") {
+            return json(response, 200, await pendingBranches(repo));
+          }
+
           if (url === "/__widgets/keep" && request.method === "POST") {
             await git(repo, ["add", "--", "widgets"]);
             return json(response, 200, { kept: true });
+          }
+
+          // Keeping a branch is a merge into the working tree, not a rebase and
+          // not a push: `28 operator surface` gate 1 is one decision by the
+          // operator, and anything cleverer would be farseer having opinions
+          // about the operator's own history.
+          const keepBranch = /^\/__widgets\/pending\/([a-z0-9-]+)\/keep$/.exec(url);
+          if (keepBranch?.[1] && request.method === "POST") {
+            const branch = `farseer/widget/${keepBranch[1]}`;
+            await git(repo, ["merge", "--no-ff", "--no-edit", branch]);
+            await git(repo, ["branch", "-D", branch]);
+            return json(response, 200, { kept: branch });
+          }
+
+          const dropBranch = /^\/__widgets\/pending\/([a-z0-9-]+)\/undo$/.exec(url);
+          if (dropBranch?.[1] && request.method === "POST") {
+            const branch = `farseer/widget/${dropBranch[1]}`;
+            await git(repo, ["branch", "-D", branch]);
+            return json(response, 200, { undone: branch });
           }
 
           // Scoped hard to `widgets/`: this throws away work, and the blast
