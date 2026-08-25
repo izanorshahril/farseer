@@ -87,11 +87,17 @@ pub struct SessionInfo {
     /// The runner's own id for the conversation, so an operator can find it in
     /// the runner's own tooling rather than only in farseer's record.
     pub session_id: Option<String>,
+    /// The account or backend the runner says it is using.
+    ///
+    /// `28 operator surface` wanted this and could only reach `runners.toml`,
+    /// which records what the **operator declared**. Only an ACP agent answers
+    /// it today, and only when it uses ACP's un-standardised `provider` key.
+    pub provider: Option<String>,
 }
 
 impl SessionInfo {
     pub fn is_empty(&self) -> bool {
-        self.model.is_none() && self.session_id.is_none()
+        self.model.is_none() && self.session_id.is_none() && self.provider.is_none()
     }
 }
 
@@ -188,6 +194,9 @@ pub fn parse_line(line: &str) -> Result<Vec<RunnerSignal>, ParseError> {
             let info = SessionInfo {
                 model: text_field(&v, "model"),
                 session_id: text_field(&v, "session_id"),
+                // Claude Code names an account on `/status`, which does not
+                // fire headless. Absent rather than assumed.
+                provider: None,
             };
             (!info.is_empty()).then_some(RunnerSignal::Session(info))
         }
@@ -457,6 +466,8 @@ mod tests {
             [RunnerSignal::Session(SessionInfo {
                 model: Some("claude-opus-5".into()),
                 session_id: Some("abc".into()),
+                // Claude Code names no account headless.
+                provider: None,
             })]
         );
     }

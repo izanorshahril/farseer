@@ -321,3 +321,32 @@ Two things this reuses rather than rediscovers:
 - **One note for every ACP runner**, because the protocol is what they have in common: names its context window, steers as a manager, reports no quota. That trade does not vary by agent, so saying it once is honest rather than lazy.
 
 Not done: the desktop window was not launched to look at it. The list is data-driven - the widget maps whatever the endpoint returns - and both ends are unit-tested, so there was nothing a screenshot would have decided.
+
+
+## Implementation note, 2026-08-26: the provider, observed rather than declared
+
+An ACP run now records what the agent says about itself. Live, from `goose-acp`:
+
+```json
+{"model":null,"provider":"chatgpt_codex","runner":"goose-acp","session_id":"20260825_17"}
+```
+
+`28 operator surface` wanted a provider on the conversation and could only reach `runners.toml`, which records **what the operator declared**. This is the agent's own answer, and the two are not the same question.
+
+### It arrives through the handshake, not the stream
+
+Claude Code and Codex announce their session mid-stream, on a line the read loop sees. An ACP agent answers it in the **response to `session/new`**, during `bootstrap`, before any store is in reach.
+
+Rather than give `bootstrap` a sink and a second way of recording the same fact, what the handshake learned is **replayed into the read loop** as though the agent had said it mid-stream. One path into the record, and `session_started` means the same thing whichever runner produced it.
+
+### What `chatgpt_codex` says, and what it does not
+
+That value is goose delegating through the already-authenticated `codex` CLI, which AGENTS.md recorded from the 2026-08-24 goose probe. So a `goose-acp` run and a `codex` run are **spending the same subscription**.
+
+`27 quota accounting` made the account **declared by the operator, never inferred**, because nothing in `10 runner inventory` made sharing detectable. This does not overturn that - an inference and an observation are different things, and `27`'s rule was about the former. But it is the first time farseer has seen an agent volunteer the fact, and it is a candidate for seeding a `runners.toml` entry the operator then confirms. Recorded here rather than acted on.
+
+### Kept whole, read narrowly
+
+`SessionOpened.config` keeps the agent's whole `configOptions` as `id -> currentValue`, and `provider()` reads the one key farseer displays. ACP does not standardise those ids, so an agent that names its account something else reports nothing rather than farseer guessing at a synonym - and the map is still there to see what it *did* offer.
+
+`SessionInfo` growing a third field pushed `ManagerError::Cancelled` past clippy's size threshold, so `session` is boxed exactly as `window` already was, for the reason `window`'s own doc comment gives.

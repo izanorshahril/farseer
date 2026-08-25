@@ -106,9 +106,14 @@ pub struct RunReport {
     pub window: Option<Box<farseer_runner::claude_code::RateLimitInfo>>,
     /// What the runner said about the session, if anything.
     ///
+    /// Boxed for the same reason `window` is, and it grew a third field before
+    /// it needed to be: `ManagerError::Cancelled` carries a whole report, so a
+    /// rarely-present observation must not widen every `Result` this crate
+    /// returns.
+    ///
     /// `RunRow.model` existed from the beginning and was **always empty**,
     /// because nothing read the one line where a runner names its model.
-    pub session: Option<farseer_runner::claude_code::SessionInfo>,
+    pub session: Option<Box<farseer_runner::claude_code::SessionInfo>>,
 }
 
 /// Which role the process has in the cell.
@@ -247,10 +252,10 @@ pub struct StartedWorker {
     /// How the goal gets in, whether steering can reach, and what ends the
     /// read loop. See [`Channel`].
     channel: Channel,
-    /// Set once the ACP handshake has run, so a steer knows which session to
-    /// address. `None` for every other channel, and for an ACP run that has not
-    /// been bootstrapped yet.
-    acp_session: Option<String>,
+    /// Set once the ACP handshake has run: the session a steer is addressed to,
+    /// and what the agent said about itself while opening it. `None` for every
+    /// other channel, and for an ACP run that has not been bootstrapped yet.
+    acp_opened: Option<farseer_runner::acp::SessionOpened>,
     /// The next unused JSON-RPC request id, shared with any [`SteerHandle`] this
     /// worker hands out so two writers never collide on one.
     acp_next_id: Arc<AtomicI64>,
@@ -342,7 +347,7 @@ impl StartedWorker {
             thresholds,
             parse,
             channel,
-            acp_session: None,
+            acp_opened: None,
             acp_next_id: Arc::new(AtomicI64::new(1)),
         })
     }
@@ -368,15 +373,13 @@ impl StartedWorker {
             // addressed to, and `start_worker` bootstraps before any caller can
             // reach this. A worker gets nothing - `20 worker control channel`
             // made steering the exception, and a worker has one goal.
-            Channel::Acp { manager: true } => {
-                self.acp_session.as_ref().map(|session| SteerHandle {
-                    stdin,
-                    wire: SteerWire::Acp {
-                        session: session.clone(),
-                        next_id: Arc::clone(&self.acp_next_id),
-                    },
-                })
-            }
+            Channel::Acp { manager: true } => self.acp_opened.as_ref().map(|opened| SteerHandle {
+                stdin,
+                wire: SteerWire::Acp {
+                    session: opened.session_id.clone(),
+                    next_id: Arc::clone(&self.acp_next_id),
+                },
+            }),
             Channel::Acp { manager: false } | Channel::OneShot => None,
         }
     }
@@ -437,7 +440,7 @@ impl StartedWorker {
                     goal_id,
                     goal,
                 )?;
-                self.acp_session = Some(opened.session_id);
+                self.acp_opened = Some(opened);
             }
         }
         Ok(())
@@ -468,6 +471,21 @@ impl StartedWorker {
         let activity = Arc::clone(&self.activity);
         let monotonic_start = self.monotonic_start;
 
+        // What the ACP handshake learned, replayed into the read loop as though
+        // the agent had announced it mid-stream - which is how Claude Code and
+        // Codex report the same facts. The handshake happens in `bootstrap`,
+        // before any store is in reach, so this is the first moment it can be
+        // recorded rather than a second way of recording it.
+        let opened = self.acp_opened.take().map(|opened| {
+            farseer_runner::claude_code::SessionInfo {
+                // ACP has a `session/set_model`, but `29 harness protocol`
+                // found it unstable upstream and broken in shipped clients, and
+                // `goose acp` names no model at all. Absent rather than guessed.
+                model: None,
+                provider: opened.provider().map(str::to_string),
+                session_id: Some(opened.session_id),
+            }
+        });
         let ends_at_terminal = self.channel.ends_at_terminal();
         let mut on_line = |parsed: Result<Vec<RunnerSignal>, ParseError>| {
             // `05 run state model`: any bytes at all is activity, parse failure or not - the
@@ -594,6 +612,7 @@ impl StartedWorker {
                             serde_json::json!({
                                 "model": info.model,
                                 "session_id": info.session_id,
+                                "provider": info.provider,
                                 "runner": contract.runner,
                             }),
                         );
@@ -607,6 +626,10 @@ impl StartedWorker {
                 }
             }
         };
+
+        if let Some(info) = opened {
+            on_line(Ok(vec![RunnerSignal::Session(info)]));
+        }
 
         if ends_at_terminal {
             // A conversational runner stays alive after the work is done, so
@@ -638,7 +661,7 @@ impl StartedWorker {
                     report.result = output;
                 }
                 report.window = window;
-                report.session = session.clone();
+                report.session = session.clone().map(Box::new);
                 if was_cancelled {
                     report.outcome = Outcome::Cancelled;
                     Err(ManagerError::Cancelled(report))
@@ -652,7 +675,7 @@ impl StartedWorker {
                 tokens: None,
                 result: None,
                 window,
-                session,
+                session: session.map(Box::new),
             })),
             None => Err(ManagerError::NoResult),
         }
@@ -1586,6 +1609,20 @@ mod tests {
             "the denominator is the reason this runner exists, and it must reach the record: {kinds:?}"
         );
         assert!(kinds.contains(&EventKind::MANAGER_ANSWERED), "{kinds:?}");
+        // The handshake's own answer about itself, replayed into the record.
+        let session = events
+            .iter()
+            .find(|event| event.kind.as_str() == EventKind::SESSION_STARTED)
+            .expect("an ACP run names the session it opened");
+        eprintln!("session_started: {}", session.payload);
+        assert!(
+            session
+                .payload
+                .get("session_id")
+                .is_some_and(|v| !v.is_null()),
+            "{}",
+            session.payload
+        );
     }
 
     /// Live: an ACP **manager** answers, is steered, and answers again on the

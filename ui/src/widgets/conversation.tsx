@@ -28,6 +28,8 @@ import { follow, type RecordEvent } from "../stream";
 type Meta = {
   runner?: string;
   model?: string;
+  /** The account the runner says it is using, which is not what was configured. */
+  provider?: string;
   session_id?: string;
   cell?: string;
   cost?: number;
@@ -138,6 +140,7 @@ export function ConversationWidget({ bridge }: { bridge: Bridge }) {
           ...current,
           runner: str("runner") ?? current.runner,
           model: str("model"),
+          provider: str("provider"),
           session_id: str("session_id"),
           cell: event.cell_id,
         }));
@@ -211,6 +214,7 @@ export function ConversationWidget({ bridge }: { bridge: Bridge }) {
         ["cell", meta.cell],
         ["runner", meta.runner],
         ["model", meta.model],
+        ["provider", meta.provider],
         ["session", meta.session_id?.slice(0, 8)],
         ["context", context(meta)],
         ["tokens", meta.tokens?.toLocaleString()],

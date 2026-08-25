@@ -138,6 +138,32 @@ pub struct SessionOpened {
     pub current_mode: Option<String>,
     /// Modes the agent will accept, so a driver can pick one that does not ask.
     pub available_modes: Vec<String>,
+    /// The agent's own settings, as `id -> currentValue`.
+    ///
+    /// `goose acp` returns a `configOptions` array on `session/new` naming its
+    /// provider, its model where it has one, and whatever else it lets a client
+    /// change. Kept whole rather than reduced to the one field farseer reads
+    /// today, because which keys an agent offers is itself an observation - and
+    /// `10 runner inventory`'s rule is that farseer reports what it saw.
+    pub config: Vec<(String, String)>,
+}
+
+impl SessionOpened {
+    /// The account behind this session, if the agent names one.
+    ///
+    /// `28 operator surface` wanted a provider on the conversation and could
+    /// only get it from `runners.toml` - which is what the **operator declared**,
+    /// not what the agent is using. This is the agent's own answer.
+    ///
+    /// `provider` is goose's key. ACP does not standardise `configOptions` ids,
+    /// so an agent using another word reports nothing here rather than farseer
+    /// guessing at a synonym.
+    pub fn provider(&self) -> Option<&str> {
+        self.config
+            .iter()
+            .find(|(id, _)| id == "provider")
+            .map(|(_, value)| value.as_str())
+    }
 }
 
 /// Reads a `session/new` result. Returns `None` for any other message, so a
@@ -161,6 +187,20 @@ pub fn session_opened(line: &str) -> Option<SessionOpened> {
                     .iter()
                     .filter_map(|entry| entry.get("id").and_then(Value::as_str))
                     .map(str::to_string)
+                    .collect()
+            })
+            .unwrap_or_default(),
+        config: result
+            .get("configOptions")
+            .and_then(Value::as_array)
+            .map(|options| {
+                options
+                    .iter()
+                    .filter_map(|option| {
+                        let id = option.get("id").and_then(Value::as_str)?;
+                        let current = option.get("currentValue").and_then(Value::as_str)?;
+                        Some((id.to_string(), current.to_string()))
+                    })
                     .collect()
             })
             .unwrap_or_default(),
@@ -424,6 +464,23 @@ mod tests {
             opened.available_modes,
             vec!["auto", "approve", "smart_approve", "chat"]
         );
+    }
+
+    /// Trimmed from the real `session/new` result, which carried a
+    /// `configOptions` array of selects.
+    #[test]
+    fn session_new_names_the_provider_the_agent_is_actually_using() {
+        let line = r#"{"jsonrpc":"2.0","id":2,"result":{"sessionId":"s","configOptions":[{"id":"provider","name":"Provider","type":"select","currentValue":"chatgpt_codex"},{"id":"mode","currentValue":"auto"}]}}"#;
+        let opened = session_opened(line).unwrap();
+        assert_eq!(opened.provider(), Some("chatgpt_codex"));
+        // Kept whole: which keys an agent offers is an observation too.
+        assert_eq!(opened.config.len(), 2);
+    }
+
+    #[test]
+    fn an_agent_that_names_no_provider_reports_none_rather_than_a_guess() {
+        let line = r#"{"jsonrpc":"2.0","id":2,"result":{"sessionId":"s","configOptions":[{"id":"llm","currentValue":"something"}]}}"#;
+        assert_eq!(session_opened(line).unwrap().provider(), None);
     }
 
     #[test]
