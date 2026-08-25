@@ -84,9 +84,12 @@ export function QuotaWidget({ bridge }: { bridge: Bridge }) {
             <span className="figure mono">{usd(window.farseer_usd_micros)}</span>
             <span className="dim">{window.farseer_tokens.toLocaleString()} tokens</span>
             <span className="grow" />
-            {/* The label is load-bearing, not decoration: it is what stops the
-                number being read as a share of the window. */}
-            <span className="dim small">farseer's own spend since this window opened</span>
+            {/* The label is load-bearing, not decoration. Two things it has to
+                get right: this is not a share of the window, and it is counted
+                from when farseer **first saw** the window rather than from when
+                the provider opened it - a run already in flight at that moment
+                is not in this number. */}
+            <span className="dim small">farseer's spend since it first saw this window</span>
           </div>
         </li>
       ))}

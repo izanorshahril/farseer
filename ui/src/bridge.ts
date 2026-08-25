@@ -24,8 +24,16 @@ export type Anchor = {
 };
 
 export type Bridge = {
-  /** Read any `/v1` resource. Reads are safe; there is no generic write. */
+  /** Read any `/v1` resource. Reads are safe. */
   read: <T>(path: string) => Promise<T>;
+  /**
+   * One of `05 run state model`'s verbs, on one run.
+   *
+   * Narrowed to `/runs/{id}/{verb}` rather than a general POST, and
+   * **deliberately absent from the sandbox bridge** in `SandboxWidget.tsx`: a
+   * widget the operator did not write can show a run, and cannot cancel one.
+   */
+  post: (path: string, body?: unknown) => Promise<void>;
   /**
    * Send a request to the **top manager**, anchored to where it came from.
    *
@@ -47,6 +55,21 @@ async function json<T>(path: string, init?: RequestInit): Promise<T> {
 export function createBridge(): Bridge {
   return {
     read: (path) => json(`/v1${path}`),
+
+    post: async (path, body) => {
+      if (!/^\/runs\/[0-9a-f-]+\/(steer|cancel|rerun|rescope)$/.test(path)) {
+        throw new Error(`${path} is not a run verb`);
+      }
+      const response = await fetch(`/v1${path}`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(body ?? {}),
+      });
+      // `400` is a runner with no steering path and `404` a run already
+      // finished. Both are the runtime refusing a verb the surface should not
+      // have offered, so they surface as errors rather than being swallowed.
+      if (!response.ok) throw new Error(`${path}: ${response.status}`);
+    },
 
     ask: async (anchor, text) => {
       // The anchor rides in the goal as prose because the reader is an LLM.

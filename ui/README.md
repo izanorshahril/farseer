@@ -27,6 +27,7 @@ Whatever packages this later - served by farseer itself, Tauri, Electron - has t
 | [`src/widgets/fleet.tsx`](src/widgets/fleet.tsx) | the loaded cell definitions |
 | [`src/stream.ts`](src/stream.ts) | follows `/v1/stream`, reconnecting on its own |
 | [`src/widgets/activity.tsx`](src/widgets/activity.tsx) | the record, live - where an answer lands |
+| [`src/widgets/runs.tsx`](src/widgets/runs.tsx) | the fleet, with `05`'s verbs on the line |
 
 ### The bridge is the seam
 
@@ -65,4 +66,4 @@ Adding `allow-same-origin` would hand a widget the host's origin and undo every 
 ## Not built yet
 
 - **Cell zero writing one.** `widgets/run-tally` is hand-written on purpose - the contract gets proven before a manager is asked to satisfy it. The manager-facing half is a prompt that teaches the widget contract plus the file-writing turn.
-- **Run verbs.** `28`'s table puts `steer`, `cancel`, `observe`, `take over` and `release` inline on a run line, and there is no run-line widget yet.
+- **Attach and takeover.** `07 attach semantics`'s control axis - `observe`, `take over`, `release` - has no API surface yet, so the run line shows `steer` and `cancel` only.

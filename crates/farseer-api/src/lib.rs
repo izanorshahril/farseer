@@ -329,6 +329,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/v1/cells/{cell_id}/instruct", post(instruct_cell))
         .route("/v1/events", get(read_events))
         .route("/v1/stream", get(stream_events))
+        .route("/v1/runs", get(list_runs))
         .route("/v1/runs/{run_id}", get(get_run))
         .route("/v1/runs/{run_id}/cancel", post(cancel_run))
         .route("/v1/runs/{run_id}/steer", post(steer_run))
@@ -1204,6 +1205,31 @@ pub struct RunView {
     pub liveness: Option<String>,
 }
 
+/// The fleet, newest first.
+///
+/// `16 local api surface` is additive-only, so this is a new operation rather
+/// than a change to an existing one. It exists because a surface that can show
+/// one run by id cannot show **which runs there are**, and `28 operator
+/// surface`'s verb table is defined over a run line the operator can see.
+async fn list_runs(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<ListRunsQuery>,
+) -> ApiResult<Json<Vec<RunView>>> {
+    let limit = query.limit.unwrap_or(50).min(500);
+    let rows = {
+        let store = state.store();
+        store.recent_runs(limit)?
+    };
+    Ok(Json(
+        rows.into_iter().map(|row| run_view(&state, row)).collect(),
+    ))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ListRunsQuery {
+    pub limit: Option<usize>,
+}
+
 async fn get_run(
     State(state): State<Arc<AppState>>,
     UrlPath(run_id): UrlPath<String>,
@@ -1215,8 +1241,19 @@ async fn get_run(
     }
     .ok_or(ApiError::NotFound("run"))?;
 
-    Ok(Json(RunView {
-        run_id: row.run_id.to_string(),
+    Ok(Json(run_view(&state, row)))
+}
+
+/// One row, on all three axes.
+///
+/// Shared by the list and the single read so the two can never disagree about
+/// what a run is - and `05 run state model` keeps liveness **derived** here,
+/// asked of the live handle rather than read from the row.
+fn run_view(state: &Arc<AppState>, row: RunRow) -> RunView {
+    let run_id = row.run_id;
+    #[allow(clippy::let_and_return)]
+    let view = RunView {
+        run_id: run_id.to_string(),
         task_id: row.task_id.to_string(),
         cell_id: row.cell_id.to_string(),
         runner: row.runner,
@@ -1238,7 +1275,8 @@ async fn get_run(
             .runs()
             .get(&run_id)
             .map(|h| liveness_str(h.liveness.liveness()).to_string()),
-    }))
+    };
+    view
 }
 
 fn liveness_str(liveness: farseer_core::Liveness) -> &'static str {
@@ -3426,5 +3464,53 @@ account = "anthropic-max"
                 "`{absent}` would present a lower bound as a measurement: {wire}"
             );
         }
+    }
+    /// `28 operator surface`'s verb table is defined over a run line, and a
+    /// surface that can only read one run by id cannot show which runs exist.
+    #[tokio::test]
+    async fn the_run_list_is_newest_first_and_carries_all_three_axes() {
+        let h = harness();
+        let cell = CellId::new("zero");
+        let mut ids = Vec::new();
+        for (started, outcome) in [(300, Some("ok")), (100, None), (200, Some("cancelled"))] {
+            let run_id = RunId::new();
+            ids.push((started, run_id));
+            h.state
+                .store()
+                .upsert_run(&RunRow {
+                    run_id,
+                    task_id: TaskId::new(),
+                    cell_id: cell.clone(),
+                    runner: "claude-code".into(),
+                    model: String::new(),
+                    outcome: outcome.map(str::to_string),
+                    usd_micros: 1_000,
+                    tokens: 10,
+                    operator_touched: false,
+                    started_ts: started,
+                    finished_ts: outcome.map(|_| started + 1),
+                })
+                .unwrap();
+        }
+
+        let (status, body) = h.get("/v1/runs").await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let rows = body.as_array().unwrap();
+        assert_eq!(rows.len(), 3);
+        assert_eq!(rows[0]["started_ts"], 300, "newest first");
+        assert_eq!(rows[2]["started_ts"], 100);
+        assert_eq!(rows[1]["lifecycle"], "finished");
+        assert_eq!(rows[2]["lifecycle"], "running");
+        assert!(
+            rows[2]["liveness"].is_null(),
+            "`05 run state model`: liveness is derived from a live handle, and \
+             a row with no process has nothing to ask"
+        );
+
+        let (_, one) = h.get(&format!("/v1/runs/{}", ids[0].1)).await;
+        assert_eq!(one["run_id"], rows[0]["run_id"], "one shape, two routes");
+
+        let (_, capped) = h.get("/v1/runs?limit=1").await;
+        assert_eq!(capped.as_array().unwrap().len(), 1);
     }
 }

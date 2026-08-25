@@ -39,11 +39,18 @@ pub struct WindowRow {
     pub resets_at: Option<i64>,
     pub rate_limit_type: String,
     pub is_using_overage: bool,
-    /// When farseer first saw this window state, which is what its own spend is
+    /// When farseer **first saw** this window, which is what its own spend is
     /// counted from.
+    ///
+    /// Not when the provider opened it: nothing farseer observes says that, and
+    /// deriving it from `rate_limit_type` would mean inventing a window length
+    /// `10 runner inventory` never measured.
     pub since_ts: i64,
-    /// Farseer's own spend since `since_ts`. A **lower bound** on the window,
-    /// and the only honest number available.
+    /// Farseer's own spend since `since_ts`. A **lower bound** twice over - the
+    /// window is drained by sessions farseer cannot see, and a run already in
+    /// flight when the window was first seen is not counted. Still the only
+    /// honest number available, and a lower bound that says so beats a
+    /// percentage that does not.
     pub farseer_usd_micros: i64,
     pub farseer_tokens: i64,
 }

@@ -220,3 +220,25 @@ The bar names the files that changed rather than announcing that something did, 
 
 Cell zero has not written a widget. `widgets/run-tally` was written by hand, deliberately: the contract gets proven before a manager is asked to satisfy it.
 The manager-facing half - a prompt that teaches the widget contract, and the file-writing turn - is the next piece.
+
+## Implementation note, 2026-08-25: the verbs are on the line
+
+Section 5's table is built, and one thing it assumed turned out to be missing: `16 local api surface` had `GET /v1/runs/{id}` and no way to ask **which runs there are**.
+A surface that can only read one run by id cannot draw a run line.
+`GET /v1/runs` is therefore a new operation under the additive-only promise, sharing one view builder with the single read so the two can never disagree about what a run is.
+
+Verified live, and the rule held visibly:
+
+| Before cancel | After cancel |
+| --- | --- |
+| `running`, `$0.00`, verbs **steer** and **cancel** | `cancelled`, `$0.33`, **no verbs at all** |
+
+**A surface never offers a verb the runtime would refuse**, so the verb list is derived from lifecycle and control exactly as liveness is derived from a timestamp.
+`steer` appears only for a runner with a steering path, because `05 run state model`'s own correction by `20 worker control channel` established that Codex resumption is not steering - offering it there would be a button that fails when clicked.
+
+`re-run` and `re-scope` are deliberately absent from the line. Both start a **new** run and re-scope changes a contract field, so the contract has to be on screen, and this widget does not fake a detail view it does not have.
+
+### The verb is not on the sandbox bridge
+
+`28 operator surface` gate 3 hands a widget `read`, `ask` and its own state slice.
+A run verb is not among them, and adding one to the host bridge did not change that: a widget the operator did not write can **show** a run and cannot **cancel** one.
