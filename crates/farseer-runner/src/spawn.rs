@@ -124,18 +124,46 @@ pub struct SupervisedProcess {
     job: Arc<Mutex<Option<RawJobHandle>>>,
     cancelled: Arc<AtomicBool>,
     stdout: BufReader<ChildStdout>,
-    stdin: Arc<Mutex<ChildStdin>>,
+    /// `None` for a runner nobody is going to steer.
+    stdin: Option<Arc<Mutex<ChildStdin>>>,
+}
+
+/// Whether the child gets a stdin at all.
+///
+/// **A one-shot runner must be given a closed stdin, not an open pipe nobody
+/// writes to.** Observed 2026-08-25: `codex exec` prints "Reading additional
+/// input from stdin..." and waits for EOF before it starts work, so a pipe held
+/// open for the process's lifetime means it never begins - a live process, zero
+/// output, and a run that looks hung forever.
+///
+/// `20 worker control channel` made steering the exception rather than the rule,
+/// and this is that rule expressed at the spawn: a pipe exists only where
+/// something is going to write to it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StdinMode {
+    /// A live session that will receive the goal, and later steer messages.
+    Live,
+    /// Closed at spawn. The runner sees EOF immediately and gets on with it.
+    Closed,
 }
 
 impl SupervisedProcess {
     /// `exe` must already be resolved - see [`crate::resolve`] - since
     /// `CreateProcessW` does not consult `PATHEXT` and neither does
     /// `std::process::Command`.
-    pub fn spawn(exe: &Path, args: &[String], cwd: &Path) -> Result<Self, SpawnError> {
+    pub fn spawn(
+        exe: &Path,
+        args: &[String],
+        cwd: &Path,
+        stdin_mode: StdinMode,
+    ) -> Result<Self, SpawnError> {
         let mut child = Command::new(exe)
             .args(args)
             .current_dir(cwd)
-            .stdin(Stdio::piped())
+            .stdin(match stdin_mode {
+                StdinMode::Live => Stdio::piped(),
+                StdinMode::Closed => Stdio::null(),
+            })
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
             .creation_flags(CREATE_NO_WINDOW.0)
@@ -160,13 +188,13 @@ impl SupervisedProcess {
         }
 
         let stdout = child.stdout.take().expect("stdout was piped");
-        let stdin = child.stdin.take().expect("stdin was piped");
+        let stdin = child.stdin.take().map(|stdin| Arc::new(Mutex::new(stdin)));
         Ok(Self {
             child,
             job: Arc::new(Mutex::new(Some(RawJobHandle(job.0 as isize)))),
             cancelled: Arc::new(AtomicBool::new(false)),
             stdout: BufReader::new(stdout),
-            stdin: Arc::new(Mutex::new(stdin)),
+            stdin,
         })
     }
 
@@ -180,12 +208,25 @@ impl SupervisedProcess {
     /// A handle that can write to this process's stdin from another thread.
     /// Fetch it before calling a blocking read, same reason as
     /// [`Self::cancel_token`].
-    pub fn stdin_handle(&self) -> StdinHandle {
-        StdinHandle(Arc::clone(&self.stdin))
+    pub fn stdin_handle(&self) -> Option<StdinHandle> {
+        self.stdin
+            .as_ref()
+            .map(|stdin| StdinHandle(Arc::clone(stdin)))
     }
 
+    /// Write to a live session's stdin.
+    ///
+    /// Writing to a runner spawned with [`StdinMode::Closed`] is a programming
+    /// error rather than a runtime condition - nothing should be steering a
+    /// one-shot - so it says so instead of silently succeeding.
     pub fn write_line(&self, line: &str) -> std::io::Result<()> {
-        self.stdin_handle().write_line(line)
+        match self.stdin_handle() {
+            Some(handle) => handle.write_line(line),
+            None => Err(std::io::Error::new(
+                std::io::ErrorKind::BrokenPipe,
+                "this runner was spawned with no stdin, so nothing can be written to it",
+            )),
+        }
     }
 
     /// The next line, sans terminator. `Ok(None)` is end of stream - the
@@ -251,6 +292,7 @@ mod tests {
             Path::new(r"C:\Windows\System32\cmd.exe"),
             &cmd(&["/c", "echo one&echo two"]),
             &std::env::current_dir().unwrap(),
+            StdinMode::Live,
         )
         .unwrap();
 
@@ -271,6 +313,7 @@ mod tests {
             Path::new(r"C:\Windows\System32\cmd.exe"),
             &cmd(&["/c", "ping -n 30 127.0.0.1 >nul"]),
             &std::env::current_dir().unwrap(),
+            StdinMode::Live,
         )
         .unwrap();
         let pid = proc.child.id();
@@ -291,6 +334,7 @@ mod tests {
             Path::new(r"C:\Windows\System32\cmd.exe"),
             &cmd(&["/c", "ping -n 30 127.0.0.1 >nul"]),
             &std::env::current_dir().unwrap(),
+            StdinMode::Live,
         )
         .unwrap();
         let pid = proc.child.id();
@@ -318,6 +362,7 @@ mod tests {
             Path::new(r"C:\Windows\System32\cmd.exe"),
             &cmd(&["/c", "echo hi"]),
             &std::env::current_dir().unwrap(),
+            StdinMode::Live,
         )
         .unwrap();
         let token = proc.cancel_token();
@@ -332,6 +377,7 @@ mod tests {
             Path::new(r"C:\Windows\System32\cmd.exe"),
             &cmd(&["/c", "echo hi"]),
             &std::env::current_dir().unwrap(),
+            StdinMode::Live,
         )
         .unwrap();
         let a = proc.cancel_token();

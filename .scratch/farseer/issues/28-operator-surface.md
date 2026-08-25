@@ -340,3 +340,40 @@ The runner name and its executable are **not the same string** - `claude-code` i
 
 The operator's stated direction: farseer eventually has **its own harness**, and the pluggable ones become floor managers and sub-agents rather than the thing in front.
 Nothing here forecloses that. The top manager is a runner named in a definition, and a farseer-native harness would be one more name in the same field.
+
+## Implementation note, 2026-08-25: a conversation, and the bug that hid it
+
+`16 local api surface` made an instruction fire-and-forget and promised the answer arrives on the event stream.
+**Nothing put it there.** A manager's terminal text travelled back to a *delegating* manager over MCP and nowhere else, so an operator could start a manager and never hear from it. The composer was a shout into a hole.
+
+Two kinds now carry it:
+
+- **`manager_answered`**, per turn. `10 runner inventory` observed a Claude Code manager on live stdin emitting its own terminal result per turn and staying alive for the next steer, so a run that answers three times has three of these and one `run_finished` much later. Holding the text until the run ended would mean the operator hears nothing until they close the session they are trying to talk to.
+- **`run_finished`**, which `05 run state model` named and nothing emitted. Outcome, text, cost, tokens.
+
+The **Conversation** widget is built from the record rather than from a socket the composer holds open, so it survives a reload, a restart and a second window - `07 attach semantics` already made replay and live the same call with a different cursor.
+
+### The bug underneath, and it was farseer's
+
+The first live attempts produced **nothing at all**: a worktree, a spawned process, zero events, `$0.00`, a run stuck at `running`. It reproduced on Codex as readily as on Claude Code, which ruled out the runner and the account - both answer by hand in seconds.
+
+The cause was in `spawn.rs`: **every child got a piped stdin that farseer held open for the process's lifetime.**
+
+`codex exec` prints `Reading additional input from stdin...` and waits for **EOF before it starts work**. An open pipe nobody writes to is therefore a run that never begins, and the symptom is indistinguishable from a hang: the watchdog says `stalled`, the record says `running`, and nothing is wrong with the runner.
+
+The fix puts the decision where the answer already lived. `SupervisedProcess::spawn` takes a `StdinMode`, and **the steer frame decides it**: a runner something is going to steer gets a pipe, and everything else gets EOF at spawn. `20 worker control channel` made steering the exception rather than the rule, and this is that rule expressed at the spawn.
+
+Writing to a closed stdin is now an error that says so, rather than silently succeeding into nothing.
+
+### Proven live, on Codex
+
+The operator asked for Codex rather than Claude Code, because farseer competing with their own interactive session is a conflict farseer should not create.
+
+`run_queued` -> `manager_answered` -> `run_finished` in under fifteen seconds, and the thread in the window reads:
+
+> **you** In one sentence: what are you managing?
+> **top manager** I'm managing this Farseer run, coordinating work across its cells and runners.
+
+### Still open
+
+A **Claude Code manager** produced no events in the same session even before this fix, and the fix does not touch its path - a live manager was already spawned with a pipe, correctly. Not diagnosed, and not retried on the operator's request, since farseer sharing a Claude session with the operator's own is the conflict they asked to avoid.

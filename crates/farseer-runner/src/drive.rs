@@ -35,6 +35,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::spawn::StdinMode;
     use farseer_core::run::Outcome;
     use std::path::Path;
 
@@ -65,6 +66,7 @@ mod tests {
             Path::new(r"C:\Windows\System32\cmd.exe"),
             &cmd(&["/c", "type", fixture.to_str().unwrap()]),
             &std::env::current_dir().unwrap(),
+            StdinMode::Live,
         )
         .unwrap();
 

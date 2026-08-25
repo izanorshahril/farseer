@@ -37,6 +37,10 @@ Widget code is authored by cell zero into `widgets/` in git and farseer never st
 The **Runs** widget draws `05 run state model`'s verbs on that line and derives which ones to offer from lifecycle, control and the runner's steering path - a finished run offers none, and `steer` never appears for a runner that cannot take one.
 A run verb is on the host bridge and deliberately **not** on the sandbox bridge: a widget the operator did not write can show a run and cannot cancel one.
 
+A manager's own words reach the record as **`manager_answered`**, appended per turn rather than at the end - `10 runner inventory` observed that a Claude Code manager on live stdin answers and stays alive for the next steer, so holding the text until the run finished would mean the operator hears nothing until they close the session they are talking to.
+**`run_finished`** is `05 run state model`'s lifecycle kind, which nothing emitted until now; it carries outcome, text, cost and tokens, and a run with no report quotes its error rather than inventing an apology in the manager's voice.
+Together they are what makes `16 local api surface`'s "the answer arrives on the event stream" true, and the **Conversation** widget is built from them.
+
 The canvas reads the record live: `src/stream.ts` follows `/v1/stream` and the **Activity** widget renders it, so an instruction the composer fires has somewhere to land.
 It parses SSE by hand rather than using `EventSource`, because farseer puts the **event kind** in the `event:` field and `EventSource.onmessage` fires only for unnamed events - it would silently receive nothing.
 The cursor is exclusive, so a dropped connection resumes with no gap and no duplicate.
@@ -136,6 +140,7 @@ Spikes exist to unblock decisions and are not the product. Treat them as evidenc
 
 Recorded in [10 runner inventory](.scratch/farseer/issues/10-runner-inventory.md), and each was measured rather than read from documentation:
 
+- **A one-shot runner must be spawned with a *closed* stdin, not an open pipe nobody writes to.** Observed 2026-08-25: `codex exec` prints "Reading additional input from stdin..." and waits for EOF **before it starts work**, so a pipe held open for the process's lifetime means it never begins - a live process, zero output, and a run that sits at `running` forever with no events and no cost. `SupervisedProcess::spawn` now takes a `StdinMode`, and the **steer frame decides it**: a runner something will steer gets a pipe, and everything else gets EOF at spawn.
 - **A manager stalls on any built-in tool it was not granted, too.** Observed 2026-08-25: a manager told to write a widget read its contract, decided correctly, then sat on "Claude requested permissions to write to ...". `Write`, `Edit` and `Bash` are granted only to a manager whose cell grants a shell-capable tool, per `12 autonomy and deny list`.
 - **A run's workspace is a worktree of `HEAD`.** Anything a manager must read has to be **committed** - an uncommitted file is one it spends real tokens failing to find. A commit it makes is unreachable after teardown unless it leaves a **branch**.
 - **A manager stalls on any MCP tool missing from `--allowedTools`.** Observed 2026-08-25 while wiring `delegate_to_cell`: the manager called the right tool and received "Claude requested permissions to use `mcp__farseer__delegate_to_cell`, but you haven't granted it yet", then sat there. Every offline test passed throughout, because the tool was on the face and only the grant was missing. `invocation.rs` now derives the flag from `MANAGER_ALLOWED_TOOLS` and a test walks the face's own `list_tools` output against it.

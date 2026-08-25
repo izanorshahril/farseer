@@ -45,7 +45,7 @@ use farseer_core::{Actor, CellDefinition, EventKind, NewEvent, Outcome, Seq};
 use farseer_runner::claude_code::{ParseError, RunnerSignal};
 use farseer_runner::drive::drive;
 use farseer_runner::resolve::resolve;
-use farseer_runner::spawn::{CancelToken, SpawnError, StdinHandle, SupervisedProcess};
+use farseer_runner::spawn::{CancelToken, SpawnError, StdinHandle, StdinMode, SupervisedProcess};
 use farseer_store::{RunRow, Store, StoreError};
 
 /// Where a run's events and row land. One method per write `run_worker`
@@ -237,7 +237,20 @@ impl StartedWorker {
         steer_frame: Option<fn(&str) -> String>,
     ) -> Result<Self, ManagerError> {
         Ok(Self {
-            proc: SupervisedProcess::spawn(exe, args, cwd)?,
+            // The steer frame is the reason to hold a stdin open, so it is also
+            // the answer to whether one should exist. A runner nobody steers
+            // gets EOF at spawn - `codex exec` waits for it before starting, and
+            // an open pipe nobody writes to is a run that never begins.
+            proc: SupervisedProcess::spawn(
+                exe,
+                args,
+                cwd,
+                if steer_frame.is_some() {
+                    StdinMode::Live
+                } else {
+                    StdinMode::Closed
+                },
+            )?,
             activity: Arc::new(Mutex::new(ActivityClock::started_at(0))),
             monotonic_start: Instant::now(),
             thresholds,
@@ -253,8 +266,13 @@ impl StartedWorker {
     /// Fetch before calling the blocking `run_to_completion`, same reason as
     /// [`Self::cancel_token`]. `None` when this runner has no steering path.
     pub fn steer_handle(&self) -> Option<SteerHandle> {
+        // Both halves have to be there: a frame to wrap the message in, and a
+        // stdin to write it to. They are set together at spawn, and requiring
+        // both here means a mismatch cannot produce a handle that writes into
+        // nothing.
+        let stdin = self.proc.stdin_handle()?;
         self.steer_frame.map(|frame| SteerHandle {
-            stdin: self.proc.stdin_handle(),
+            stdin: stdin.clone(),
             frame,
         })
     }
