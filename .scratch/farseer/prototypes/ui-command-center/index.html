@@ -1,0 +1,742 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PROTOTYPE - farseer operator surface</title>
+<!--
+  PROTOTYPE. Throwaway. Not production code, not a design system, not wired to the API.
+
+  Question: what does the operator look at, and which of `05 run state model`'s verbs
+  are reachable from that surface, when a channel may be project status, content
+  creation, or trading monitoring?
+
+  Three variants on one page, switchable via ?variant=A|B|C and the bar at the bottom.
+  Arrow keys cycle. Data is fixtures in data.js. Every verb button is a stub.
+-->
+<style>
+  :root {
+    --bg: #0b0d10; --panel: #12161b; --panel-2: #171c23; --line: #232b35;
+    --ink: #e6edf3; --ink-dim: #8b97a6; --ink-faint: #5c6673;
+    --live: #3fb950; --stall: #d29922; --hung: #f85149; --paused: #a371f7;
+    --accent: #58a6ff; --ok: #3fb950; --bad: #f85149; --drop: #6e7681;
+    --mono: ui-monospace, "Cascadia Mono", Consolas, monospace;
+    --sans: system-ui, "Segoe UI", sans-serif;
+    --r: 6px;
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; }
+  body {
+    margin: 0; background: var(--bg); color: var(--ink);
+    font: 13px/1.5 var(--sans); overflow: hidden;
+  }
+  #app { height: 100vh; display: flex; flex-direction: column; }
+
+  /* --- shared atoms ------------------------------------------------- */
+  .mono { font-family: var(--mono); }
+  .dim { color: var(--ink-dim); }
+  .faint { color: var(--ink-faint); }
+  .row { display: flex; align-items: center; gap: 8px; }
+  .grow { flex: 1; min-width: 0; }
+  .truncate { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .topbar {
+    display: flex; align-items: center; gap: 16px; padding: 0 14px; height: 44px;
+    border-bottom: 1px solid var(--line); background: var(--panel); flex: none;
+  }
+  .brand { font-weight: 650; letter-spacing: .02em; }
+  .brand span { color: var(--accent); }
+  .stat { display: flex; gap: 6px; align-items: baseline; }
+  .stat b { font-family: var(--mono); font-weight: 600; }
+  .stat i { font-style: normal; color: var(--ink-faint); font-size: 11px; text-transform: uppercase; letter-spacing: .06em; }
+
+  .dot { width: 7px; height: 7px; border-radius: 50%; flex: none; }
+  .d-live { background: var(--live); box-shadow: 0 0 0 3px rgba(63,185,80,.15); }
+  .d-stalled { background: var(--stall); box-shadow: 0 0 0 3px rgba(210,153,34,.15); }
+  .d-likely_hung { background: var(--hung); box-shadow: 0 0 0 3px rgba(248,81,73,.15); }
+  .d-paused { background: var(--paused); }
+  .d-done { background: var(--drop); }
+
+  .pill {
+    font: 11px/1 var(--mono); padding: 3px 6px; border-radius: 4px;
+    border: 1px solid var(--line); color: var(--ink-dim); white-space: nowrap;
+  }
+  .pill.ok { color: var(--ok); border-color: rgba(63,185,80,.35); }
+  .pill.bad { color: var(--bad); border-color: rgba(248,81,73,.35); }
+  .pill.warn { color: var(--stall); border-color: rgba(210,153,34,.35); }
+  .pill.drop { color: var(--drop); }
+  .pill.touched { color: var(--paused); border-color: rgba(163,113,247,.35); }
+
+  button.verb {
+    font: 11px/1 var(--sans); padding: 5px 9px; border-radius: 4px; cursor: pointer;
+    background: var(--panel-2); color: var(--ink); border: 1px solid var(--line);
+  }
+  button.verb:hover { border-color: var(--accent); color: var(--accent); }
+  button.verb.danger:hover { border-color: var(--bad); color: var(--bad); }
+
+  .panel { background: var(--panel); border: 1px solid var(--line); border-radius: var(--r); }
+  .phead {
+    display: flex; align-items: center; gap: 8px; padding: 8px 10px;
+    border-bottom: 1px solid var(--line); font-size: 11px; text-transform: uppercase;
+    letter-spacing: .07em; color: var(--ink-faint);
+  }
+  .scroll { overflow: auto; }
+  .scroll::-webkit-scrollbar { width: 9px; height: 9px; }
+  .scroll::-webkit-scrollbar-thumb { background: #2a323d; border-radius: 5px; }
+
+  .note {
+    margin: 0; padding: 8px 10px; font-size: 11px; color: var(--ink-faint);
+    border-top: 1px dashed var(--line); background: rgba(88,166,255,.04);
+  }
+  .note b { color: var(--accent); font-weight: 600; }
+
+  /* --- variant A: channel rail + thread ----------------------------- */
+  .A { display: grid; grid-template-columns: 210px 1fr 320px; flex: 1; min-height: 0; }
+  .A .rail { border-right: 1px solid var(--line); background: var(--panel); display: flex; flex-direction: column; }
+  .A .rail h4 { margin: 14px 12px 6px; font-size: 10px; letter-spacing: .1em; text-transform: uppercase; color: var(--ink-faint); }
+  .A .chan {
+    display: flex; gap: 8px; align-items: center; padding: 7px 12px; cursor: pointer;
+    border-left: 2px solid transparent;
+  }
+  .A .chan:hover { background: var(--panel-2); }
+  .A .chan.on { background: var(--panel-2); border-left-color: var(--accent); }
+  .A .chan .k { font-size: 10px; color: var(--ink-faint); }
+  .A .center { display: flex; flex-direction: column; min-width: 0; }
+  .A .tabs { display: flex; gap: 2px; padding: 8px 12px 0; border-bottom: 1px solid var(--line); }
+  .A .tab { padding: 6px 11px; font-size: 12px; color: var(--ink-dim); cursor: pointer; border-radius: 5px 5px 0 0; }
+  .A .tab.on { color: var(--ink); background: var(--panel-2); box-shadow: inset 0 -2px 0 var(--accent); }
+  .A .thread { padding: 14px 16px; display: flex; flex-direction: column; gap: 10px; }
+  .A .msg { display: grid; grid-template-columns: 84px 1fr; gap: 10px; }
+  .A .who { font: 11px/1.6 var(--mono); color: var(--ink-faint); text-align: right; }
+  .A .body { border-left: 2px solid var(--line); padding-left: 10px; }
+  .A .body.op { border-left-color: var(--paused); }
+  .A .composer { border-top: 1px solid var(--line); padding: 10px 14px; background: var(--panel); }
+  .A .composer input {
+    width: 100%; background: var(--panel-2); border: 1px solid var(--line); border-radius: 5px;
+    padding: 9px 10px; color: var(--ink); font: 13px var(--sans);
+  }
+  .A .inspect { border-left: 1px solid var(--line); background: var(--panel); display: flex; flex-direction: column; }
+  .A .runcard { padding: 10px 12px; border-bottom: 1px solid var(--line); cursor: pointer; }
+  .A .runcard:hover { background: var(--panel-2); }
+  .A .runcard.on { background: var(--panel-2); }
+  .A .meter { height: 3px; background: #1d242c; border-radius: 2px; overflow: hidden; margin-top: 7px; }
+  .A .meter i { display: block; height: 100%; background: var(--accent); }
+
+  /* --- variant B: canvas of widgets --------------------------------- */
+  .B { flex: 1; min-height: 0; overflow: auto; padding: 14px; }
+  .B .canvas {
+    display: grid; gap: 12px; grid-template-columns: repeat(12, 1fr);
+    grid-auto-rows: minmax(90px, auto);
+  }
+  .B .w { grid-column: span 4; display: flex; flex-direction: column; overflow: hidden; }
+  .B .w.wide { grid-column: span 8; }
+  .B .w.full { grid-column: span 12; }
+  .B .w.tall { grid-row: span 2; }
+  .B .grip { cursor: grab; color: var(--ink-faint); letter-spacing: -2px; }
+  .B .body { padding: 10px 12px; display: flex; flex-direction: column; gap: 9px; overflow: auto; }
+  .B .runline { display: flex; gap: 8px; align-items: center; padding: 6px; border-radius: 5px; background: var(--panel-2); }
+  .B .runline:hover { outline: 1px solid var(--line); }
+  .B .big { font: 600 26px/1 var(--mono); }
+  .B .quota { display: flex; flex-direction: column; gap: 4px; }
+  .B .bar { height: 6px; background: #1d242c; border-radius: 3px; overflow: hidden; }
+  .B .bar i { display: block; height: 100%; }
+  .B .sparks { display: flex; gap: 3px; align-items: flex-end; height: 34px; }
+  .B .sparks i { flex: 1; background: linear-gradient(180deg, var(--accent), #1f6feb); border-radius: 1px; }
+  .B .ask {
+    flex: 1; background: var(--panel-2); border: 1px solid var(--line); border-radius: 5px;
+    padding: 8px 10px; color: var(--ink); font: 13px var(--sans);
+  }
+  .B .ask:focus { outline: none; border-color: var(--accent); }
+
+  /* --- variant C: blotter ------------------------------------------- */
+  .C { flex: 1; min-height: 0; display: grid; grid-template-columns: 1fr 340px; }
+  .C .main { display: flex; flex-direction: column; min-width: 0; }
+  .C .strip { display: flex; gap: 20px; padding: 10px 14px; border-bottom: 1px solid var(--line); background: var(--panel); }
+  .C .modes { margin-left: auto; display: flex; gap: 2px; }
+  .C .mode { padding: 4px 10px; font-size: 11px; border: 1px solid var(--line); color: var(--ink-dim); cursor: pointer; }
+  .C .mode:first-child { border-radius: 4px 0 0 4px; }
+  .C .mode:last-child { border-radius: 0 4px 4px 0; }
+  .C .mode.on { background: var(--panel-2); color: var(--ink); border-color: var(--accent); }
+  .C table { width: 100%; border-collapse: collapse; font-size: 12px; }
+  .C th {
+    position: sticky; top: 0; background: var(--panel); text-align: left; font-weight: 500;
+    font-size: 10px; letter-spacing: .08em; text-transform: uppercase; color: var(--ink-faint);
+    padding: 8px 10px; border-bottom: 1px solid var(--line);
+  }
+  .C td { padding: 7px 10px; border-bottom: 1px solid #1a2028; }
+  .C tr:hover td { background: var(--panel-2); }
+  .C tr.on td { background: #1a2230; }
+  .C .drawer { border-left: 1px solid var(--line); background: var(--panel); display: flex; flex-direction: column; }
+  .C .kv { display: grid; grid-template-columns: 96px 1fr; gap: 5px 10px; padding: 10px 12px; font-size: 12px; }
+  .C .kv b { color: var(--ink-faint); font-weight: 400; }
+
+  /* --- kanban (shared subview) -------------------------------------- */
+  .board { display: flex; gap: 10px; padding: 12px; align-items: flex-start; overflow: auto; }
+  .board .col { flex: 1 1 0; min-width: 175px; background: var(--panel); border: 1px solid var(--line); border-radius: var(--r); }
+  .board .colhead {
+    padding: 8px 10px; font-size: 11px; text-transform: uppercase; letter-spacing: .07em;
+    color: var(--ink-faint); display: flex; justify-content: space-between; border-bottom: 1px solid var(--line);
+  }
+  .board .cards { padding: 8px; display: flex; flex-direction: column; gap: 8px; }
+  .board .card { background: var(--panel-2); border: 1px solid var(--line); border-radius: 5px; padding: 8px; cursor: grab; }
+  .board .card:hover { border-color: var(--accent); }
+  .board .card h5 { margin: 0 0 6px; font-size: 12px; font-weight: 500; }
+
+  /* --- switcher ------------------------------------------------------ */
+  #switch {
+    position: fixed; left: 50%; bottom: 16px; transform: translateX(-50%); z-index: 99;
+    display: flex; align-items: stretch; background: #f0f6fc; color: #0b0d10;
+    border-radius: 999px; box-shadow: 0 8px 30px rgba(0,0,0,.55); font: 12px var(--sans);
+  }
+  #switch button { border: 0; background: none; padding: 0 14px; cursor: pointer; font-size: 15px; color: inherit; border-radius: 999px; }
+  #switch button:hover { background: rgba(0,0,0,.08); }
+  #switch .label { padding: 9px 6px; font-weight: 600; white-space: nowrap; }
+  #switch .label em { font-style: normal; opacity: .55; font-weight: 500; }
+</style>
+</head>
+<body>
+<div id="app"></div>
+<div id="switch"></div>
+
+<script>
+// PROTOTYPE fixture data - throwaway. No API, no persistence.
+// Shapes follow `16 local api surface`'s real responses closely enough to judge
+// layout: cells, runs, events, quota windows, analytics rows.
+
+const NOW = 1756137600; // fixed clock so liveness never drifts while you look
+
+const CELLS = [
+  {
+    cell_id: 'zero',
+    name: 'Cell Zero',
+    description: 'The builder harness. Builds and maintains other cells.',
+    kind: 'project status',
+    manager: { runner: 'claude-code', state: 'running' },
+    roster: [
+      { kind: 'worker', name: 'coder', runner: 'codex' },
+      { kind: 'worker', name: 'reviewer', runner: 'cursor-agent' },
+    ],
+    workspace_strategy: 'worktree',
+    spend_24h: 4.81,
+  },
+  {
+    cell_id: 'social',
+    name: 'Social',
+    description: 'Writes and publishes posts.',
+    kind: 'content creation',
+    manager: { runner: 'claude-code', state: 'running' },
+    roster: [
+      { kind: 'worker', name: 'writer', runner: 'codex' },
+      { kind: 'worker', name: 'editor', runner: 'goose' },
+    ],
+    workspace_strategy: 'plain_directory',
+    spend_24h: 1.12,
+  },
+  {
+    cell_id: 'markets',
+    name: 'Markets',
+    description: 'Watches instruments and reports what moved and why.',
+    kind: 'trading monitoring',
+    manager: { runner: 'claude-code', state: 'idle' },
+    roster: [
+      { kind: 'worker', name: 'scanner', runner: 'goose' },
+      { kind: 'peer', name: 'social', runner: '-' },
+    ],
+    workspace_strategy: 'plain_directory',
+    spend_24h: 0.34,
+  },
+];
+
+// lifecycle: queued | running | ok | failed | cancelled | abandoned  (`05` + `23`)
+// control:   autonomous | observed | taken_over                     (`07`)
+// liveness is DERIVED from idle_s, never stored                     (`05`)
+const RUNS = [
+  {
+    run_id: '01J8QN', cell: 'zero', task: 'T-114', title: 'Wire quota accounting behind the manager loop',
+    actor: 'manager', runner: 'claude-code', lifecycle: 'running', control: 'autonomous',
+    idle_s: 9, cost: 1.94, tokens: 412_331, started_s: 2280, operator_touched: false,
+    budget: { usd: 3.0, wall_s: 5400 },
+  },
+  {
+    run_id: '01J8QP', cell: 'zero', task: 'T-114', title: 'worker: port the rate_limit_event parse into the store',
+    actor: 'coder', runner: 'codex', lifecycle: 'running', control: 'observed',
+    idle_s: 168, cost: 0.62, tokens: 96_004, started_s: 900, operator_touched: false,
+    budget: { usd: 1.5, wall_s: 1800 },
+  },
+  {
+    run_id: '01J8QQ', cell: 'zero', task: 'T-113', title: 'worker: rewrite the teardown retry loop',
+    actor: 'coder', runner: 'codex', lifecycle: 'running', control: 'taken_over',
+    idle_s: 640, cost: 0.41, tokens: 71_220, started_s: 3900, operator_touched: true,
+    budget: { usd: 1.5, wall_s: 1800 },
+  },
+  {
+    run_id: '01J8QR', cell: 'social', task: 'T-092', title: 'Draft the launch thread, five posts, one voice',
+    actor: 'manager', runner: 'claude-code', lifecycle: 'running', control: 'autonomous',
+    idle_s: 31, cost: 0.44, tokens: 58_910, started_s: 610, operator_touched: false,
+    budget: { usd: 2.0, wall_s: 3600 },
+  },
+  {
+    run_id: '01J8QS', cell: 'social', task: 'T-092', title: 'worker: fact-check the three claims in post 2',
+    actor: 'editor', runner: 'goose', lifecycle: 'queued', control: 'autonomous',
+    idle_s: 0, cost: 0, tokens: 0, started_s: 0, operator_touched: false,
+    budget: { usd: 0.5, wall_s: 900 },
+  },
+  {
+    run_id: '01J8QT', cell: 'markets', task: 'T-201', title: 'Overnight move report: what gapped and why',
+    actor: 'scanner', runner: 'goose', lifecycle: 'ok', control: 'autonomous',
+    idle_s: 5400, cost: 0.09, tokens: 21_400, started_s: 7200, operator_touched: false,
+    budget: { usd: 0.5, wall_s: 900 },
+  },
+  {
+    run_id: '01J8QU', cell: 'markets', task: 'T-200', title: 'Watchlist rebuild from yesterday close',
+    actor: 'scanner', runner: 'goose', lifecycle: 'failed', control: 'autonomous',
+    idle_s: 12_600, cost: 0.25, tokens: 40_990, started_s: 13_000, operator_touched: false,
+    budget: { usd: 0.5, wall_s: 900 },
+  },
+  {
+    run_id: '01J8QV', cell: 'social', task: 'T-091', title: 'Repurpose the changelog into a short post',
+    actor: 'writer', runner: 'codex', lifecycle: 'cancelled', control: 'autonomous',
+    idle_s: 20_000, cost: 0.06, tokens: 8_120, started_s: 21_000, operator_touched: true,
+    budget: { usd: 0.5, wall_s: 900 },
+  },
+  {
+    run_id: '01J8QW', cell: 'zero', task: 'T-112', title: 'worker: second reviewer pass, superseded',
+    actor: 'reviewer', runner: 'cursor-agent', lifecycle: 'abandoned', control: 'autonomous',
+    idle_s: 30_000, cost: 0, tokens: 0, started_s: 30_100, operator_touched: false,
+    budget: { usd: 1.0, wall_s: 1800 },
+  },
+];
+
+// `02 record scope`: the log is what happened. A UI renders it; it never writes it.
+const EVENTS = [
+  { seq: 4821, run: '01J8QN', actor: 'manager', kind: 'progress', ts: 9,   text: 'tool_result read_memory: 3 claims in cell tier' },
+  { seq: 4820, run: '01J8QN', actor: 'manager', kind: 'progress', ts: 26,  text: 'tool_call delegate_to_worker -> coder' },
+  { seq: 4819, run: '01J8QP', actor: 'coder',   kind: 'progress', ts: 168, text: 'tool_call edit crates/farseer-store/src/quota.rs' },
+  { seq: 4818, run: '01J8QN', actor: 'operator',kind: 'operator_intervened', ts: 240, text: 'steer: "keep the window keyed by account, not runner"' },
+  { seq: 4817, run: '01J8QQ', actor: 'operator',kind: 'control_changed', ts: 900, text: 'taken over by operator' },
+  { seq: 4816, run: '01J8QQ', actor: 'coder',   kind: 'progress', ts: 640, text: 'tool_result cargo test: 2 failed' },
+  { seq: 4815, run: '01J8QR', actor: 'manager', kind: 'progress', ts: 31,  text: 'assistant: drafting post 3 of 5' },
+  { seq: 4814, run: '01J8QT', actor: 'scanner', kind: 'run_finished', ts: 5400, text: 'ok - 4 instruments flagged, report written' },
+];
+
+// `27 quota accounting`: keyed by ACCOUNT, displayed by RUNNER, never a percentage.
+// `allowed` / `exhausted_until(t)` / `unknown`, plus farseer's own spend as a LOWER BOUND.
+const QUOTA = [
+  { account: 'anthropic-max', runners: ['claude-code'], status: 'allowed', resets_in_s: 4820, farseer_spend: 6.11 },
+  { account: 'openai-plus', runners: ['codex', 'goose'], status: 'exhausted_until', resets_in_s: 1140, farseer_spend: 1.28 },
+  { account: 'cursor-pro', runners: ['cursor-agent'], status: 'unknown', resets_in_s: null, farseer_spend: 0.41 },
+];
+
+// `11 analytics questions`: three entities, two edge kinds. These are the answers
+// the operator actually asked for.
+const ANALYTICS = {
+  intervention_rate: 0.22,
+  rework_rate: 0.14,
+  cost_per_task: 1.63,
+  lessons: [
+    { cell: 'zero', text: 'codex refuses a fresh dir without --skip-git-repo-check', hits: 4 },
+    { cell: 'social', text: 'a post over 280 chars is always rewritten by the editor', hits: 3 },
+    { cell: 'markets', text: 'the scanner over-reports gaps under 0.5%', hits: 2 },
+  ],
+};
+
+const TASKS = [
+  { task: 'T-114', cell: 'zero', title: 'Quota accounting end to end', column: 'in_flight', runs: ['01J8QN', '01J8QP'], owner: 'manager' },
+  { task: 'T-113', cell: 'zero', title: 'Teardown retry loop', column: 'needs_operator', runs: ['01J8QQ'], owner: 'coder' },
+  { task: 'T-112', cell: 'zero', title: 'Second review pass', column: 'dropped', runs: ['01J8QW'], owner: 'reviewer' },
+  { task: 'T-111', cell: 'zero', title: 'Key cap on ui-state', column: 'landed', runs: [], owner: 'coder' },
+  { task: 'T-092', cell: 'social', title: 'Launch thread, five posts', column: 'in_flight', runs: ['01J8QR', '01J8QS'], owner: 'manager' },
+  { task: 'T-091', cell: 'social', title: 'Changelog repurpose', column: 'dropped', runs: ['01J8QV'], owner: 'writer' },
+  { task: 'T-090', cell: 'social', title: 'Weekly digest', column: 'queued', runs: [], owner: 'writer' },
+  { task: 'T-201', cell: 'markets', title: 'Overnight move report', column: 'landed', runs: ['01J8QT'], owner: 'scanner' },
+  { task: 'T-200', cell: 'markets', title: 'Watchlist rebuild', column: 'needs_operator', runs: ['01J8QU'], owner: 'scanner' },
+];
+
+const COLUMNS = [
+  { id: 'queued', label: 'Queued' },
+  { id: 'in_flight', label: 'In flight' },
+  { id: 'needs_operator', label: 'Needs operator' },
+  { id: 'landed', label: 'Landed' },
+  { id: 'dropped', label: 'Dropped' },
+];
+
+// `05 run state model`: liveness is derived from idle time, never stored.
+function liveness(run) {
+  if (run.lifecycle !== 'running') return 'done';
+  if (run.control === 'taken_over') return 'paused'; // the clock pauses off autonomous
+  if (run.idle_s >= 600) return 'likely_hung';
+  if (run.idle_s >= 120) return 'stalled';
+  return 'live';
+}
+
+// Which verbs `05` allows on a run, given its state. A surface that offers a verb
+// the runtime would refuse is a surface that lies.
+function verbsFor(run) {
+  const v = [];
+  if (run.lifecycle === 'running') {
+    v.push('steer', 'cancel');
+    if (run.control === 'autonomous') v.push('observe', 'take over');
+    if (run.control === 'observed') v.push('take over', 'release');
+    if (run.control === 'taken_over') v.push('release');
+  }
+  if (run.lifecycle !== 'running' && run.lifecycle !== 'queued') v.push('re-run', 're-scope');
+  if (run.lifecycle === 'queued') v.push('cancel');
+  return v;
+}
+
+function fmtDur(s) {
+  if (s < 60) return `${s}s`;
+  if (s < 3600) return `${Math.floor(s / 60)}m`;
+  return `${(s / 3600).toFixed(1)}h`;
+}
+function usd(n) { return `$${n.toFixed(2)}`; }
+function cellOf(id) { return CELLS.find((c) => c.cell_id === id); }
+function runsOf(cell) { return RUNS.filter((r) => r.cell === cell); }
+
+</script>
+<script>
+const VARIANTS = {
+  A: { name: 'Channel rail + thread', render: renderA },
+  B: { name: 'Canvas of widgets', render: renderB },
+  C: { name: 'Fleet blotter', render: renderC },
+};
+
+const state = {
+  variant: (new URLSearchParams(location.search).get('variant') || 'A').toUpperCase(),
+  cell: 'zero',
+  tab: 'thread',        // A: thread | board | runs
+  run: '01J8QN',
+  mode: 'table',        // C: table | board
+  overlay: null,        // B: board overlay
+};
+if (!VARIANTS[state.variant]) state.variant = 'A';
+
+const el = (h) => { const t = document.createElement('template'); t.innerHTML = h.trim(); return t.content.firstElementChild; };
+const esc = (s) => String(s).replace(/[&<>]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c]));
+const lifeClass = (l) => ({ ok: 'ok', failed: 'bad', cancelled: 'drop', abandoned: 'drop', running: '', queued: '' }[l] || '');
+
+function verbBar(run, extra = '') {
+  return `<div class="row" style="flex-wrap:wrap;gap:5px">${verbsFor(run)
+    .map((v) => `<button class="verb ${v === 'cancel' ? 'danger' : ''}" data-verb="${v}" data-run="${run.run_id}">${v}</button>`)
+    .join('')}${extra}</div>`;
+}
+
+function topbar(extra = '') {
+  const running = RUNS.filter((r) => r.lifecycle === 'running');
+  const attention = running.filter((r) => ['stalled', 'likely_hung'].includes(liveness(r))).length;
+  const spend = CELLS.reduce((a, c) => a + c.spend_24h, 0);
+  return `<div class="topbar">
+    <div class="brand">far<span>seer</span></div>
+    <div class="stat"><i>runs</i><b>${running.length} live</b></div>
+    <div class="stat"><i>attention</i><b style="color:${attention ? 'var(--stall)' : 'var(--ink)'}">${attention}</b></div>
+    <div class="stat"><i>24h</i><b>${usd(spend)}</b></div>
+    <div class="stat"><i>windows</i><b>${QUOTA.filter((q) => q.status === 'allowed').length}/${QUOTA.length} allowed</b></div>
+    <div class="grow"></div>${extra}
+  </div>`;
+}
+
+/* ==================================================================== A */
+/* Channels down the left, one channel's conversation in the middle, the
+   run inspector on the right. The kanban is a TAB inside the channel.
+   Verbs live on the selected run, in the inspector, and steer doubles as
+   the composer at the bottom of the thread.                             */
+function renderA() {
+  const cell = cellOf(state.cell);
+  const runs = runsOf(state.cell);
+  const run = RUNS.find((r) => r.run_id === state.run) || runs[0];
+
+  const rail = CELLS.map((c) => {
+    const live = runsOf(c.cell_id).filter((r) => r.lifecycle === 'running');
+    const worst = live.map(liveness).includes('likely_hung') ? 'likely_hung'
+      : live.map(liveness).includes('stalled') ? 'stalled' : live.length ? 'live' : 'done';
+    return `<div class="chan ${c.cell_id === state.cell ? 'on' : ''}" data-cell="${c.cell_id}">
+      <span class="dot d-${worst}"></span>
+      <span class="grow truncate">${esc(c.name)}<div class="k">${esc(c.kind)}</div></span>
+      <span class="pill">${live.length}</span></div>`;
+  }).join('');
+
+  const thread = EVENTS.filter((e) => runs.some((r) => r.run_id === e.run)).map((e) => `
+    <div class="msg">
+      <div class="who">${esc(e.actor)}<br><span class="faint">${fmtDur(e.ts)} ago</span></div>
+      <div class="body ${e.actor === 'operator' ? 'op' : ''}">
+        <div>${esc(e.text)}</div>
+        <div class="faint mono" style="font-size:11px">seq ${e.seq} · run ${e.run} · ${e.kind}</div>
+      </div>
+    </div>`).join('');
+
+  const runList = runs.map((r) => `
+    <div class="runcard ${r.run_id === state.run ? 'on' : ''}" data-run="${r.run_id}">
+      <div class="row"><span class="dot d-${liveness(r)}"></span>
+        <span class="grow truncate">${esc(r.title)}</span>
+        <span class="pill ${lifeClass(r.lifecycle)}">${r.lifecycle}</span></div>
+      <div class="row faint mono" style="font-size:11px;margin-top:4px">
+        ${r.actor} · ${r.runner} · ${usd(r.cost)} · idle ${fmtDur(r.idle_s)}
+        ${r.operator_touched ? '<span class="pill touched">touched</span>' : ''}
+      </div>
+      <div class="meter"><i style="width:${Math.min(100, (r.cost / r.budget.usd) * 100).toFixed(0)}%"></i></div>
+    </div>`).join('');
+
+  const center = state.tab === 'board'
+    ? board(state.cell)
+    : `<div class="thread scroll grow">${thread}</div>
+       <div class="composer">
+         <input placeholder="Instruct ${esc(cell.name)}'s manager, or steer run ${run ? run.run_id : ''} ..." data-verb="steer">
+         <div class="note" style="border:0;background:none;padding:6px 0 0">
+           <b>steer</b> and <b>instruct</b> are the same box - the target is whatever is selected on the right.
+         </div>
+       </div>`;
+
+  return `${topbar()}
+  <div class="A">
+    <div class="rail scroll"><h4>Channels</h4>${rail}
+      <div class="note" style="margin-top:auto">A channel is a <b>cell</b>. Project status, content, and markets are the same primitive - only the roster differs.</div>
+    </div>
+    <div class="center">
+      <div class="tabs">
+        ${['thread', 'board'].map((t) => `<div class="tab ${state.tab === t ? 'on' : ''}" data-tab="${t}">${t === 'thread' ? 'Conversation' : 'Board'}</div>`).join('')}
+        <div class="grow"></div>
+        <div class="row faint" style="font-size:11px;padding-bottom:6px">${esc(cell.description)}</div>
+      </div>
+      ${center}
+    </div>
+    <div class="inspect">
+      <div class="phead">Runs in ${esc(cell.name)}</div>
+      <div class="scroll grow">${runList}</div>
+      ${run ? `<div style="padding:10px 12px;border-top:1px solid var(--line)">
+        <div class="row" style="margin-bottom:8px"><span class="dot d-${liveness(run)}"></span>
+          <b class="mono">${run.run_id}</b><span class="pill">${run.control.replace('_', ' ')}</span>
+          <span class="pill">${liveness(run)}</span></div>
+        ${verbBar(run)}
+        <div class="note" style="margin-top:10px">Verbs reachable here: <b>${verbsFor(run).join(', ') || 'none'}</b>. Everything else is read.</div>
+      </div>` : ''}
+    </div>
+  </div>`;
+}
+
+/* ==================================================================== B */
+/* No channel list at all. Every surface is a widget on one arrangeable
+   canvas: a cell tile per channel, a quota tile, an analytics tile, a
+   spend tile. The kanban is a widget that expands to an overlay.
+   Verbs live inside the cell tile, on the run line.                      */
+function renderB() {
+  const cellTile = (c) => {
+    const live = runsOf(c.cell_id).filter((r) => r.lifecycle === 'running');
+    return `<div class="panel w tall">
+      <div class="phead"><span class="grip">⠿</span>${esc(c.name)}<span class="faint">${esc(c.kind)}</span>
+        <span class="grow"></span><span class="pill">${usd(c.spend_24h)}/24h</span></div>
+      <div class="body">
+        ${live.length ? live.map((r) => `
+          <div class="runline">
+            <span class="dot d-${liveness(r)}"></span>
+            <span class="grow truncate">${esc(r.title)}<div class="faint mono" style="font-size:11px">${r.actor} · ${r.runner} · idle ${fmtDur(r.idle_s)}</div></span>
+            ${verbsFor(r).slice(0, 2).map((v) => `<button class="verb ${v === 'cancel' ? 'danger' : ''}" data-verb="${v}" data-run="${r.run_id}">${v}</button>`).join('')}
+          </div>`).join('')
+          : '<div class="faint">idle - no live run</div>'}
+        <div class="row faint" style="font-size:11px;margin-top:auto">roster: ${c.roster.map((r) => `${r.name}<span class="faint">/${r.runner}</span>`).join(' · ')}</div>
+        <button class="verb" data-overlay="${c.cell_id}">open board</button>
+      </div>
+    </div>`;
+  };
+
+  const quota = `<div class="panel w">
+    <div class="phead"><span class="grip">⠿</span>Windows<span class="grow"></span><span class="faint">by account</span></div>
+    <div class="body">${QUOTA.map((q) => `
+      <div class="quota">
+        <div class="row"><b class="mono">${q.account}</b><span class="grow"></span>
+          <span class="pill ${q.status === 'allowed' ? 'ok' : q.status === 'exhausted_until' ? 'bad' : ''}">${q.status.replace('_', ' ')}</span></div>
+        <div class="bar"><i style="width:${q.resets_in_s ? 100 - Math.min(100, q.resets_in_s / 72) : 0}%;background:${q.status === 'allowed' ? 'var(--live)' : q.status === 'exhausted_until' ? 'var(--hung)' : 'var(--drop)'}"></i></div>
+        <div class="row faint" style="font-size:11px">${q.runners.join(', ')}<span class="grow"></span>
+          ${q.resets_in_s ? `resets in ${fmtDur(q.resets_in_s)}` : 'no reset known'} · farseer spent ${usd(q.farseer_spend)}</div>
+      </div>`).join('')}
+      <div class="note">Never a percentage - <b>27 quota accounting</b> proved farseer's own spend is a lower bound.</div>
+    </div>
+  </div>`;
+
+  const spend = `<div class="panel w">
+    <div class="phead"><span class="grip">⠿</span>Spend<span class="grow"></span><span class="faint">7 days</span></div>
+    <div class="body">
+      <div class="row"><span class="big">${usd(CELLS.reduce((a, c) => a + c.spend_24h, 0))}</span><span class="faint">last 24h</span></div>
+      <div class="sparks">${[8, 14, 9, 22, 17, 26, 19].map((h) => `<i style="height:${h * 3}%"></i>`).join('')}</div>
+      <div class="row faint" style="font-size:11px">cost per task ${usd(ANALYTICS.cost_per_task)} · rework ${(ANALYTICS.rework_rate * 100).toFixed(0)}% · intervention ${(ANALYTICS.intervention_rate * 100).toFixed(0)}%</div>
+    </div>
+  </div>`;
+
+  const lessons = `<div class="panel w wide">
+    <div class="phead"><span class="grip">⠿</span>Lessons<span class="grow"></span><span class="faint">memory, cell tier</span></div>
+    <div class="body">${ANALYTICS.lessons.map((l) => `
+      <div class="row"><span class="pill">${l.cell}</span><span class="grow">${esc(l.text)}</span><span class="faint mono">${l.hits}x</span></div>`).join('')}
+    </div>
+  </div>`;
+
+  const attention = `<div class="panel w full">
+    <div class="phead"><span class="grip">⠿</span>Needs you<span class="grow"></span><span class="faint">across every channel</span></div>
+    <div class="body">${RUNS.filter((r) => ['stalled', 'likely_hung', 'paused'].includes(liveness(r)) || r.lifecycle === 'failed').map((r) => `
+      <div class="runline"><span class="dot d-${liveness(r)}"></span>
+        <span class="pill">${r.cell}</span>
+        <span class="grow truncate">${esc(r.title)}</span>
+        <span class="faint mono">${liveness(r) === 'done' ? r.lifecycle : liveness(r)} · idle ${fmtDur(r.idle_s)}</span>
+        ${verbBar(r)}</div>`).join('')}
+    </div>
+  </div>`;
+
+  const overlay = state.overlay ? `
+    <div style="position:fixed;inset:0;background:rgba(5,7,10,.72);z-index:50;display:flex;flex-direction:column">
+      <div class="row" style="padding:12px 16px"><b>${esc(cellOf(state.overlay).name)} board</b>
+        <span class="grow"></span><button class="verb" data-overlay="">close</button></div>
+      <div class="grow scroll">${board(state.overlay)}</div>
+    </div>` : '';
+
+  const composer = `<div class="panel w full" style="position:sticky;top:0;z-index:5">
+    <div class="body" style="padding:8px 10px">
+      <div class="row">
+        <span class="pill">to: top manager</span>
+        <input class="ask" placeholder="Ask for anything - a new widget, a status, work in any channel ..." data-verb="instruct">
+      </div>
+      <div class="note" style="border:0;background:none;padding:4px 0 0">
+        One address for every request. The widget you typed from is the <b>anchor</b>, never the destination -
+        the top manager decides where the work goes. Operator verbs on a run stay direct.
+      </div>
+    </div>
+  </div>`;
+
+  return `${topbar('<span class="faint" style="font-size:11px">canvas: drag to arrange · saved to /v1/ui-state</span>')}
+  <div class="B scroll"><div class="canvas">
+    ${composer}
+    ${CELLS.map(cellTile).join('')}${attention}${quota}${spend}${lessons}
+  </div></div>${overlay}`;
+}
+
+/* ==================================================================== C */
+/* One dense table of every run in the fleet, sorted by what needs a human.
+   No channel navigation - the cell is a column you sort by. Board is a
+   MODE over the same rows, not a place. Verbs live in the right drawer.  */
+function renderC() {
+  const order = { likely_hung: 0, stalled: 1, paused: 2, live: 3, done: 4 };
+  const rows = [...RUNS].sort((a, b) => order[liveness(a)] - order[liveness(b)] || a.cell.localeCompare(b.cell));
+  const run = RUNS.find((r) => r.run_id === state.run) || rows[0];
+
+  const table = `<div class="scroll grow"><table>
+    <thead><tr><th></th><th>run</th><th>channel</th><th>title</th><th>actor</th><th>runner</th>
+      <th>lifecycle</th><th>control</th><th>idle</th><th>cost</th><th>budget</th></tr></thead>
+    <tbody>${rows.map((r) => `
+      <tr data-run="${r.run_id}" class="${r.run_id === run.run_id ? 'on' : ''}">
+        <td><span class="dot d-${liveness(r)}"></span></td>
+        <td class="mono">${r.run_id}</td>
+        <td><span class="pill">${r.cell}</span></td>
+        <td class="truncate" style="max-width:320px">${esc(r.title)}</td>
+        <td class="dim">${r.actor}</td><td class="dim mono">${r.runner}</td>
+        <td><span class="pill ${lifeClass(r.lifecycle)}">${r.lifecycle}</span></td>
+        <td class="dim">${r.control.replace('_', ' ')}</td>
+        <td class="mono ${liveness(r) === 'likely_hung' ? 'bad' : ''}">${r.lifecycle === 'running' ? fmtDur(r.idle_s) : '-'}</td>
+        <td class="mono">${usd(r.cost)}</td>
+        <td class="mono faint">${usd(r.budget.usd)}</td>
+      </tr>`).join('')}</tbody></table></div>`;
+
+  return `${topbar()}
+  <div class="C">
+    <div class="main">
+      <div class="strip">
+        ${[['likely hung', RUNS.filter((r) => liveness(r) === 'likely_hung').length, 'var(--hung)'],
+           ['stalled', RUNS.filter((r) => liveness(r) === 'stalled').length, 'var(--stall)'],
+           ['taken over', RUNS.filter((r) => r.control === 'taken_over').length, 'var(--paused)'],
+           ['live', RUNS.filter((r) => liveness(r) === 'live').length, 'var(--live)']]
+          .map(([k, n, c]) => `<div class="stat"><i>${k}</i><b style="color:${c}">${n}</b></div>`).join('')}
+        <div class="modes">
+          ${['table', 'board'].map((m) => `<div class="mode ${state.mode === m ? 'on' : ''}" data-mode="${m}">${m}</div>`).join('')}
+        </div>
+      </div>
+      ${state.mode === 'table' ? table : `<div class="scroll grow">${board(null)}</div>`}
+    </div>
+    <div class="drawer">
+      <div class="phead">Run ${run.run_id}</div>
+      <div class="kv">
+        <b>title</b><span>${esc(run.title)}</span>
+        <b>channel</b><span>${run.cell}</span>
+        <b>task</b><span class="mono">${run.task}</span>
+        <b>actor</b><span>${run.actor} <span class="faint">via ${run.runner}</span></span>
+        <b>lifecycle</b><span><span class="pill ${lifeClass(run.lifecycle)}">${run.lifecycle}</span></span>
+        <b>control</b><span>${run.control.replace('_', ' ')}</span>
+        <b>liveness</b><span><span class="dot d-${liveness(run)}" style="display:inline-block"></span> ${liveness(run)} <span class="faint">derived</span></span>
+        <b>spend</b><span class="mono">${usd(run.cost)} of ${usd(run.budget.usd)} · ${run.tokens.toLocaleString()} tok</span>
+      </div>
+      <div style="padding:0 12px 10px">${verbBar(run)}</div>
+      <div class="phead">Event stream</div>
+      <div class="scroll grow" style="padding:8px 12px">
+        ${EVENTS.filter((e) => e.run === run.run_id).map((e) => `
+          <div style="margin-bottom:8px"><div class="faint mono" style="font-size:11px">seq ${e.seq} · ${fmtDur(e.ts)} ago · ${e.kind}</div>${esc(e.text)}</div>`).join('')
+          || '<div class="faint">no events for this run in the fixture</div>'}
+      </div>
+      <div class="note">Attach is the same call with a cursor - <b>07 attach semantics</b>. Live and replay differ only in where the cursor starts.</div>
+    </div>
+  </div>`;
+}
+
+/* --- the kanban subview, shared by all three ------------------------- */
+function board(cellId) {
+  const tasks = TASKS.filter((t) => !cellId || t.cell === cellId);
+  return `<div class="board">${COLUMNS.map((col) => {
+    const inCol = tasks.filter((t) => t.column === col.id);
+    return `<div class="col">
+      <div class="colhead"><span>${col.label}</span><span>${inCol.length}</span></div>
+      <div class="cards">${inCol.map((t) => {
+        const runs = t.runs.map((id) => RUNS.find((r) => r.run_id === id)).filter(Boolean);
+        const worst = runs.map(liveness).sort((a, b) => ({ likely_hung: 0, stalled: 1, paused: 2, live: 3, done: 4 }[a] - { likely_hung: 0, stalled: 1, paused: 2, live: 3, done: 4 }[b]))[0];
+        return `<div class="card" data-run="${t.runs[0] || ''}">
+          <h5>${esc(t.title)}</h5>
+          <div class="row faint mono" style="font-size:11px">
+            ${!cellId ? `<span class="pill">${t.cell}</span>` : ''}
+            <span>${t.task}</span><span class="grow"></span>
+            ${worst ? `<span class="dot d-${worst}"></span>` : ''}${t.owner}
+          </div>
+          ${runs.length ? `<div class="row" style="margin-top:7px;gap:4px;flex-wrap:wrap">${runs.map((r) => `<span class="pill ${lifeClass(r.lifecycle)}">${r.run_id} ${r.lifecycle}</span>`).join('')}</div>` : ''}
+        </div>`;
+      }).join('') || '<div class="faint" style="padding:4px">-</div>'}</div>
+    </div>`;
+  }).join('')}</div>`;
+}
+
+/* --- switcher + wiring ---------------------------------------------- */
+function renderSwitch() {
+  const keys = Object.keys(VARIANTS);
+  document.getElementById('switch').innerHTML =
+    `<button data-step="-1">&#8592;</button>
+     <div class="label">${state.variant} <em>${VARIANTS[state.variant].name}</em></div>
+     <button data-step="1">&#8594;</button>`;
+  document.querySelectorAll('#switch button').forEach((b) => b.onclick = () => {
+    const i = keys.indexOf(state.variant) + Number(b.dataset.step);
+    state.variant = keys[(i + keys.length) % keys.length];
+    const u = new URL(location); u.searchParams.set('variant', state.variant); history.replaceState({}, '', u);
+    render();
+  });
+}
+
+function render() {
+  document.getElementById('app').innerHTML = VARIANTS[state.variant].render();
+  renderSwitch();
+  document.querySelectorAll('[data-cell]').forEach((n) => n.onclick = () => { state.cell = n.dataset.cell; state.run = (runsOf(state.cell)[0] || {}).run_id; render(); });
+  document.querySelectorAll('[data-tab]').forEach((n) => n.onclick = () => { state.tab = n.dataset.tab; render(); });
+  document.querySelectorAll('[data-mode]').forEach((n) => n.onclick = () => { state.mode = n.dataset.mode; render(); });
+  document.querySelectorAll('[data-overlay]').forEach((n) => n.onclick = () => { state.overlay = n.dataset.overlay || null; render(); });
+  document.querySelectorAll('[data-run]').forEach((n) => n.onclick = (e) => {
+    if (e.target.dataset.verb) return;
+    if (n.dataset.run) { state.run = n.dataset.run; render(); }
+  });
+  document.querySelectorAll('[data-verb]').forEach((n) => n.onclick = (e) => {
+    e.stopPropagation();
+    alert(`PROTOTYPE stub\n\nverb: ${n.dataset.verb}\nrun:  ${n.dataset.run || state.run}\n\nReal call: POST /v1/runs/{id}/${n.dataset.verb}`);
+  });
+}
+
+addEventListener('keydown', (e) => {
+  if (/^(INPUT|TEXTAREA)$/.test(e.target.tagName) || e.target.isContentEditable) return;
+  if (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') return;
+  const keys = Object.keys(VARIANTS);
+  const i = keys.indexOf(state.variant) + (e.key === 'ArrowRight' ? 1 : -1);
+  state.variant = keys[(i + keys.length) % keys.length];
+  const u = new URL(location); u.searchParams.set('variant', state.variant); history.replaceState({}, '', u);
+  render();
+});
+
+render();
+</script>
+</body>
+</html>

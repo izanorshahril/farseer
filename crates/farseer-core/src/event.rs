@@ -1,9 +1,9 @@
 //! The record's unit: an event.
 //!
-//! `02`: `{ seq, event_id, ts, cell_id, run_id, kind, actor, payload }`.
+//! `02 record scope`: `{ seq, event_id, ts, cell_id, run_id, kind, actor, payload }`.
 //!
 //! Events are written by the runtime, from things it **observed**. Agents may
-//! not append them - `02` section 8 is explicit that an agent which can forge
+//! not append them - `02 record scope` section 8 is explicit that an agent which can forge
 //! events can rewrite its own history, at which point the record stops being
 //! evidence and becomes a story the agent tells about itself.
 
@@ -13,7 +13,7 @@ use crate::ids::{CellId, EventId, RunId, Seq};
 
 /// Who caused this.
 ///
-/// `02`: the field that is easy to omit and expensive to add later. Deriving
+/// `02 record scope`: the field that is easy to omit and expensive to add later. Deriving
 /// actor from `kind` works right up until one kind can come from two sources,
 /// and at that moment every historical query becomes quietly wrong with no error
 /// to notice.
@@ -58,38 +58,38 @@ pub struct UnknownActor(pub String);
 /// What happened.
 ///
 /// Open rather than closed, because runner adapters emit kinds farseer's own
-/// code does not name. `02` versions each payload independently, so adding a
+/// code does not name. `02 record scope` versions each payload independently, so adding a
 /// field to one kind never touches the others.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct EventKind(String);
 
 impl EventKind {
-    // Lifecycle, per `05`.
+    // Lifecycle, per `05 run state model`.
     pub const RUN_QUEUED: &'static str = "run_queued";
     pub const RUN_STARTED: &'static str = "run_started";
     pub const RUN_FINISHED: &'static str = "run_finished";
 
-    // The three progress kinds. `05` made these a hard disqualifier for any
+    // The three progress kinds. `05 run state model` made these a hard disqualifier for any
     // control channel that cannot emit them.
     pub const TOOL_CALL_STARTED: &'static str = "tool_call_started";
     pub const TOOL_RESULT: &'static str = "tool_result";
     pub const STATUS_CHANGED: &'static str = "status_changed";
 
-    // Provenance, per `07` and `05`.
+    // Provenance, per `07 attach semantics` and `05 run state model`.
     pub const OPERATOR_INTERVENED: &'static str = "operator_intervened";
     pub const MANAGER_STEERED: &'static str = "manager_steered";
 
     /// Emitted when a worker reads memory through the MCP face. Carried into
-    /// `02` from `11`, and it is what makes "which lessons actually reduced the
+    /// `02 record scope` from `11 analytics questions`, and it is what makes "which lessons actually reduced the
     /// failure rate" answerable at all.
     pub const MEMORY_CONSULTED: &'static str = "memory_consulted";
 
-    /// `02`, amended 2026-08-23. Farseer can record **that** a compaction
+    /// `02 record scope`, amended 2026-08-23. Farseer can record **that** a compaction
     /// happened and **when**. It can never record what was dropped.
     pub const CONTEXT_COMPACTED: &'static str = "context_compacted";
 
-    /// A nested run in the calling cell, per `06` and `22`.
+    /// A nested run in the calling cell, per `06 cell transport` and `22 cell addressing`.
     pub const CELL_CALLED: &'static str = "cell_called";
 
     pub fn new(kind: impl Into<String>) -> Self {
@@ -102,7 +102,7 @@ impl EventKind {
 
     /// Whether this kind belongs to the fleet view and the analytics queries.
     ///
-    /// `05` split one concept into two: **activity** drives the liveness
+    /// `05 run state model` split one concept into two: **activity** drives the liveness
     /// watchdog and is never recorded; **progress** drives the record. Token
     /// streams are activity, so they are absent from this list on purpose.
     pub fn is_progress(&self) -> bool {
@@ -140,7 +140,7 @@ pub struct NewEvent {
     pub run_id: RunId,
     pub kind: EventKind,
     pub actor: Actor,
-    /// Kind-specific and independently versioned, per `02`.
+    /// Kind-specific and independently versioned, per `02 record scope`.
     pub payload: serde_json::Value,
 }
 
@@ -168,7 +168,7 @@ impl NewEvent {
 /// An event as the record holds it.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Event {
-    /// The cursor. **Not contiguous after a purge**, per `09`, so nothing may
+    /// The cursor. **Not contiguous after a purge**, per `09 store decision`, so nothing may
     /// infer how many events happened from a delta between two of these.
     pub seq: Seq,
     pub event_id: EventId,
@@ -180,16 +180,16 @@ pub struct Event {
     pub payload: serde_json::Value,
 }
 
-/// Which cells a reader may see memory from. `02` scopes memory by kind, not by
+/// Which cells a reader may see memory from. `02 record scope` scopes memory by kind, not by
 /// cell, and cross-cell reads beyond `global` are opt-in via the reader's own
 /// definition.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum MemoryTier {
     /// Operator preferences, tool gotchas, Windows workarounds. Readable by
-    /// every cell, and `02` notes this is where nearly all the value sits.
+    /// every cell, and `02 record scope` notes this is where nearly all the value sits.
     Global,
-    /// Domain conventions, brand voice. The default write tier, per `25`.
+    /// Domain conventions, brand voice. The default write tier, per `25 memory lifecycle`.
     CellLocal,
     /// Scratch. Dies with the run.
     RunLocal,

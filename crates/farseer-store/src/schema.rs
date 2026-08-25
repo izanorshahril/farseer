@@ -1,6 +1,6 @@
-//! The schema `09` benched, plus the tables `02` and `24` require.
+//! The schema `09 store decision` benched, plus the tables `02 record scope` and `24 ui state persistence` require.
 //!
-//! `09`'s verdict was "SQLite. Not close." - a cursor scan at 100x the target
+//! `09 store decision`'s verdict was "SQLite. Not close." - a cursor scan at 100x the target
 //! scale runs at p99 425us, and a 10x increase in data moved that from 299us.
 //! The hot path is effectively scale-invariant because `seq` is the rowid.
 
@@ -22,7 +22,7 @@ CREATE TABLE IF NOT EXISTS events (
 CREATE INDEX IF NOT EXISTS events_run ON events(run_id, seq);
 CREATE INDEX IF NOT EXISTS events_cell ON events(cell_id, seq);
 
--- `11` cut the analytics surface to three entities and two edge kinds.
+-- `11 analytics questions` cut the analytics surface to three entities and two edge kinds.
 CREATE TABLE IF NOT EXISTS runs (
     run_id           BLOB PRIMARY KEY,
     task_id          BLOB NOT NULL,
@@ -40,8 +40,8 @@ CREATE INDEX IF NOT EXISTS runs_task ON runs(task_id);
 CREATE INDEX IF NOT EXISTS runs_cell ON runs(cell_id);
 
 -- Memory is written by agents, as claims, never as observations.
--- Retraction and consolidation are appends: `25` resolves latest-wins over a
--- superseding tombstone, because `02` made the record append-only.
+-- Retraction and consolidation are appends: `25 memory lifecycle` resolves latest-wins over a
+-- superseding tombstone, because `02 record scope` made the record append-only.
 CREATE TABLE IF NOT EXISTS memories (
     memory_id  BLOB PRIMARY KEY,
     tier       TEXT NOT NULL,        -- global / cell_local / run_local
@@ -52,7 +52,7 @@ CREATE TABLE IF NOT EXISTS memories (
     ts         INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS memories_scope ON memories(tier, cell_id);
--- Supersession is how `25` retracts and consolidates: an append, never a
+-- Supersession is how `25 memory lifecycle` retracts and consolidates: an append, never a
 -- removal, so the history of what was believed and when survives.
 CREATE TABLE IF NOT EXISTS supersedes (
     new_id BLOB NOT NULL,
@@ -76,7 +76,7 @@ CREATE TABLE IF NOT EXISTS rescoped_from (
 );
 CREATE INDEX IF NOT EXISTS rescoped_parent ON rescoped_from(parent);
 
--- `24`: an opaque blob farseer never parses. Mutable, last-write-wins, no
+-- `24 ui state persistence`: an opaque blob farseer never parses. Mutable, last-write-wins, no
 -- `seq`, no scrub, and no event emitted on write - a cursor drag is not history.
 CREATE TABLE IF NOT EXISTS ui_state (
     key   TEXT PRIMARY KEY,
@@ -87,9 +87,9 @@ CREATE TABLE IF NOT EXISTS ui_state (
 
 /// Pragmas applied on every open.
 ///
-/// WAL is what gives `09`'s measured result: one writer and many concurrent
+/// WAL is what gives `09 store decision`'s measured result: one writer and many concurrent
 /// readers, with a reader degrading roughly 13% at p99 while a writer appends
-/// continuously. `16` requires that a slow client never slows a worker, and this
+/// continuously. `16 local api surface` requires that a slow client never slows a worker, and this
 /// is the inverse holding too.
 pub const PRAGMAS: &str = "
 PRAGMA journal_mode = WAL;

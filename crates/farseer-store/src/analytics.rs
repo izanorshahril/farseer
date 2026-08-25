@@ -1,9 +1,9 @@
-//! `11`'s four questions.
+//! `11 analytics questions`'s four questions.
 //!
-//! `11` cut the analytics surface down to three entities, two edge kinds and
-//! four queries, which is what let `09` reject a graph engine: **two edge kinds
+//! `11 analytics questions` cut the analytics surface down to three entities, two edge kinds and
+//! four queries, which is what let `09 store decision` reject a graph engine: **two edge kinds
 //! is a join, not a graph problem.** The recursive walk below is the entire
-//! graph workload, and `09` measured it at 790ms with 30,165 chains at 100x the
+//! graph workload, and `09 store decision` measured it at 790ms with 30,165 chains at 100x the
 //! target scale. These are queries a human runs occasionally, not a hot loop.
 
 use serde::Serialize;
@@ -23,7 +23,7 @@ pub struct CostRow {
 
 /// Q2: intervention rate, by cell.
 ///
-/// `11` chose this as the headline metric, and `12` noted the metric only means
+/// `11 analytics questions` chose this as the headline metric, and `12 autonomy and deny list` noted the metric only means
 /// something while the human is still the gate - an automated merge would make
 /// the number look excellent while measuring nothing.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -93,7 +93,7 @@ impl Store {
             .map_err(Into::into)
     }
 
-    /// Q3. The recursive CTE `09` benched, walking up the `rescoped_from` chain.
+    /// Q3. The recursive CTE `09 store decision` benched, walking up the `rescoped_from` chain.
     pub fn rework_depth(&self) -> Result<Vec<ReworkRow>> {
         let mut stmt = self.conn().prepare_cached(
             "WITH RECURSIVE chain(run_id, root, depth) AS (
@@ -116,7 +116,7 @@ impl Store {
             .map_err(Into::into)
     }
 
-    /// Q4. `11`'s fourth question, and the reason `02` added the
+    /// Q4. `11 analytics questions`'s fourth question, and the reason `02 record scope` added the
     /// `memory_consulted` event and the `consulted` edge at all.
     pub fn lessons_against_outcome(&self) -> Result<Vec<LessonRow>> {
         let mut stmt = self.conn().prepare_cached(

@@ -94,3 +94,13 @@ That line is the whole reason this ticket has a size cap rather than a schema.
 - `02 record scope` - **UI state is a fourth category and explicitly not the record**: mutable, unscrubbed, no `seq`, no scrub, no event on write. Named here so nobody later mistakes it for a memory tier.
 - `11 analytics questions` - excluded from every query.
 - `17 cell lifecycle` - **purge does not reach it**, because purge is defined over the record.
+
+## Implementation note, 2026-08-25
+
+The key cap this ticket asked for left the number open, and the implementation fixes it at **256 bytes**, refused with `414`.
+
+256 is far above any namespaced key a UI writes by convention and far below anything that could be used as storage in its own right, which is the only thing the cap is there to prevent.
+`414` rather than `413` because the key arrives in the URL and the body may be well under the 1 MiB value cap, so `413` would name the wrong thing as too large.
+
+Enforced in `farseer-store`'s `put_ui_state` rather than in the handler, so the store stays the single choke point for both caps.
+A read of an overlong key needs no check: no write under it can ever have succeeded.

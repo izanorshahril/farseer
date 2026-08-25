@@ -1,14 +1,14 @@
 //! Secret scrubbing on the path **into** the record.
 //!
-//! `02` section 9: read-time scrubbing means the secrets are on disk and one
+//! `02 record scope` section 9: read-time scrubbing means the secrets are on disk and one
 //! query bug away from exposure. Write-time means the record never holds them.
 //!
-//! The cost is that over-matching is irreversible, and `02` accepted it in those
+//! The cost is that over-matching is irreversible, and `02 record scope` accepted it in those
 //! words: **a false positive loses one field, a false negative leaks a key that
 //! is now in every backup.**
 //!
 //! Two things are deliberately **not** scrubbed, because farseer will not read
-//! them: attachments (`02` section 10) and UI state (`24`).
+//! them: attachments (`02 record scope` section 10) and UI state (`24 ui state persistence`).
 
 pub const REDACTED: &str = "[redacted]";
 
@@ -66,7 +66,7 @@ const KEY_WORDS: &[&str] = &[
 
 /// Characters that carry meaning to a model and none to a reader.
 ///
-/// `25` found Hermes Agent scans for these on write, and recorded it as a case
+/// `25 memory lifecycle` found Hermes Agent scans for these on write, and recorded it as a case
 /// farseer had not considered and should adopt: text that reads one way to the
 /// operator and another to the agent is an injection vector, not a formatting
 /// quirk.

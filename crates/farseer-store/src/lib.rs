@@ -1,12 +1,12 @@
 //! The record: **one physical append-only log, with cell-scoped visibility.**
 //!
-//! `02` settled that storage and visibility are not the same thing, which is
+//! `02 record scope` settled that storage and visibility are not the same thing, which is
 //! what dissolved the apparent conflict between `BRIEF.md` and `ARCHITECTURE.md`.
-//! `09` then benched the substrate and chose SQLite outright.
+//! `09 store decision` then benched the substrate and chose SQLite outright.
 //!
 //! Two rules this crate enforces rather than documents:
 //!
-//! - **Agents never append events.** `02` section 8: an agent that can forge
+//! - **Agents never append events.** `02 record scope` section 8: an agent that can forge
 //!   events can rewrite its own history. Agents write *memory*, which is marked
 //!   as a claim, and that path is [`Store::write_memory`].
 //! - **Scrub on the way in.** Never at read time, because that leaves the
@@ -27,7 +27,7 @@ mod ui_state;
 pub use analytics::{CostRow, InterventionRow, LessonRow, ReworkRow};
 pub use farseer_core::MemoryId;
 pub use memory::{MemoryCaps, MemoryClaim, MemoryScope, NewMemory, Promotion};
-pub use ui_state::UI_STATE_CAP_BYTES;
+pub use ui_state::{UI_STATE_CAP_BYTES, UI_STATE_KEY_CAP_BYTES};
 
 #[derive(Debug, thiserror::Error)]
 pub enum StoreError {
@@ -46,7 +46,7 @@ pub enum StoreError {
         cap: usize,
         wanted: usize,
     },
-    #[error("promoting to the global tier is gated on the operator, per `25`")]
+    #[error("promoting to the global tier is gated on the operator, per `25 memory lifecycle`")]
     GlobalPromotionNeedsOperator,
     #[error("no memory claim with id {0}")]
     NoSuchMemory(MemoryId),
@@ -56,13 +56,15 @@ pub enum StoreError {
         size: usize,
         cap: usize,
     },
+    #[error("ui state key is {size} bytes, over the {cap} byte cap")]
+    UiStateKeyTooLong { size: usize, cap: usize },
     #[error("record holds an unreadable {field}: {value}")]
     Corrupt { field: &'static str, value: String },
 }
 
 pub type Result<T> = std::result::Result<T, StoreError>;
 
-/// Which slice of the log a reader wants. `16` chose one stream endpoint scoped
+/// Which slice of the log a reader wants. `16 local api surface` chose one stream endpoint scoped
 /// **server-side**, rather than a firehose every client reimplements filtering
 /// for.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -89,7 +91,7 @@ impl ScanFilter {
 
 /// The one owning writer.
 ///
-/// `09` asked whether single-writer holds under a realistic worker fleet and
+/// `09 store decision` asked whether single-writer holds under a realistic worker fleet and
 /// found it **holds by construction**: workers emit events to the runtime, and
 /// the runtime writes. Many producers into one process, one process into one
 /// writer, which is exactly what SQLite WAL wants.
@@ -147,7 +149,7 @@ impl Store {
         Ok(self.conn.last_insert_rowid())
     }
 
-    /// Append many in one transaction. `09` measured this at ~308k events/sec
+    /// Append many in one transaction. `09 store decision` measured this at ~308k events/sec
     /// at 2M rows, against ~23us p50 for one event one commit.
     pub fn append_batch(&mut self, events: &[NewEvent]) -> Result<Vec<Seq>> {
         let tx = self.conn.transaction()?;
@@ -175,7 +177,7 @@ impl Store {
         Ok(seqs)
     }
 
-    /// The cursor read `16` and `07` both depend on: everything after `since`,
+    /// The cursor read `16 local api surface` and `07 attach semantics` both depend on: everything after `since`,
     /// in order.
     ///
     /// `since` is exclusive, so a client passing back the last `seq` it saw gets
@@ -241,12 +243,12 @@ impl Store {
 
     /// Destroy a cell's history.
     ///
-    /// `12` made this **operator-only**: never a manager, never a worker. An
+    /// `12 autonomy and deny list` made this **operator-only**: never a manager, never a worker. An
     /// agent that can destroy its own history makes the record worthless as
-    /// evidence, and forge and destroy are two halves of one threat. `12` also
+    /// evidence, and forge and destroy are two halves of one threat. `12 autonomy and deny list` also
     /// classes purge as `irreversible`, so the gate on it is not lowerable.
     ///
-    /// Leaves permanent holes in `seq`. Per `09`, cursor reads tolerate gaps and
+    /// Leaves permanent holes in `seq`. Per `09 store decision`, cursor reads tolerate gaps and
     /// nothing may infer a count from a delta.
     pub fn purge_cell(&mut self, cell_id: &CellId) -> Result<usize> {
         let tx = self.conn.transaction()?;
@@ -275,7 +277,7 @@ impl Store {
             "DELETE FROM memories WHERE cell_id = ?1",
             [cell_id.as_str()],
         )?;
-        // The runs go too. Purge is not delete: `02` section 7 keeps the record
+        // The runs go too. Purge is not delete: `02 record scope` section 7 keeps the record
         // when a *cell* is deleted, but this verb exists for content that must
         // not exist, and leaving the cost and intervention rows behind would
         // have the analytics still reporting on what was supposedly destroyed.
@@ -284,8 +286,8 @@ impl Store {
         Ok(removed)
     }
 
-    /// Record a run for `11`'s four questions. Deleting a cell does not delete
-    /// this: `02` section 7 keeps the record when the cell goes, because a
+    /// Record a run for `11 analytics questions`'s four questions. Deleting a cell does not delete
+    /// this: `02 record scope` section 7 keeps the record when the cell goes, because a
     /// definition is a file in git and its history is not reversible.
     pub fn upsert_run(&self, run: &RunRow) -> Result<()> {
         self.conn.execute(
@@ -317,7 +319,7 @@ impl Store {
         Ok(())
     }
 
-    /// `run -> re-scoped-from -> run`, one of `11`'s two edge kinds.
+    /// `run -> re-scoped-from -> run`, one of `11 analytics questions`'s two edge kinds.
     pub fn record_rescope(&self, run_id: RunId, parent: RunId) -> Result<()> {
         self.conn.execute(
             "INSERT OR REPLACE INTO rescoped_from (run_id, parent) VALUES (?1, ?2)",
@@ -338,7 +340,7 @@ fn uuid_bytes(raw: &[u8], field: &'static str) -> Result<[u8; 16]> {
     })
 }
 
-/// A run, as `11` needs it: `cost`, `tokens`, `runner`, `model`, `cell_id`,
+/// A run, as `11 analytics questions` needs it: `cost`, `tokens`, `runner`, `model`, `cell_id`,
 /// `outcome`, `ts`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RunRow {
@@ -351,7 +353,7 @@ pub struct RunRow {
     pub outcome: Option<String>,
     pub usd_micros: u64,
     pub tokens: u64,
-    /// Set permanently once a human touched the run, per `07`. Provenance, not
+    /// Set permanently once a human touched the run, per `07 attach semantics`. Provenance, not
     /// a reason to restrict what happens next.
     pub operator_touched: bool,
     pub started_ts: i64,

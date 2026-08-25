@@ -1,7 +1,7 @@
 //! Builds the argv for a Claude Code invocation.
 //!
-//! `--input-format stream-json` puts Claude Code in the mode [`crate::claude_code::steer_envelope`]'s 2026-08-23 probe verified.
-//! The goal travels as the first stdin envelope and later steer messages use the same live process.
+//! `--input-format stream-json` puts Claude Code in the mode [`crate::claude_code::steer_frame`]'s 2026-08-23 probe verified.
+//! The goal travels as the first stdin frame and later steer messages use the same live process.
 //!
 //! A manager launch may also receive farseer's generated MCP config through `--mcp-config` and `--strict-mcp-config`.
 //! `10 runner inventory` records the disposable Claude Code 2.1.233 probe which generated the exact HTTP shape: `{"mcpServers":{"farseer":{"type":"http","url":"http://127.0.0.1:<port>/v1/mcp","headers":{"Authorization":"Bearer <token>"}}}}`.
@@ -29,6 +29,19 @@ pub struct ClaudeCodeLaunch<'a> {
 }
 
 /// The captured stream-json flags plus optional manager-only MCP wiring.
+/// The MCP tools a farseer manager may call without a permission prompt.
+///
+/// `10 runner inventory` recorded that `--allowedTools` is **not** an exclusive
+/// allowlist - a manager keeps its built-in tools regardless - so this list
+/// grants rather than restricts, and a tool missing from it is a manager that
+/// hangs waiting for an answer.
+pub const MANAGER_ALLOWED_TOOLS: [&str; 4] = [
+    "mcp__farseer__delegate_to_worker",
+    "mcp__farseer__delegate_to_cell",
+    "mcp__farseer__read_memory",
+    "mcp__farseer__write_memory",
+];
+
 pub fn build_args(contract: &WorkerContractSpec, launch: ClaudeCodeLaunch<'_>) -> Vec<String> {
     let mut args = vec![
         "--print".into(),
@@ -46,8 +59,12 @@ pub fn build_args(contract: &WorkerContractSpec, launch: ClaudeCodeLaunch<'_>) -
             config.to_string_lossy().into_owned(),
             "--strict-mcp-config".into(),
             "--allowedTools".into(),
-            "mcp__farseer__delegate_to_worker,mcp__farseer__read_memory,mcp__farseer__write_memory"
-                .into(),
+            // Every tool the MCP face exposes has to be named here or the
+            // manager stalls on a permission prompt no operator is watching -
+            // observed live on 2026-08-25 when `delegate_to_cell` shipped
+            // without it: "Claude requested permissions to use
+            // mcp__farseer__delegate_to_cell, but you haven't granted it yet."
+            MANAGER_ALLOWED_TOOLS.join(","),
         ]);
     }
     if let Some(prompt) = launch.append_system_prompt {
@@ -92,7 +109,7 @@ mod tests {
         );
         assert!(
             !args.contains(&"post a haiku about ferrous rust".to_string()),
-            "the goal travels as the first stdin envelope, not argv"
+            "the goal travels as the first stdin frame, not argv"
         );
     }
 
@@ -104,7 +121,7 @@ mod tests {
     }
 
     #[test]
-    fn the_stream_json_flags_match_what_10_actually_ran_plus_input_format() {
+    fn the_stream_json_flags_match_what_the_runner_inventory_actually_ran_plus_input_format() {
         let args = build_args(
             &contract("anything"),
             ClaudeCodeLaunch {
@@ -119,7 +136,7 @@ mod tests {
         assert!(
             args.windows(2)
                 .any(|w| w == ["--input-format", "stream-json"]),
-            "steer needs the process listening on stdin, per claude_code::steer_envelope"
+            "steer needs the process listening on stdin, per claude_code::steer_frame"
         );
         assert!(args.contains(&"--verbose".to_string()));
     }

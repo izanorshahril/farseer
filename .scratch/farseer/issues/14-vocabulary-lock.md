@@ -233,3 +233,13 @@ A callable cell is a **third entry kind** in the roster, not a tool.
 
 Not a new noun, so this ticket's rule that a new noun needs a reason is not triggered.
 A callable-cell entry carries a maximum `autonomy_ceiling`, reusing `06`'s ceiling rather than adding a policy dimension.
+
+## Applied to code, 2026-08-25
+
+A code review found the retired noun back in `farseer-runner` as `claude_code::steer_envelope`, with the metaphor spread through `spawn.rs`, `invocation.rs` and `farseer-manager`'s steering seam.
+
+It is now **`steer_frame`**, and the surrounding prose says **frame**.
+
+`frame` is not a new noun for anything this glossary names.
+It is the wire-level term for one stream-json line, which is the layer it describes: a `worker contract` is what the run is allowed to do, and a frame is one line on stdin.
+Where the retired sense was the contract one - `run.rs`'s "steering moves within the ..." - the replacement is `worker contract`, not `frame`.

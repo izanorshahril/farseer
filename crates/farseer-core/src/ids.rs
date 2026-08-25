@@ -1,6 +1,6 @@
 //! Identity.
 //!
-//! `02` needs two ids on every event and is explicit about why one cannot do
+//! `02 record scope` needs two ids on every event and is explicit about why one cannot do
 //! both jobs: UUIDv7 is only k-sortable, so two events in the same millisecond
 //! have a random tail and no deterministic order. `seq` is the cursor.
 
@@ -9,7 +9,7 @@ use uuid::Uuid;
 
 /// The cursor. A monotonic per-log integer that never leaves the machine.
 ///
-/// `09` benched this as `INTEGER PRIMARY KEY`, therefore the rowid, which is
+/// `09 store decision` benched this as `INTEGER PRIMARY KEY`, therefore the rowid, which is
 /// what makes a range scan a b-tree seek plus a sequential walk. It is **not
 /// contiguous after a purge**, so nothing may infer a count from a delta.
 pub type Seq = i64;
@@ -71,19 +71,26 @@ macro_rules! uuid_id {
 
 uuid_id!(
     EventId,
-    "The portable identity of an event. UUIDv7, per `02`."
+    "The portable identity of an event. UUIDv7, per `02 record scope`."
 );
-uuid_id!(RunId, "One worker contract's execution, per `07`.");
-uuid_id!(TaskId, "Groups runs, per `11`.");
+uuid_id!(
+    RunId,
+    "One worker contract's execution, per `07 attach semantics`."
+);
+uuid_id!(TaskId, "Groups runs, per `11 analytics questions`.");
+uuid_id!(
+    CallId,
+    "One cell call, per `06 cell transport`. Returned to the caller immediately, because a cell call is fire-and-forget and its result arrives on the event stream."
+);
 uuid_id!(
     MemoryId,
-    "One memory claim. `25` retracts by appending a superseding tombstone, so an id here is never reused and never removed."
+    "One memory claim. `25 memory lifecycle` retracts by appending a superseding tombstone, so an id here is never reused and never removed."
 );
 
 /// A cell's identity.
 ///
-/// `17` requires this to be **stable across reload and never derived from
-/// content**: content changes on every edit, and `06` needs the id to survive a
+/// `17 cell lifecycle` requires this to be **stable across reload and never derived from
+/// content**: content changes on every edit, and `06 cell transport` needs the id to survive a
 /// reload or the record loses its join key. So it is an author-chosen string,
 /// not a hash.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]

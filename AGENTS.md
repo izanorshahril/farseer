@@ -1,6 +1,6 @@
 # Working in this repository
 
-Twenty-seven decision tickets are closed, and the foundation is implemented against them: `farseer-core`, `farseer-store`, `farseer-api`, `farseer-runner`, `farseer-manager`, and the `farseer` binary.
+Twenty-eight decision tickets are closed, and the foundation is implemented against them: `farseer-core`, `farseer-store`, `farseer-api`, `farseer-runner`, `farseer-manager`, and the `farseer` binary.
 `farseer-runner` resolves `claude`, `codex`, `cursor-agent`, or `goose`, builds each argv, supervises the process under a Job Object, maps verified stream-json shapes, and creates or tears down workspaces according to `04 spike workspace teardown`.
 Codex maps the locally verified `item.completed` `agent_message` answer but leaves other `item.*` activity-only.
 Cursor-agent remains shallow past its verified terminal shape because no ticket captured a literal `tool_call` payload.
@@ -17,12 +17,21 @@ All four manager verbs from `05 run state model` - cancel, rerun, rescope, and s
 A live Claude Code manager can call `delegate_to_worker`; the runtime validates its per-run capability, resolves the pinned roster, enforces the cell-wide worker cap, preserves the parent task, narrows the cell-root pool through the worker entry's cap and the manager request, draws down reported spend, and returns terminal text, outcome, cost, and tokens.
 Every current native LLM runner exposes shell-equivalent reach, so the API refuses to launch one unless the pinned cell explicitly grants a shell-capable tool.
 Every bounded budget dimension currently fails closed before spawn because no native runner has demonstrated pre-spend enforcement.
-Cross-cell delegation and verified MCP launch wiring for non-Claude managers remain open.
+Cross-cell delegation is implemented as the manager-scoped `delegate_to_cell`: a `kind = "cell"` roster grant, an ungranted name refused however it is phrased, a foreign `peer` refused while `06 cell transport`'s A2A endpoint is off, the ceiling narrowed by roster entry then callee policy, and the caller's budget **reserved** rather than drawn because the call is fire-and-forget.
+The callee's manager runs in the callee's cell with the callee's workspace, runner and tool grants, under the caller's task id, and the caller keeps one `cell_called` event naming the callee's run.
+The `a_manager_reaches_another_cell_through_farseers_mcp_face` test proves the live round trip: HTTP instruction -> Claude manager in cell zero -> farseer MCP -> a Goose manager in cell social, finishing `ok` under the caller's task.
+Verified MCP launch wiring for non-Claude managers remains open.
 A `Worktree` cell uses the repository named by `--repo`, which defaults to the directory where `farseer serve` started because `13 harness build kit` keeps git paths out of `CellDefinition`.
+
+The operator surface is decided but not built: `28 operator surface` made the **canvas the home screen**, and anything that is not the canvas a **widget** on it.
+A widget is a **cell's face** - it renders, and the cell behind it thinks - so there is no second place agents run and no new API operation.
+A widget **displays** a cell and never **addresses** one: every AI input from every widget goes to the **top manager**, which decides where the work goes, while operator verbs on a run stay direct.
+That made cross-cell delegation a **blocking dependency** of the operator surface rather than merely open, since a widget fronting any cell but zero needs the top manager to reach outward, and it is why `delegate_to_cell` was built before the canvas.
+Widget code is authored by cell zero into `widgets/` in git and farseer never stores it, which keeps `01 cell primitive`'s no-plugin-ABI ruling intact: the loader lives in the client, and the runtime still loads nothing.
 
 The MCP face from `02 record scope` is nested at `/v1/mcp` in the same router and process because `09 store decision` requires one process and one writer.
 The exact-pinned `rmcp` streamable-HTTP service shares `AppState`'s `Store` and loopback/token guard; only `/v1/mcp` accepts the per-manager bearer, while operator routes still require the process-wide token.
-The three tools are manager-scoped `read_memory`, `write_memory`, and `delegate_to_worker`; every call derives identity and memory scope from the active pinned manager context, and no tool appends a raw event.
+The four tools are manager-scoped `read_memory`, `write_memory`, `delegate_to_worker`, and `delegate_to_cell`; every call derives identity and memory scope from the active pinned manager context, and no tool appends a raw event.
 `write_memory` refuses the `global` tier because `25 memory lifecycle` gates global promotion on the operator.
 The MCP tests use a real `rmcp` client over a real bound socket rather than hand-written JSON-RPC.
 The ignored `instructing_a_manager_reaches_a_roster_worker_through_farseers_mcp_face` test proves HTTP instruction -> Claude manager -> farseer MCP -> Goose worker -> tool result in one live manager turn.
@@ -36,7 +45,7 @@ They are evidence, not a foundation to build on.
 A decision lives in exactly one place: its ticket.
 
 Before answering any question about how farseer should work, check whether a ticket already answers it.
-Twenty-seven of them do, and they carry the reasoning, the rejected alternatives, and what the answer cost.
+Twenty-eight of them do, and they carry the reasoning, the rejected alternatives, and what the answer cost.
 
 When a ticket turns out to be wrong or superseded, **append the correction to that ticket and to the map**, rather than editing the original text in place.
 The map's own list of corrections is how a reader knows a resolution has moved.
@@ -77,7 +86,7 @@ cargo test --workspace
 
 `cargo clippy --workspace --all-targets` is expected to be silent, and `cargo fmt --all` is applied before every commit.
 
-Nine tests in `farseer-api` are `#[ignore]`d: seven spawn a real headless `claude` process, one spawns Goose, and the full manager-loop test spawns both.
+Ten tests in `farseer-api` are `#[ignore]`d: seven spawn a real headless `claude` process, one spawns Goose, and the full manager-loop and cross-cell tests spawn both.
 The "a one-word prompt cost $0.32 loading plugins" finding means the Claude tests are real minutes and real cost, not a hang.
 `cargo test --workspace` skips them; run an ignored test by name rather than running all nine accidentally.
 
@@ -102,6 +111,7 @@ Spikes exist to unblock decisions and are not the product. Treat them as evidenc
 
 Recorded in [10 runner inventory](.scratch/farseer/issues/10-runner-inventory.md), and each was measured rather than read from documentation:
 
+- **A manager stalls on any MCP tool missing from `--allowedTools`.** Observed 2026-08-25 while wiring `delegate_to_cell`: the manager called the right tool and received "Claude requested permissions to use `mcp__farseer__delegate_to_cell`, but you haven't granted it yet", then sat there. Every offline test passed throughout, because the tool was on the face and only the grant was missing. `invocation.rs` now derives the flag from `MANAGER_ALLOWED_TOOLS` and a test walks the face's own `list_tools` output against it.
 - **Claude Code emits `rate_limit_event` on every successful headless run**, carrying `resetsAt` as unix epoch. The documented quota surface is a status line, which **does not fire in `-p` mode**.
 - **Claude Code 2.1.233's generated project MCP schema** was probed locally with `claude mcp add --transport http --scope project`: `{"mcpServers":{"name":{"type":"http","url":"http://127.0.0.1:<port>/v1/mcp","headers":{"Authorization":"Bearer <token>"}}}}`.
   Production writes that shape outside the git worktree under a current-user-only DACL, puts only the per-manager bearer in it, passes it through `--mcp-config <file> --strict-mcp-config`, and deletes it independently when the manager exits; the disposable probe directory was deleted after capture.

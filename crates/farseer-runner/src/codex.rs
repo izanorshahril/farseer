@@ -1,17 +1,17 @@
 //! The Codex CLI runner: invocation and stream-json mapping.
 //!
-//! `20` scored `codex exec --json` against `05`'s contract: activity **pass**
+//! `20 worker control channel` scored `codex exec --json` against `05 run state model`'s contract: activity **pass**
 //! (`item.*` including reasoning), progress **pass** (`turn.*` and `item.*`
 //! including command execution, file changes, plan updates), follow-up
-//! **fail** (`codex exec resume` replays into a **new process**, per `10` -
+//! **fail** (`codex exec resume` replays into a **new process**, per `10 runner inventory` -
 //! not steering), cancel **weak** (`turn.failed` does not distinguish a
 //! cancel from an error, which does not matter here since farseer's own Job
 //! Object kill never depended on Codex agreeing about why it died).
 //!
-//! `10`: **`codex exec` refuses a fresh directory** without
-//! `--skip-git-repo-check`, printing a trust-gate error and exiting. `04`
+//! `10 runner inventory`: **`codex exec` refuses a fresh directory** without
+//! `--skip-git-repo-check`, printing a trust-gate error and exiting. `04 spike workspace teardown`
 //! gives every run a fresh worktree, so every run hits this without the flag,
-//! and the exact failure mode `10` warns reads as a hang to anything
+//! and the exact failure mode `10 runner inventory` warns reads as a hang to anything
 //! watching only for activity.
 //!
 //! Progress mapping remains intentionally shallow.
@@ -24,11 +24,11 @@ use serde_json::Value;
 
 use crate::claude_code::{FinishedSignal, ParseError, RunnerSignal};
 
-/// `10`'s own tested invocation, plus `--json` for machine-readable output
+/// `10 runner inventory`'s own tested invocation, plus `--json` for machine-readable output
 /// and the goal as the trailing prompt. Unlike `invocation::build_args`,
 /// this keeps the positional goal: Codex has no steering path (`codex exec
-/// resume` starts a new process rather than continuing this one, per `10`),
-/// so there is no envelope for the goal to travel as instead.
+/// resume` starts a new process rather than continuing this one, per `10 runner inventory`),
+/// so there is no frame for the goal to travel as instead.
 pub fn build_args(contract: &WorkerContractSpec) -> Vec<String> {
     vec![
         "exec".into(),
@@ -61,7 +61,7 @@ fn agent_message(v: &Value) -> Option<String> {
     item.get("text").and_then(Value::as_str).map(str::to_string)
 }
 
-/// `10`: Codex reports tokens only, never cost - `total_cost_usd` has no
+/// `10 runner inventory`: Codex reports tokens only, never cost - `total_cost_usd` has no
 /// equivalent here, so a Codex run's cost must be priced by farseer itself
 /// from these fields, not read off the wire.
 fn finished(v: &Value, outcome: Outcome) -> FinishedSignal {
@@ -107,7 +107,7 @@ mod tests {
 
     #[test]
     fn the_fresh_directory_trust_gate_is_always_disarmed() {
-        // `10`: without this flag, every run fails on a fresh worktree while
+        // `10 runner inventory`: without this flag, every run fails on a fresh worktree while
         // looking like a hang to anything watching only for activity.
         let args = build_args(&contract("anything"));
         assert!(args.contains(&"--skip-git-repo-check".to_string()));
@@ -135,8 +135,8 @@ mod tests {
 
     #[test]
     fn a_failed_turn_is_failed_not_cancelled() {
-        // `05`: only a human choosing not to proceed is `Cancelled`. Codex's
-        // own `turn.failed` cannot tell that apart from a real error - `20`
+        // `05 run state model`: only a human choosing not to proceed is `Cancelled`. Codex's
+        // own `turn.failed` cannot tell that apart from a real error - `20 worker control channel`
         // scored this "weak" - so it must never be read as more than `Failed`.
         let line = r#"{"type":"turn.failed"}"#;
         let signals = parse_line(line).unwrap();

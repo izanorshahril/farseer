@@ -1,6 +1,6 @@
 //! The run: one worker contract's execution, and exactly one record entry.
 //!
-//! `05` found that the five states arriving from `07` and `18` were never one
+//! `05 run state model` found that the five states arriving from `07 attach semantics` and `18 hang detection prior art` were never one
 //! enum. They are three independent axes, and the third is never stored.
 
 use serde::{Deserialize, Serialize};
@@ -24,13 +24,13 @@ pub enum Lifecycle {
 pub enum Outcome {
     Ok,
     /// Something broke, and a retry is reasonable. Budget exhaustion lands here
-    /// per `05`, because nobody chose it.
+    /// per `05 run state model`, because nobody chose it.
     Failed,
-    /// A **human** decided not to. `05`: conflating this with `Failed` produces
+    /// A **human** decided not to. `05 run state model`: conflating this with `Failed` produces
     /// an auto-retry loop that fights the operator.
     Cancelled,
     /// The **manager** decided the run was unnecessary before it started, per
-    /// `23`. Nothing broke, so a retry should not happen.
+    /// `23 prototype loose ends`. Nothing broke, so a retry should not happen.
     Abandoned,
 }
 
@@ -41,7 +41,7 @@ impl Outcome {
     }
 }
 
-/// Owned by whoever is attached, per `07`.
+/// Owned by whoever is attached, per `07 attach semantics`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Control {
@@ -52,7 +52,7 @@ pub enum Control {
     TakenOver,
 }
 
-/// Derived, never written. `05`: storing it would create two sources of truth
+/// Derived, never written. `05 run state model`: storing it would create two sources of truth
 /// that can disagree, and a crash mid-transition would leave a run permanently
 /// marked `stalled` when it is not.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -63,7 +63,7 @@ pub enum Liveness {
     LikelyHung,
 }
 
-/// The two numbers from `05`. Both configurable, and **neither kills anything**.
+/// The two numbers from `05 run state model`. Both configurable, and **neither kills anything**.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LivenessThresholds {
     pub stalled_secs: u64,
@@ -82,11 +82,11 @@ impl Default for LivenessThresholds {
 /// Why the liveness clock is currently paused.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Pause {
-    /// Control is not `autonomous`. `05`: a human thinking for three minutes is
+    /// Control is not `autonomous`. `05 run state model`: a human thinking for three minutes is
     /// not a hang, and flagging it would be farseer blaming the operator for the
     /// operator's own pause.
     OperatorHasTheWheel,
-    /// A known context compaction. Amended into `05` on 2026-08-23: a compaction
+    /// A known context compaction. Amended into `05 run state model` on 2026-08-23: a compaction
     /// is silence, which is exactly the shape `stalled` is built to catch, and it
     /// lands on the longest and most expensive runs.
     Compacting,
@@ -95,7 +95,7 @@ pub enum Pause {
 /// Tracks silence so liveness can be computed rather than stored.
 ///
 /// The watchdog keys on **activity** - any bytes from the adapter - not on
-/// **progress**. `05`: a high-end model reasoning for twenty minutes emits no
+/// **progress**. `05 run state model`: a high-end model reasoning for twenty minutes emits no
 /// tool calls, and under the progress definition it would be flagged
 /// `likely-hung` while working perfectly. Mechanical silence is a hang;
 /// thinking hard is not.
@@ -150,18 +150,18 @@ impl ActivityClock {
     }
 }
 
-/// Where a run's files live. `08` proved this is a policy value rather than a
+/// Where a run's files live. `08 generalization test` proved this is a policy value rather than a
 /// git flag, so `PlainDirectory` is one of the strategies.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum WorkspaceStrategy {
-    /// `04`'s default: a fresh git worktree per run. Two of the three runners in
-    /// `10` refuse a directory that is not a repo.
+    /// `04 spike workspace teardown`'s default: a fresh git worktree per run. Two of the three runners in
+    /// `10 runner inventory` refuse a directory that is not a repo.
     Worktree,
     PlainDirectory,
 }
 
-/// A workspace's own small state, per `05` section 8.
+/// A workspace's own small state, per `05 run state model` section 8.
 ///
 /// A run whose work is done must not stay open because of a directory, so this
 /// belongs to the cell rather than the run, and retry belongs to the startup
@@ -170,7 +170,7 @@ pub enum WorkspaceStrategy {
 #[serde(rename_all = "snake_case")]
 pub enum WorkspaceState {
     Live,
-    /// Teardown failed. `04` found the quarantine-by-rename fallback cannot
+    /// Teardown failed. `04 spike workspace teardown` found the quarantine-by-rename fallback cannot
     /// work, so this is a state the operator is shown, not one to paper over.
     Orphaned,
 }
@@ -183,26 +183,26 @@ pub struct WorkerContractSpec {
     pub cell_id: CellId,
     pub goal: String,
     pub workspace: WorkspaceStrategy,
-    /// Which runner from the inventory executes this. `10` made the inventory a
+    /// Which runner from the inventory executes this. `10 runner inventory` made the inventory a
     /// menu an author picks from.
     pub runner: String,
-    /// The allowlist. `12`: the only real isolation v1 has.
+    /// The allowlist. `12 autonomy and deny list`: the only real isolation v1 has.
     pub tool_grants: Vec<String>,
     pub autonomy_ceiling: Irreversibility,
     pub budget: Budget,
-    /// `05` put the gate here; `12` made satisfying it a tool grant rather than
+    /// `05 run state model` put the gate here; `12 autonomy and deny list` made satisfying it a tool grant rather than
     /// a runtime concept, so this is prose the cell's own tools check.
     pub definition_of_done: String,
 }
 
 /// What a manager gives a worker. **Immutable for the life of the run.**
 ///
-/// `05`: immutability is what makes the record answerable after the fact.
+/// `05 run state model`: immutability is what makes the record answerable after the fact.
 /// "What was this worker allowed to do" has one answer, not a timeline of them.
-/// `07` established that intervention does not void the contract, which only
+/// `07 attach semantics` established that intervention does not void the contract, which only
 /// holds if the contract cannot drift.
 ///
-/// Steering moves **within** the envelope. Changing the envelope is a new run.
+/// Steering moves **within** the worker contract. Changing the contract is a new run.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct WorkerContract(WorkerContractSpec);
@@ -221,12 +221,12 @@ impl Deref for WorkerContract {
     }
 }
 
-/// The manager's four verbs, per `05` as corrected by `20`.
+/// The manager's four verbs, per `05 run state model` as corrected by `20 worker control channel`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ManagerVerb {
     /// Same run, same contract, new instruction, **delivered at the next turn
-    /// boundary**. `20` surveyed the channels and found no harness supports
+    /// boundary**. `20 worker control channel` surveyed the channels and found no harness supports
     /// interrupting a turn already in flight, so farseer must not promise it.
     Steer,
     /// New run against the same task, because a contract field changed.
@@ -239,7 +239,7 @@ pub enum ManagerVerb {
 impl ManagerVerb {
     /// Whether the operator calling this directly leaves a mark.
     ///
-    /// `16` section 8: re-scope and re-run are normally manager decisions, and a
+    /// `16 local api surface` section 8: re-scope and re-run are normally manager decisions, and a
     /// manager that silently discovers its plan changed underneath it will
     /// re-plan badly. Do not restrict the human, do record that it was the human.
     pub fn operator_call_is_recorded(self) -> bool {
@@ -300,7 +300,7 @@ mod tests {
 
     #[test]
     fn observing_does_not_pause_the_clock() {
-        // `05`: watching is passive, the agent is still driving, and that is
+        // `05 run state model`: watching is passive, the agent is still driving, and that is
         // precisely when the watchdog should be live.
         let clock = ActivityClock::started_at(0);
         assert_eq!(clock.liveness(700, &T), Liveness::LikelyHung);

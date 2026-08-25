@@ -65,7 +65,7 @@ struct RawJobHandle(isize);
 ///
 /// The `AtomicBool` alongside it is a second, independent piece of shared
 /// state: **whether a cancel was ever requested**, queryable through any
-/// clone regardless of which one called `cancel()`. `05`: `cancelled` must
+/// clone regardless of which one called `cancel()`. `05 run state model`: `cancelled` must
 /// never read as `failed`, and the only way to tell the two apart once the
 /// process is gone and its own terminal result never arrived is to have
 /// asked, in band, whether ending it was deliberate.
