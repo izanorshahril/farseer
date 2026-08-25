@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import { createBridge, type Anchor } from "./bridge";
 import { QuotaWidget } from "./widgets/quota";
 import { FleetWidget } from "./widgets/fleet";
+import { ActivityWidget } from "./widgets/activity";
 import { SandboxWidget } from "./SandboxWidget";
 import { GateBar } from "./GateBar";
 
@@ -30,6 +31,7 @@ const bridge = createBridge();
 const REGISTRY = {
   quota: { title: "Windows", subtitle: "by account", render: QuotaWidget },
   fleet: { title: "Cells", subtitle: "loaded definitions", render: FleetWidget },
+  activity: { title: "Activity", subtitle: "the record, live", render: ActivityWidget },
 } as const;
 
 type WidgetId = string;
@@ -44,7 +46,7 @@ type AgentWidget = { id: string; title: string; subtitle: string; cell?: string 
 /** The blob. Farseer never reads this shape; only the canvas does. */
 type Layout = { mounted: WidgetId[]; wide: WidgetId[] };
 
-const DEFAULT_LAYOUT: Layout = { mounted: ["quota", "fleet"], wide: ["quota"] };
+const DEFAULT_LAYOUT: Layout = { mounted: ["activity", "quota", "fleet"], wide: ["activity"] };
 
 export function App() {
   const [layout, setLayout] = useState<Layout | null>(null);

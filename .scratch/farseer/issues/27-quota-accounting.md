@@ -185,3 +185,18 @@ A cancelled run keeps it: the window it saw was real, and cancelling the run doe
 ### Not yet wired
 
 `26 routing policy` itself. The availability signal exists and is recorded, but nothing routes on it yet.
+
+## Corrected 2026-08-25: an allowed window has a reset too
+
+The first implementation modelled `allowed` as carrying no `resetsAt`, and only `exhausted_until` as carrying one.
+
+That was wrong, and running it is what showed it: a real Claude Code run reported `allowed`, `five_hour`, and the widget said **"no reset reported"** - blank in the only case an operator sees on a good day.
+
+`10 runner inventory` had already recorded the fact: `rate_limit_event` carries `resetsAt` on **every** successful run, not only on refusal.
+The parser proves it independently - `resets_at` is a required field, so the observed event could not have parsed without one.
+
+`Availability::Allowed` now carries `resets_at`, and that has a second effect worth naming:
+
+**The reset time doubles as the window's identity.**
+Two observations naming the same reset are the same window, so a fresh five-hour window is a **transition** even while the status never leaves `allowed`.
+Without it, farseer could only see a window boundary by watching an account get refused.

@@ -72,7 +72,9 @@ impl RateLimitInfo {
     /// `26 routing policy` routes away from it rather than into it.
     pub fn availability(&self) -> farseer_core::Availability {
         if self.status == "allowed" {
-            farseer_core::Availability::Allowed
+            farseer_core::Availability::Allowed {
+                resets_at: Some(self.resets_at),
+            }
         } else {
             farseer_core::Availability::ExhaustedUntil {
                 resets_at: self.resets_at,

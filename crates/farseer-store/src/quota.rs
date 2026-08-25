@@ -182,7 +182,9 @@ mod tests {
     #[test]
     fn a_repeated_window_appends_nothing_and_a_transition_appends_once() {
         let store = Store::open_in_memory().unwrap();
-        let allowed = observation(Availability::Allowed);
+        let allowed = observation(Availability::Allowed {
+            resets_at: Some(1_787_003_600),
+        });
 
         assert!(observe(&store, &allowed, 10), "the first sighting is news");
         assert!(!observe(&store, &allowed, 20));
@@ -207,7 +209,13 @@ mod tests {
     #[test]
     fn two_accounts_keep_two_windows() {
         let store = Store::open_in_memory().unwrap();
-        observe(&store, &observation(Availability::Allowed), 10);
+        observe(
+            &store,
+            &observation(Availability::Allowed {
+                resets_at: Some(1_787_003_600),
+            }),
+            10,
+        );
         let mut other = observation(Availability::Unknown);
         other.account = "openai-plus".into();
         other.runner = "codex".into();
@@ -239,7 +247,13 @@ mod tests {
         store
             .upsert_run(&run("claude-code", 5, 900_000, 900))
             .unwrap();
-        observe(&store, &observation(Availability::Allowed), 10);
+        observe(
+            &store,
+            &observation(Availability::Allowed {
+                resets_at: Some(1_787_003_600),
+            }),
+            10,
+        );
         store
             .upsert_run(&run("claude-code", 11, 400_000, 400))
             .unwrap();
@@ -270,7 +284,13 @@ mod tests {
     #[test]
     fn a_window_row_carries_no_percentage_of_the_providers_window() {
         let store = Store::open_in_memory().unwrap();
-        observe(&store, &observation(Availability::Allowed), 10);
+        observe(
+            &store,
+            &observation(Availability::Allowed {
+                resets_at: Some(1_787_003_600),
+            }),
+            10,
+        );
         let windows = store.windows(|a| vec![a.to_string()]).unwrap();
         let wire = serde_json::to_string(&windows).unwrap();
         for absent in ["percent", "used_", "remaining", "quota_left"] {

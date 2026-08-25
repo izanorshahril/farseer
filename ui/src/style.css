@@ -267,3 +267,56 @@ footer input:focus {
   color: var(--accent);
   border-color: rgba(88, 166, 255, 0.35);
 }
+
+/* The live feed. Dense rows, one line each: an operator scans this, and a row
+   that wraps is a row that costs two. */
+.feed {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  max-height: 320px;
+  overflow-y: auto;
+}
+.feed li {
+  display: grid;
+  grid-template-columns: 62px 132px 64px 68px 1fr;
+  gap: 8px;
+  align-items: baseline;
+  font-size: 12px;
+  padding: 2px 0;
+  border-bottom: 1px solid rgba(35, 43, 53, 0.5);
+}
+.feed .kind {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--dim);
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.feed .kind.ok { color: var(--ok); }
+.feed .kind.warn { color: var(--warn); }
+.feed .kind.accent { color: var(--accent); }
+.feed .kind.dim { color: var(--faint); }
+.feed .summary {
+  color: var(--ink);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.faint { color: var(--faint); }
+
+/* Live, or not. One dot beats a word that has to be read. */
+.pulse {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--faint);
+  flex: none;
+}
+.pulse.on {
+  background: var(--ok);
+  box-shadow: 0 0 0 3px rgba(63, 185, 80, 0.15);
+}
