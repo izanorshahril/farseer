@@ -346,7 +346,26 @@ impl StartedWorker {
                             return;
                         }
                     }
-                    RunnerSignal::Output(text) => output = Some(text),
+                    RunnerSignal::Output(text) => {
+                        // Recorded per turn, not held until the run ends: a
+                        // manager on live stdin answers and waits, so holding it
+                        // would mean the operator hears nothing until they close
+                        // the session they are trying to talk to.
+                        let event = NewEvent::new(
+                            contract.cell_id.clone(),
+                            contract.run_id,
+                            EventKind::new(EventKind::MANAGER_ANSWERED),
+                            progress_actor,
+                            now_ms(),
+                            serde_json::json!({ "text": text }),
+                        );
+                        if let Err(e) = sink.append(&event) {
+                            store_err = Some(e);
+                            cancel_on_store_failure.cancel();
+                            return;
+                        }
+                        output = Some(text);
+                    }
                     RunnerSignal::Finished(f) => {
                         report = Some(RunReport {
                             outcome: f.outcome,
@@ -549,8 +568,63 @@ pub fn run_worker(
 
     let finished_ts = now_ms();
     sink.upsert_run(&finished_row(contract, &result, started_ts, finished_ts))?;
+    // `05 run state model` named this lifecycle kind and nothing emitted it, so
+    // `16 local api surface`'s promise that "the answer arrives on the event
+    // stream" was unkept: an operator who instructed a manager could see it
+    // start and never see what it said. The terminal text only travelled back
+    // to a *delegating* manager, over MCP.
+    //
+    // A failure to record this must not turn a finished run into a failed one,
+    // so the append is best-effort.
+    let _ = sink.append(&NewEvent::new(
+        contract.cell_id.clone(),
+        contract.run_id,
+        EventKind::new(EventKind::RUN_FINISHED),
+        match options.role {
+            RunRole::Manager => Actor::Manager,
+            RunRole::Worker => Actor::Worker,
+        },
+        finished_ts,
+        finished_payload(&result),
+    ));
 
     result
+}
+
+/// What a finished run has to say for itself.
+///
+/// `02 record scope` scrubs on write, so the text is scrubbed like any other
+/// payload rather than being trusted because a manager wrote it.
+fn finished_payload(result: &Result<RunReport, ManagerError>) -> serde_json::Value {
+    let (outcome, text, cost, tokens) = match result {
+        Ok(report) => (
+            outcome_str(report.outcome),
+            report.result.clone(),
+            report.cost_usd_micros,
+            report.tokens,
+        ),
+        Err(ManagerError::Cancelled(report)) => (
+            outcome_str(Outcome::Cancelled),
+            report.result.clone(),
+            report.cost_usd_micros,
+            report.tokens,
+        ),
+        // A run that never produced a report has nothing to quote, and inventing
+        // an apology in the manager's voice would put words in the record that
+        // no agent said.
+        Err(error) => (
+            outcome_str(Outcome::Failed),
+            Some(error.to_string()),
+            None,
+            None,
+        ),
+    };
+    serde_json::json!({
+        "outcome": outcome,
+        "text": text,
+        "cost_usd_micros": cost,
+        "tokens": tokens,
+    })
 }
 
 fn finished_row(
@@ -751,6 +825,45 @@ mod tests {
         assert_eq!(row.outcome.as_deref(), Some("failed"));
         assert!(row.finished_ts.is_some());
         assert!(row.started_ts < row.finished_ts.unwrap());
+    }
+
+    #[test]
+    fn a_finished_run_says_what_it_answered() {
+        // `16 local api surface` promised the answer arrives on the stream, and
+        // for an operator-instructed manager nothing put it there: the terminal
+        // text only travelled back to a delegating manager over MCP.
+        let payload = finished_payload(&Ok(RunReport {
+            outcome: Outcome::Ok,
+            cost_usd_micros: Some(12_000),
+            tokens: Some(340),
+            result: Some("the changelog is posted".into()),
+            window: None,
+        }));
+
+        assert_eq!(payload["outcome"], "ok");
+        assert_eq!(payload["text"], "the changelog is posted");
+        assert_eq!(payload["cost_usd_micros"], 12_000);
+    }
+
+    #[test]
+    fn a_cancelled_run_still_reports_what_it_managed_to_say() {
+        let payload = finished_payload(&Err(ManagerError::Cancelled(RunReport {
+            outcome: Outcome::Cancelled,
+            cost_usd_micros: None,
+            tokens: None,
+            result: Some("halfway through".into()),
+            window: None,
+        })));
+
+        assert_eq!(payload["outcome"], "cancelled");
+        assert_eq!(payload["text"], "halfway through");
+    }
+
+    #[test]
+    fn a_run_with_no_report_quotes_the_error_rather_than_inventing_a_voice() {
+        let payload = finished_payload(&Err(ManagerError::NoResult));
+        assert_eq!(payload["outcome"], "failed");
+        assert!(payload["text"].as_str().is_some_and(|t| !t.is_empty()));
     }
 
     #[test]

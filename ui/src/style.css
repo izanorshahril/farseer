@@ -393,3 +393,35 @@ code {
   padding: 1px 4px;
   border-radius: 3px;
 }
+
+/* The conversation. Two voices, told apart by edge colour and indent rather
+   than by bubbles - an operator console is not a messaging app, and a wall of
+   rounded rectangles reads slower at this density. */
+.thread {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  max-height: 360px;
+  overflow-y: auto;
+}
+.thread li {
+  border-left: 2px solid var(--line);
+  padding-left: 10px;
+}
+.thread li.operator {
+  border-left-color: #a371f7;
+}
+.thread li.manager {
+  border-left-color: var(--accent);
+}
+.thread li p {
+  margin: 3px 0 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.thread li.operator p {
+  color: var(--dim);
+}

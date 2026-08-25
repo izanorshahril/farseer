@@ -80,6 +80,18 @@ impl EventKind {
     pub const OPERATOR_INTERVENED: &'static str = "operator_intervened";
     pub const MANAGER_STEERED: &'static str = "manager_steered";
 
+    /// A manager finished a turn and said something.
+    ///
+    /// Not the same as the run finishing. `10 runner inventory` observed that a
+    /// Claude Code manager on live stdin emits its **own terminal result per
+    /// turn** and stays alive for the next steer, so a run that answers three
+    /// times has three of these and one `run_finished` - much later, when the
+    /// operator closes it.
+    ///
+    /// Without this, `16 local api surface`'s promise that the answer arrives on
+    /// the stream holds only for runs that exit, which a manager does not.
+    pub const MANAGER_ANSWERED: &'static str = "manager_answered";
+
     /// Emitted when a worker reads memory through the MCP face. Carried into
     /// `02 record scope` from `11 analytics questions`, and it is what makes "which lessons actually reduced the
     /// failure rate" answerable at all.

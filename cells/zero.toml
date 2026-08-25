@@ -11,7 +11,7 @@ version = "1"
 workspace_strategy = "worktree"
 
 [manager]
-runner = "claude-code"
+runner = "codex"
 prompt = """
 You are the manager of cell zero.
 You plan, delegate to workers, and call other cells that appear in your roster.

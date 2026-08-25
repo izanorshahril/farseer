@@ -5,6 +5,7 @@ import { FleetWidget } from "./widgets/fleet";
 import { ActivityWidget } from "./widgets/activity";
 import { RunsWidget } from "./widgets/runs";
 import { SettingsWidget } from "./widgets/settings";
+import { ConversationWidget } from "./widgets/conversation";
 import { SandboxWidget } from "./SandboxWidget";
 import { GateBar } from "./GateBar";
 
@@ -31,6 +32,11 @@ const bridge = createBridge();
  * third one written by a manager.
  */
 const REGISTRY = {
+  conversation: {
+    title: "Conversation",
+    subtitle: "you and the top manager",
+    render: ConversationWidget,
+  },
   quota: { title: "Windows", subtitle: "by account", render: QuotaWidget },
   fleet: { title: "Cells", subtitle: "loaded definitions", render: FleetWidget },
   activity: { title: "Activity", subtitle: "the record, live", render: ActivityWidget },
@@ -51,8 +57,8 @@ type AgentWidget = { id: string; title: string; subtitle: string; cell?: string 
 type Layout = { mounted: WidgetId[]; wide: WidgetId[] };
 
 const DEFAULT_LAYOUT: Layout = {
-  mounted: ["runs", "activity", "quota", "fleet"],
-  wide: ["runs", "activity"],
+  mounted: ["conversation", "runs", "activity", "quota", "fleet"],
+  wide: ["conversation", "runs"],
 };
 
 export function App() {
