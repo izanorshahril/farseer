@@ -315,3 +315,28 @@ It is the smallest change and it is not a desktop application - no window, no tr
 The widget host currently lives in a Vite plugin and uses Node for esbuild and git.
 Under Tauri it moves to the shell crate: git through `Command`, which farseer already does for worktrees, and esbuild as a sidecar binary.
 **The three gates do not change** - only what runs them.
+
+## Settings, 2026-08-25: the shell edits definitions, the API still cannot
+
+The operator asked for a way to pick which harness stands in front of farseer.
+
+That is a change to a **cell definition**, and `16 local api surface` gave `/v1` read, validate and reload with **no edit path** - because `01 cell primitive` made a definition data in git rather than a row in a database.
+
+So the setting is not a new API operation. **The shell writes the file and asks the runtime to reload it**, which is the same split widget code already uses: the shell owns the filesystem, the runtime owns the record.
+
+Three properties fall out, and all three were the reason for the original ruling:
+
+- **The change leaves a git diff.** `22 cell addressing` already leaned on exactly that when it refused an in-conversation override: editing the definition and reloading "takes about ten seconds and leaves a git commit".
+- **Validation stays in one place.** The shell writes, calls reload, and hands back whatever the runtime says. It does not judge the definition itself, so there is no second opinion to disagree with the first.
+- **One line changes.** A whole-file rewrite through a TOML serializer would reformat the operator's own comments and ordering away, so this replaces a single line and keeps the file's own line endings. A rewrite that flips every ending shows up as a whole-file diff and buries the line that actually changed.
+
+### What is offered is what is installed
+
+`10 runner inventory`'s rule is that reach is **observed, never advertised**, and presence is the same kind of claim: a runner that is not on `PATH` is shown as unavailable rather than offered, because the alternative is a run that fails at spawn.
+
+The runner name and its executable are **not the same string** - `claude-code` is driven by a binary called `claude` - and resolving the name instead of the executable reports a runner as missing while farseer launches it happily.
+
+### Where this goes
+
+The operator's stated direction: farseer eventually has **its own harness**, and the pluggable ones become floor managers and sub-agents rather than the thing in front.
+Nothing here forecloses that. The top manager is a runner named in a definition, and a farseer-native harness would be one more name in the same field.
