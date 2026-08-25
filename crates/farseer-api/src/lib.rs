@@ -398,6 +398,9 @@ impl IntoResponse for ApiError {
             Self::BadRequest(_) | Self::Policy(_) => StatusCode::BAD_REQUEST,
             // `24`: over 1 MiB per key, the answer is `413`.
             Self::Store(StoreError::UiStateTooLarge { .. }) => StatusCode::PAYLOAD_TOO_LARGE,
+            // `24 ui state persistence`: the key is capped too, and an overlong
+            // one arrives in the URL, so `414` names what was actually too long.
+            Self::Store(StoreError::UiStateKeyTooLong { .. }) => StatusCode::URI_TOO_LONG,
             Self::Store(_) => StatusCode::INTERNAL_SERVER_ERROR,
             Self::Workspace(_) => StatusCode::INTERNAL_SERVER_ERROR,
             Self::Corrupt(_) => StatusCode::INTERNAL_SERVER_ERROR,
@@ -1655,6 +1658,19 @@ grants_shell = true
             .body(Body::from(oversized))
             .unwrap();
         assert_eq!(h.send(put).await.0, StatusCode::PAYLOAD_TOO_LARGE);
+
+        let long_key = "k".repeat(farseer_store::UI_STATE_KEY_CAP_BYTES + 1);
+        let put = Request::builder()
+            .method("PUT")
+            .uri(format!("/v1/ui-state/{long_key}"))
+            .header(header::HOST, "127.0.0.1:9000")
+            .header(
+                header::AUTHORIZATION,
+                format!("Bearer {}", h.token.as_str()),
+            )
+            .body(Body::from("x"))
+            .unwrap();
+        assert_eq!(h.send(put).await.0, StatusCode::URI_TOO_LONG);
     }
 
     #[tokio::test]

@@ -15,6 +15,11 @@ use crate::{Result, Store, StoreError};
 /// `24`: above this, the API answers `413`.
 pub const UI_STATE_CAP_BYTES: usize = 1024 * 1024;
 
+/// `24 ui state persistence`'s second invariant: a cap on the key itself, so an
+/// opaque key cannot grow without limit either. The key stays an opaque string -
+/// capping its length is not parsing it.
+pub const UI_STATE_KEY_CAP_BYTES: usize = 256;
+
 impl Store {
     /// Read a blob back, or `None` if this key was never written.
     ///
@@ -36,6 +41,12 @@ impl Store {
     /// rather than a shortcut. The key is opaque and farseer never splits it on
     /// a separator.
     pub fn put_ui_state(&self, key: &str, blob: &[u8], ts: i64) -> Result<()> {
+        if key.len() > UI_STATE_KEY_CAP_BYTES {
+            return Err(StoreError::UiStateKeyTooLong {
+                size: key.len(),
+                cap: UI_STATE_KEY_CAP_BYTES,
+            });
+        }
         if blob.len() > UI_STATE_CAP_BYTES {
             return Err(StoreError::UiStateTooLarge {
                 key: key.to_string(),
@@ -103,6 +114,17 @@ mod tests {
             Err(StoreError::UiStateTooLarge { .. })
         ));
         assert!(s.put_ui_state("big", &oversized[1..], 1).is_ok());
+    }
+
+    #[test]
+    fn a_key_over_the_key_cap_is_refused() {
+        let s = Store::open_in_memory().unwrap();
+        let long = "k".repeat(UI_STATE_KEY_CAP_BYTES + 1);
+        assert!(matches!(
+            s.put_ui_state(&long, b"x", 1),
+            Err(StoreError::UiStateKeyTooLong { .. })
+        ));
+        assert!(s.put_ui_state(&long[1..], b"x", 1).is_ok());
     }
 
     #[test]

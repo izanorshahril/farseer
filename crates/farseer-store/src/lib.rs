@@ -27,7 +27,7 @@ mod ui_state;
 pub use analytics::{CostRow, InterventionRow, LessonRow, ReworkRow};
 pub use farseer_core::MemoryId;
 pub use memory::{MemoryCaps, MemoryClaim, MemoryScope, NewMemory, Promotion};
-pub use ui_state::UI_STATE_CAP_BYTES;
+pub use ui_state::{UI_STATE_CAP_BYTES, UI_STATE_KEY_CAP_BYTES};
 
 #[derive(Debug, thiserror::Error)]
 pub enum StoreError {
@@ -56,6 +56,8 @@ pub enum StoreError {
         size: usize,
         cap: usize,
     },
+    #[error("ui state key is {size} bytes, over the {cap} byte cap")]
+    UiStateKeyTooLong { size: usize, cap: usize },
     #[error("record holds an unreadable {field}: {value}")]
     Corrupt { field: &'static str, value: String },
 }
