@@ -80,10 +80,13 @@ An external protocol is spoken at a boundary, never shaped into internals.
 │  ├─ farseer-api/     local HTTP plus SSE on 127.0.0.1, token and loopback guard; nests the MCP face at /v1/mcp
 │  ├─ farseer-runner/  runners: Claude Code, Codex, cursor-agent and goose, PATHEXT resolution, Job-Object spawn, stream-json mapping, worktree lifecycle
 │  ├─ farseer-manager/ runs one sealed contract, captures terminal text, and records what happened
-│  └─ farseer/         the binary: runtime and CLI in one
+│  ├─ farseer/         the binary: runtime and CLI in one
+│  └─ farseer-shell/   the desktop shell: finds a farseer, serves the canvas, holds the token
 ├─ ui/                 the canvas: the operator surface, a client of /v1 like any other
 │  ├─ src/bridge.ts    everything a widget may reach, and nothing else
-│  └─ src/widgets/     quota and fleet, hand-written until 28's gates exist
+│  └─ src/widgets/     runs, activity, quota, fleet - plus whatever cell zero writes
+├─ widgets/            agent-authored widgets, in git, compiled and sandboxed by the canvas
+│  └─ AGENTS.md        the contract a manager reads before writing one
 ├─ cells/              cell definitions, hand-written, in git
 │  ├─ zero.toml        cell #0, the builder harness
 │  └─ social.toml      the second cell, thinner on purpose
