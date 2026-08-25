@@ -35,7 +35,7 @@ pub struct RunnerChoice {
     pub note: &'static str,
 }
 
-/// The runners farseer has verified stream-json dialects for.
+/// The runners farseer has verified **native** stream-json dialects for.
 ///
 /// Not a survey of what exists - `13 harness build kit` found the inventory is a
 /// menu rather than a survey - but the list this build can actually launch.
@@ -67,13 +67,41 @@ const KNOWN: [(&str, &str, &str); 4] = [
     ),
 ];
 
-pub fn runners() -> Vec<RunnerChoice> {
+/// What every ACP runner is, in the operator's terms.
+///
+/// One note for all of them because the protocol is what they have in common:
+/// `29 harness protocol` found that an ACP agent reports a **context window**,
+/// which no native runner does, and reports **no subscription window**, which is
+/// what `27 quota accounting` runs on. That trade is the same whichever agent is
+/// behind it, so saying it once is honest rather than lazy.
+const ACP_NOTE: &str =
+    "speaks ACP: names its context window, steers as a manager, reports no quota";
+
+/// Every runner this build can launch: the native dialects above, then the ACP
+/// agents from [`farseer_manager::ACP_RUNNERS`].
+///
+/// Read from there rather than repeated here, so the settings list cannot come
+/// to disagree with what `start_worker` will actually accept - a menu offering a
+/// runner the dispatch refuses is a worse failure than a missing one, because it
+/// fails after the operator has committed a definition.
+fn known() -> Vec<(&'static str, &'static str, &'static str)> {
     KNOWN
-        .iter()
+        .into_iter()
+        .chain(
+            farseer_manager::ACP_RUNNERS
+                .into_iter()
+                .map(|(name, executable, _)| (name, executable, ACP_NOTE)),
+        )
+        .collect()
+}
+
+pub fn runners() -> Vec<RunnerChoice> {
+    known()
+        .into_iter()
         .map(|(name, executable, note)| {
             let path = farseer_runner::resolve::resolve(executable);
             RunnerChoice {
-                name: (*name).to_string(),
+                name: name.to_string(),
                 installed: path.is_some(),
                 path: path.map(|p| p.display().to_string()),
                 note,
@@ -113,7 +141,7 @@ pub fn top_manager(cells: &Path) -> anyhow::Result<TopManager> {
 /// own comments and ordering out of existence, and `01 cell primitive` made
 /// these files something a human edits. So this replaces one line.
 pub fn set_top_manager(cells: &Path, runner: &str) -> anyhow::Result<TopManager> {
-    if !KNOWN.iter().any(|(name, _, _)| *name == runner) {
+    if !known().iter().any(|(name, _, _)| *name == runner) {
         anyhow::bail!("`{runner}` is not a runner this build knows how to drive");
     }
     let file = definition_path(cells);
@@ -180,6 +208,38 @@ fn current_runner(text: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_menu_offers_exactly_what_dispatch_will_accept() {
+        let offered: Vec<String> = runners().into_iter().map(|r| r.name).collect();
+        for (name, _, _) in farseer_manager::ACP_RUNNERS {
+            assert!(
+                offered.iter().any(|o| o == name),
+                "an ACP runner dispatch accepts must be offerable: {name}"
+            );
+        }
+        // And nothing is offered that `set_top_manager` would then refuse.
+        for name in &offered {
+            assert!(known().iter().any(|(known, _, _)| known == name));
+        }
+    }
+
+    #[test]
+    fn an_acp_runner_is_reported_against_its_executable_rather_than_its_name() {
+        // `goose-acp` is driven by a binary called `goose`. Resolving the runner
+        // name would report an installed runner as missing, which is the bug
+        // this file's `KNOWN` table already exists to prevent.
+        let goose_acp = runners()
+            .into_iter()
+            .find(|choice| choice.name == "goose-acp")
+            .expect("goose-acp is offerable");
+        let goose = runners()
+            .into_iter()
+            .find(|choice| choice.name == "goose")
+            .expect("goose is offerable");
+        assert_eq!(goose_acp.installed, goose.installed);
+        assert_eq!(goose_acp.path, goose.path);
+    }
 
     const DEFINITION: &str = r#"# Cell #0 - the builder harness.
 cell_id = "zero"
@@ -254,7 +314,7 @@ runner = "codex"
     #[test]
     fn every_known_runner_is_offered_with_its_presence_observed() {
         let offered = runners();
-        assert_eq!(offered.len(), KNOWN.len());
+        assert_eq!(offered.len(), known().len());
         // `10 runner inventory`: observed, never advertised. Whether any of
         // these is installed here is a fact about the machine, so the test
         // checks the shape rather than the answer.

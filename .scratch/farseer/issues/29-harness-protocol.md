@@ -307,3 +307,17 @@ It was passing on **one** turn, because farseer was appending a `manager_answere
 The test now asserts **exactly two** answers and that they differ, which is what makes it a test of steering rather than of streaming.
 
 Worth naming: the assertion was weak in the direction that made a green test agree with a broken implementation. `>=` on a count of events is that shape by construction.
+
+
+## Implementation note, 2026-08-26: the menu, and one source of truth for it
+
+Settings offers `goose-acp` and `opencode-acp` now, so the top manager can be an ACP harness from the window.
+
+The list is **read from `farseer_manager::ACP_RUNNERS` rather than repeated in the shell**. A settings menu that drifts from what `start_worker` accepts is worse than a missing entry, because it fails *after* the operator has committed a definition - the failure arrives at spawn, in the record, rather than at the click. A test asserts the two lists agree in both directions.
+
+Two things this reuses rather than rediscovers:
+
+- **Presence is resolved against the executable, not the runner name.** `goose-acp` is driven by a binary called `goose`. The `KNOWN` table already existed for exactly this reason (`claude-code` is driven by `claude`), and a test now pins that `goose-acp` and `goose` report identical presence.
+- **One note for every ACP runner**, because the protocol is what they have in common: names its context window, steers as a manager, reports no quota. That trade does not vary by agent, so saying it once is honest rather than lazy.
+
+Not done: the desktop window was not launched to look at it. The list is data-driven - the widget maps whatever the endpoint returns - and both ends are unit-tested, so there was nothing a screenshot would have decided.

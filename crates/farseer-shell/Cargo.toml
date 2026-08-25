@@ -10,6 +10,7 @@ tauri-build = { version = "2", features = [] }
 
 [dependencies]
 farseer-api.workspace = true
+farseer-manager.workspace = true
 farseer-runner.workspace = true
 anyhow.workspace = true
 axum.workspace = true
