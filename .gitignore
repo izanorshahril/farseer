@@ -8,3 +8,8 @@ node_modules/
 # Local runtime output
 .scratch/canvas-dev/
 ui/dist/
+
+# Runtime output from a locally started daemon
+.scratch/runs/
+.scratch/*.db
+.scratch/*.db-*
