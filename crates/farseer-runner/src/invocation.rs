@@ -29,6 +29,19 @@ pub struct ClaudeCodeLaunch<'a> {
 }
 
 /// The captured stream-json flags plus optional manager-only MCP wiring.
+/// The MCP tools a farseer manager may call without a permission prompt.
+///
+/// `10 runner inventory` recorded that `--allowedTools` is **not** an exclusive
+/// allowlist - a manager keeps its built-in tools regardless - so this list
+/// grants rather than restricts, and a tool missing from it is a manager that
+/// hangs waiting for an answer.
+pub const MANAGER_ALLOWED_TOOLS: [&str; 4] = [
+    "mcp__farseer__delegate_to_worker",
+    "mcp__farseer__delegate_to_cell",
+    "mcp__farseer__read_memory",
+    "mcp__farseer__write_memory",
+];
+
 pub fn build_args(contract: &WorkerContractSpec, launch: ClaudeCodeLaunch<'_>) -> Vec<String> {
     let mut args = vec![
         "--print".into(),
@@ -46,8 +59,12 @@ pub fn build_args(contract: &WorkerContractSpec, launch: ClaudeCodeLaunch<'_>) -
             config.to_string_lossy().into_owned(),
             "--strict-mcp-config".into(),
             "--allowedTools".into(),
-            "mcp__farseer__delegate_to_worker,mcp__farseer__read_memory,mcp__farseer__write_memory"
-                .into(),
+            // Every tool the MCP face exposes has to be named here or the
+            // manager stalls on a permission prompt no operator is watching -
+            // observed live on 2026-08-25 when `delegate_to_cell` shipped
+            // without it: "Claude requested permissions to use
+            // mcp__farseer__delegate_to_cell, but you haven't granted it yet."
+            MANAGER_ALLOWED_TOOLS.join(","),
         ]);
     }
     if let Some(prompt) = launch.append_system_prompt {

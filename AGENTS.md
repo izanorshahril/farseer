@@ -19,7 +19,7 @@ Every current native LLM runner exposes shell-equivalent reach, so the API refus
 Every bounded budget dimension currently fails closed before spawn because no native runner has demonstrated pre-spend enforcement.
 Cross-cell delegation is implemented as the manager-scoped `delegate_to_cell`: a `kind = "cell"` roster grant, an ungranted name refused however it is phrased, a foreign `peer` refused while `06 cell transport`'s A2A endpoint is off, the ceiling narrowed by roster entry then callee policy, and the caller's budget **reserved** rather than drawn because the call is fire-and-forget.
 The callee's manager runs in the callee's cell with the callee's workspace, runner and tool grants, under the caller's task id, and the caller keeps one `cell_called` event naming the callee's run.
-A live cross-cell round trip has not been run; the refusals, the narrowing and the contract construction are covered by tests over a real `rmcp` client.
+The `a_manager_reaches_another_cell_through_farseers_mcp_face` test proves the live round trip: HTTP instruction -> Claude manager in cell zero -> farseer MCP -> a Goose manager in cell social, finishing `ok` under the caller's task.
 Verified MCP launch wiring for non-Claude managers remains open.
 A `Worktree` cell uses the repository named by `--repo`, which defaults to the directory where `farseer serve` started because `13 harness build kit` keeps git paths out of `CellDefinition`.
 
@@ -86,7 +86,7 @@ cargo test --workspace
 
 `cargo clippy --workspace --all-targets` is expected to be silent, and `cargo fmt --all` is applied before every commit.
 
-Nine tests in `farseer-api` are `#[ignore]`d: seven spawn a real headless `claude` process, one spawns Goose, and the full manager-loop test spawns both.
+Ten tests in `farseer-api` are `#[ignore]`d: seven spawn a real headless `claude` process, one spawns Goose, and the full manager-loop and cross-cell tests spawn both.
 The "a one-word prompt cost $0.32 loading plugins" finding means the Claude tests are real minutes and real cost, not a hang.
 `cargo test --workspace` skips them; run an ignored test by name rather than running all nine accidentally.
 
@@ -111,6 +111,7 @@ Spikes exist to unblock decisions and are not the product. Treat them as evidenc
 
 Recorded in [10 runner inventory](.scratch/farseer/issues/10-runner-inventory.md), and each was measured rather than read from documentation:
 
+- **A manager stalls on any MCP tool missing from `--allowedTools`.** Observed 2026-08-25 while wiring `delegate_to_cell`: the manager called the right tool and received "Claude requested permissions to use `mcp__farseer__delegate_to_cell`, but you haven't granted it yet", then sat there. Every offline test passed throughout, because the tool was on the face and only the grant was missing. `invocation.rs` now derives the flag from `MANAGER_ALLOWED_TOOLS` and a test walks the face's own `list_tools` output against it.
 - **Claude Code emits `rate_limit_event` on every successful headless run**, carrying `resetsAt` as unix epoch. The documented quota surface is a status line, which **does not fire in `-p` mode**.
 - **Claude Code 2.1.233's generated project MCP schema** was probed locally with `claude mcp add --transport http --scope project`: `{"mcpServers":{"name":{"type":"http","url":"http://127.0.0.1:<port>/v1/mcp","headers":{"Authorization":"Bearer <token>"}}}}`.
   Production writes that shape outside the git worktree under a current-user-only DACL, puts only the per-manager bearer in it, passes it through `--mcp-config <file> --strict-mcp-config`, and deletes it independently when the manager exits; the disposable probe directory was deleted after capture.

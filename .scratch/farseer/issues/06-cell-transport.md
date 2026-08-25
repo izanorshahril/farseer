@@ -202,7 +202,16 @@ An ungranted name, per `22 cell addressing` section 3.
 A roster entry whose definition no longer exists, because a grant is not a definition.
 A `peer = true` entry, because section 2 keeps the A2A endpoint off by default and nothing has turned it on.
 
-### What is not proven
+### Proven live, and what that cost caught
 
-The refusals, the narrowing and the contract construction are covered by tests over a real `rmcp` client.
-**A live cross-cell round trip is not.** It would spawn two real managers and spend real credit, so it belongs with the nine ignored tests and has not been run.
+Run on 2026-08-25 against real processes: `POST /v1/cells/zero/instruct` -> a Claude Code manager in cell zero -> farseer's MCP face -> `delegate_to_cell` -> a **Goose manager running in cell social**, finishing `ok` under the caller's task id, in 16 seconds.
+
+The first two attempts failed, and the reason is worth keeping.
+The manager called exactly the right tool and got back:
+
+> Claude requested permissions to use `mcp__farseer__delegate_to_cell`, but you haven't granted it yet.
+
+A tool on the MCP face but absent from `--allowedTools` leaves the manager **waiting on a permission prompt no operator is watching**, which looks exactly like a hang.
+Visible and callable are two different things, and only a live run can tell them apart - every offline test passed the whole time.
+
+`invocation.rs` now derives the flag from one `MANAGER_ALLOWED_TOOLS` list, and a test walks the face's own `list_tools` output to assert every tool on it is granted, so the next tool cannot ship ungranted.

@@ -1372,6 +1372,38 @@ name = "writer"
 runner = "codex"
 "#;
 
+    /// A callee whose manager runner does not exist, so the call is accepted and
+    /// spawned and the callee's run then fails on its own. That is exactly the
+    /// seam a fire-and-forget call needs to prove without spending a real one:
+    /// acceptance is the caller's half, and the outcome is the callee's.
+    const UNRUNNABLE_CALLEE_CELL: &str = r#"
+cell_id = "social"
+name = "Social"
+workspace_strategy = "plain_directory"
+
+[manager]
+runner = "not-a-real-runner"
+"#;
+
+    /// The live cross-cell callee. Goose rather than Claude Code: the callee
+    /// needs no MCP face of its own, and goose on this machine delegates
+    /// through the already-authenticated `codex` CLI, so the probe spends no
+    /// new credential.
+    const LIVE_CALLEE_CELL: &str = r#"
+cell_id = "social"
+name = "Social"
+workspace_strategy = "plain_directory"
+
+[manager]
+runner = "goose"
+
+[[roster]]
+kind = "tool"
+name = "shell"
+irreversibility = "reversible"
+grants_shell = true
+"#;
+
     const CELL_WITH_A_WORKER: &str = r#"
 cell_id = "zero"
 name = "Cell Zero"
@@ -2890,6 +2922,16 @@ grants_shell = true
                 .any(|t| t.name.as_ref() == "delegate_to_cell"),
             "the cross-cell path must be visible to a manager that has it"
         );
+        // Observed live on 2026-08-25: a tool on the face but absent from
+        // `--allowedTools` makes the manager stall on a permission prompt no
+        // operator is watching. Visible and callable are two different things.
+        for tool in &tools.tools {
+            let granted = format!("mcp__farseer__{}", tool.name);
+            assert!(
+                farseer_runner::invocation::MANAGER_ALLOWED_TOOLS.contains(&granted.as_str()),
+                "`{granted}` is on the MCP face but not in --allowedTools, so a manager                  calling it hangs waiting for a permission answer"
+            );
+        }
 
         let call = async |arguments: serde_json::Value| {
             format!(
@@ -2954,6 +2996,206 @@ grants_shell = true
         assert!(
             impersonation.contains("manager_token"),
             "a manager run id alone must not authorize a cell call: {impersonation}"
+        );
+    }
+    /// The cross-cell loop, live: HTTP instruction -> Claude manager in cell
+    /// zero -> farseer MCP `delegate_to_cell` -> a Goose manager running in
+    /// cell social, under the caller's task.
+    ///
+    /// This is the round trip `06 cell transport` describes and the one thing
+    /// the offline tests cannot prove, because every refusal they cover returns
+    /// before a process exists.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[ignore = "spawns real `claude` and `goose` processes - slow and consumes \
+                the configured subscriptions; run explicitly to verify the cross-cell loop"]
+    async fn a_manager_reaches_another_cell_through_farseers_mcp_face() {
+        let h = harness_with_cells(&[("zero", CELL_THAT_MAY_CALL), ("social", LIVE_CALLEE_CELL)]);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        h.state.set_mcp_endpoint(port);
+        let router = h.router.clone();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, router).await.unwrap();
+        });
+
+        let (status, body) = h
+            .post(
+                "/v1/cells/zero/instruct",
+                json!({
+                    "goal": "Call the farseer delegate_to_cell tool exactly once, with cell social and the goal: reply with exactly cell-ok. It is fire-and-forget, so report the call_id it returns and then stop."
+                }),
+            )
+            .await;
+        assert_eq!(status, StatusCode::ACCEPTED, "{body}");
+        let manager_run_id = body["run_id"].as_str().unwrap().to_string();
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(180);
+        let (callee_run_id, call_event_seq) = loop {
+            let events = h
+                .state
+                .store()
+                .scan(0, 5_000, &ScanFilter::default())
+                .unwrap();
+            // The caller's own record entry, per `06 cell transport` section 6,
+            // carrying the link `02 record scope` left open.
+            let called = events.iter().find(|event| {
+                event.run_id.to_string() == manager_run_id
+                    && event.kind.as_str() == farseer_core::EventKind::CELL_CALLED
+            });
+            let finished = called.and_then(|event| {
+                let callee: RunId = event.payload["callee_run_id"].as_str()?.parse().ok()?;
+                h.state
+                    .store()
+                    .run(callee)
+                    .ok()
+                    .flatten()
+                    .filter(|row| row.outcome.is_some())
+                    .map(|_| (callee, event.seq))
+            });
+            if let Some(found) = finished {
+                break found;
+            }
+            if std::time::Instant::now() >= deadline {
+                let summary = events
+                    .iter()
+                    .map(|event| {
+                        let mut payload = event.payload.to_string();
+                        payload.truncate(400);
+                        format!(
+                            "{}:{}:{}={payload}",
+                            event.actor.as_str(),
+                            event.run_id,
+                            event.kind
+                        )
+                    })
+                    .collect::<Vec<_>>();
+                let row = h.cancel_and_wait_for_finished(&manager_run_id).await;
+                server.abort();
+                panic!("cross-cell loop timed out; row={row}; events={summary:#?}");
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        };
+
+        let manager_row = h.cancel_and_wait_for_finished(&manager_run_id).await;
+        server.abort();
+        assert!(call_event_seq > 0);
+
+        let callee_row = h.state.store().run(callee_run_id).unwrap().unwrap();
+        assert_eq!(
+            callee_row.cell_id.as_str(),
+            "social",
+            "the callee runs in its own cell, with its own manager"
+        );
+        assert_eq!(
+            callee_row.runner, "goose",
+            "`06 cell transport` section 4: the callee names its own runner, never the caller"
+        );
+        assert_eq!(
+            callee_row.task_id.to_string(),
+            manager_row["task_id"],
+            "`22 cell addressing` section 2: one task, one owner"
+        );
+        assert_eq!(callee_row.outcome.as_deref(), Some("ok"), "{callee_row:?}");
+    }
+    /// The accepted half of a cell call, with no live runner involved.
+    ///
+    /// `06 cell transport` section 5 made a cell call fire-and-forget, so what
+    /// the caller gets back is acceptance - a `call_id` and the callee's
+    /// `run_id` - and the caller's own record entry naming that run. Whether the
+    /// callee then succeeds is the callee's business and its own record.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn an_accepted_cell_call_records_the_callee_run_on_the_callers_own_entry() {
+        use rmcp::ServiceExt;
+        use rmcp::model::{CallToolRequestParams, ClientCapabilities, ClientInfo, Implementation};
+        use rmcp::transport::StreamableHttpClientTransport;
+        use rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig;
+
+        let h = harness_with_cells(&[
+            ("zero", CELL_THAT_MAY_CALL),
+            ("social", UNRUNNABLE_CALLEE_CELL),
+        ]);
+        let (manager_run_id, task_id, manager_token) = register_manager(&h);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let router = h.router.clone();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, router).await.unwrap();
+        });
+        let transport = StreamableHttpClientTransport::<reqwest::Client>::from_config(
+            StreamableHttpClientTransportConfig::with_uri(format!(
+                "http://127.0.0.1:{port}/v1/mcp"
+            ))
+            .auth_header(h.token.as_str().to_string()),
+        );
+        let client = ClientInfo::new(
+            ClientCapabilities::default(),
+            Implementation::new("farseer-api test client", "0.0.1"),
+        )
+        .serve(transport)
+        .await
+        .unwrap();
+
+        let result = client
+            .call_tool(
+                CallToolRequestParams::new("delegate_to_cell").with_arguments(
+                    json!({
+                        "manager_run_id": manager_run_id.to_string(),
+                        "manager_token": manager_token,
+                        "cell": "social",
+                        "goal": "post the changelog",
+                        "autonomy_ceiling": "irreversible",
+                    })
+                    .as_object()
+                    .cloned()
+                    .unwrap(),
+                ),
+            )
+            .await;
+        let text = format!("{result:?}");
+        assert!(
+            text.contains("call_id"),
+            "the call must be accepted: {text}"
+        );
+
+        let called = h
+            .state
+            .store()
+            .scan(0, 1_000, &ScanFilter::default())
+            .unwrap()
+            .into_iter()
+            .find(|event| event.kind.as_str() == farseer_core::EventKind::CELL_CALLED)
+            .expect("the caller keeps its own entry for the call");
+        assert_eq!(
+            called.run_id, manager_run_id,
+            "`06 cell transport` section 6: the entry belongs to the caller"
+        );
+        assert_eq!(called.payload["call"]["to_cell"], "social");
+        assert_eq!(
+            called.payload["call"]["autonomy_ceiling"], "reversible",
+            "irreversible was offered, the roster entry caps `social` at undoable, and the              callee's own policy caps at reversible - the floor neither side can lift"
+        );
+        let callee_run: RunId = called.payload["callee_run_id"]
+            .as_str()
+            .expect("the link `02 record scope` left open")
+            .parse()
+            .unwrap();
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        let callee_row = loop {
+            if let Some(row) = h.state.store().run(callee_run).unwrap() {
+                break row;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the callee's run never reached the record"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        };
+        server.abort();
+        assert_eq!(callee_row.cell_id.as_str(), "social");
+        assert_eq!(
+            callee_row.task_id, task_id,
+            "`22 cell addressing` section 2: one task, one owner"
         );
     }
 }
