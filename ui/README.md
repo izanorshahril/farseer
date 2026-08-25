@@ -7,11 +7,14 @@ There is no second layout and no mode switch.
 
 ## Running it
 
-`farseer serve` writes its port and token to its runtime file, and the dev server proxies `/v1` to it.
+Start `farseer serve`, then:
 
 ```bash
-FARSEER_PORT=9000 FARSEER_TOKEN=<from farseer's runtime.json> bun run --cwd ui dev
+bun run --cwd ui dev
 ```
+
+The dev server reads farseer's own runtime file for the port and the token, so there is nothing to paste.
+Set `FARSEER_PORT` and `FARSEER_TOKEN` only to point at a second daemon.
 
 The **proxy** attaches the token, so the browser never holds it.
 That is `28`'s third gate applied one level up: a widget must not hold the operator token, and holding it in the host page would only move the problem into `localStorage`, where clearing site data or any script on the page reaches it.
