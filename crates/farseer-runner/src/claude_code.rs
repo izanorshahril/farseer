@@ -62,7 +62,20 @@ pub enum RunnerSignal {
     /// matters. See [`crate::acp::UsageInfo`].
     Usage(crate::acp::UsageInfo),
     /// User-visible terminal text which a supervising manager can relay.
+    ///
+    /// One per **turn**. A native runner emits its whole answer at once, which
+    /// is why this was the only text signal for a long time.
     Output(String),
+    /// A fragment of an answer still being written.
+    ///
+    /// `05 run state model` is explicit that **token streams are activity, not
+    /// progress**, and an ACP agent streams its answer a few characters at a
+    /// time - `goose acp` sent "Hello" and "!" as two notifications. Recording
+    /// each as an answer would put two events in the record where a person said
+    /// one thing, and `28 operator surface`'s thread would render the manager
+    /// stuttering. The caller accumulates these and emits one [`Self::Output`]
+    /// when the turn ends.
+    OutputChunk(String),
     Finished(FinishedSignal),
 }
 

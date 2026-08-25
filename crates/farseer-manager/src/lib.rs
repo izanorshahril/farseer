@@ -37,6 +37,7 @@
 #![cfg(windows)]
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
@@ -197,18 +198,26 @@ pub enum Channel {
     Steered(fn(&str) -> String),
     /// An ACP agent: a JSON-RPC handshake, then the goal as `session/prompt`.
     ///
-    /// **Ends at the terminal signal rather than at end of stream**, because an
-    /// ACP agent does not exit when the turn ends - the session stays open for
-    /// the next prompt. Waiting for EOF here waits forever, which is exactly how
-    /// `29 harness protocol`'s first live run hung.
-    Acp,
+    /// An ACP agent **does not exit when the turn ends** - the session stays
+    /// open for the next prompt - so what ends the read loop depends on whether
+    /// anything intends to send one:
+    ///
+    /// - a **worker** has one goal, so the loop ends at the terminal signal.
+    ///   Waiting for EOF instead waits forever, which is how
+    ///   `29 harness protocol`'s first live run hung.
+    /// - a **manager** is a conversation, so the loop stays open exactly as a
+    ///   live Claude Code manager's does, and ends when the process does.
+    ///
+    /// The same distinction the native runners draw with `live_input`, drawn
+    /// here by what the session is *for* rather than by a flag on the argv.
+    Acp { manager: bool },
 }
 
 impl Channel {
     fn stdin_mode(self) -> StdinMode {
         match self {
             // A goal or a handshake has to reach it.
-            Self::Steered(_) | Self::Acp => StdinMode::Live,
+            Self::Steered(_) | Self::Acp { .. } => StdinMode::Live,
             Self::OneShot => StdinMode::Closed,
         }
     }
@@ -216,7 +225,7 @@ impl Channel {
     /// Whether the read loop stops at the terminal signal instead of at end of
     /// stream.
     fn ends_at_terminal(self) -> bool {
-        matches!(self, Self::Acp)
+        matches!(self, Self::Acp { manager: false })
     }
 }
 
@@ -242,6 +251,9 @@ pub struct StartedWorker {
     /// address. `None` for every other channel, and for an ACP run that has not
     /// been bootstrapped yet.
     acp_session: Option<String>,
+    /// The next unused JSON-RPC request id, shared with any [`SteerHandle`] this
+    /// worker hands out so two writers never collide on one.
+    acp_next_id: Arc<AtomicI64>,
 }
 
 /// A cloneable handle that writes a steer message into a run's live process,
@@ -252,12 +264,39 @@ pub struct StartedWorker {
 #[derive(Clone)]
 pub struct SteerHandle {
     stdin: StdinHandle,
-    frame: fn(&str) -> String,
+    wire: SteerWire,
+}
+
+/// How a steer message becomes a line on the wire.
+///
+/// A native steer is a pure function of the text. An **ACP steer is not**: it is
+/// another `session/prompt`, which needs the session the handshake opened and a
+/// request id nobody else has used. That is why this is an enum rather than the
+/// `fn(&str) -> String` it started as - the second case cannot be expressed as
+/// one, and pretending otherwise is how a handle that writes into nothing gets
+/// built.
+#[derive(Clone)]
+enum SteerWire {
+    Native(fn(&str) -> String),
+    Acp {
+        session: String,
+        /// Shared with the process's own bootstrap, so a steer never reuses the
+        /// id the goal was sent under.
+        next_id: Arc<AtomicI64>,
+    },
 }
 
 impl SteerHandle {
     pub fn steer(&self, message: &str) -> std::io::Result<()> {
-        self.stdin.write_line(&(self.frame)(message))
+        let line = match &self.wire {
+            SteerWire::Native(frame) => frame(message),
+            SteerWire::Acp { session, next_id } => farseer_runner::acp::prompt_frame(
+                next_id.fetch_add(1, Ordering::Relaxed),
+                session,
+                message,
+            ),
+        };
+        self.stdin.write_line(&line)
     }
 }
 
@@ -304,6 +343,7 @@ impl StartedWorker {
             parse,
             channel,
             acp_session: None,
+            acp_next_id: Arc::new(AtomicI64::new(1)),
         })
     }
 
@@ -320,13 +360,24 @@ impl StartedWorker {
         // nothing.
         let stdin = self.proc.stdin_handle()?;
         match self.channel {
-            Channel::Steered(frame) => Some(SteerHandle { stdin, frame }),
-            // An ACP steer is another `session/prompt` on the same session,
-            // which needs the session id and a fresh request id - neither of
-            // which fits a `fn(&str) -> String`. `20 worker control channel`
-            // made steering the exception, so an ACP worker is unsteerable
-            // until a manager needs it rather than speculatively.
-            Channel::Acp | Channel::OneShot => None,
+            Channel::Steered(frame) => Some(SteerHandle {
+                stdin,
+                wire: SteerWire::Native(frame),
+            }),
+            // Only after the handshake: the session id is what a steer is
+            // addressed to, and `start_worker` bootstraps before any caller can
+            // reach this. A worker gets nothing - `20 worker control channel`
+            // made steering the exception, and a worker has one goal.
+            Channel::Acp { manager: true } => {
+                self.acp_session.as_ref().map(|session| SteerHandle {
+                    stdin,
+                    wire: SteerWire::Acp {
+                        session: session.clone(),
+                        next_id: Arc::clone(&self.acp_next_id),
+                    },
+                })
+            }
+            Channel::Acp { manager: false } | Channel::OneShot => None,
         }
     }
 
@@ -363,8 +414,8 @@ impl StartedWorker {
         match self.channel {
             Channel::OneShot => {}
             Channel::Steered(frame) => self.proc.write_line(&frame(goal))?,
-            Channel::Acp => {
-                let mut next_id = 1;
+            Channel::Acp { .. } => {
+                let mut next_id = self.acp_next_id.load(Ordering::Relaxed);
                 let mut discard = |_: Result<Vec<RunnerSignal>, ParseError>| {};
                 let opened = farseer_runner::acp_drive::handshake(
                     &mut self.proc,
@@ -376,10 +427,14 @@ impl StartedWorker {
                     &mut next_id,
                     &mut discard,
                 )?;
+                let goal_id = next_id;
+                // Bumped before the goal is sent, so a steer arriving the
+                // instant the handle becomes reachable cannot reuse this id.
+                self.acp_next_id.store(goal_id + 1, Ordering::Relaxed);
                 farseer_runner::acp_drive::prompt_on(
                     &self.proc,
                     &opened.session_id,
-                    next_id,
+                    goal_id,
                     goal,
                 )?;
                 self.acp_session = Some(opened.session_id);
@@ -403,6 +458,9 @@ impl StartedWorker {
     ) -> Result<RunReport, ManagerError> {
         let mut report = None;
         let mut output = None;
+        // Fragments of an answer still being written. Emptied into one
+        // `manager_answered` when the turn ends - see `RunnerSignal::OutputChunk`.
+        let mut chunks = String::new();
         let mut window = None;
         let mut session: Option<farseer_runner::claude_code::SessionInfo> = None;
         let mut store_err = None;
@@ -468,7 +526,25 @@ impl StartedWorker {
                         }
                         output = Some(text);
                     }
+                    // Activity, and nothing more, until the turn ends.
+                    RunnerSignal::OutputChunk(text) => chunks.push_str(&text),
                     RunnerSignal::Finished(f) => {
+                        if !chunks.trim().is_empty() {
+                            let event = NewEvent::new(
+                                contract.cell_id.clone(),
+                                contract.run_id,
+                                EventKind::new(EventKind::MANAGER_ANSWERED),
+                                progress_actor,
+                                now_ms(),
+                                serde_json::json!({ "text": chunks }),
+                            );
+                            if let Err(e) = sink.append(&event) {
+                                store_err = Some(e);
+                                cancel_on_store_failure.cancel();
+                                return;
+                            }
+                            output = Some(std::mem::take(&mut chunks));
+                        }
                         report = Some(RunReport {
                             outcome: f.outcome,
                             cost_usd_micros: f.cost_usd_micros,
@@ -692,7 +768,9 @@ pub fn start_worker(
                     cwd,
                     thresholds,
                     farseer_runner::acp::parse_line,
-                    Channel::Acp,
+                    Channel::Acp {
+                        manager: options.role == RunRole::Manager,
+                    },
                 )
             }
             None => return Err(ManagerError::UnsupportedRunner(other.to_string())),
@@ -1401,11 +1479,16 @@ mod tests {
             Channel::Steered(farseer_runner::claude_code::steer_frame).stdin_mode(),
             StdinMode::Live
         ));
-        assert!(matches!(Channel::Acp.stdin_mode(), StdinMode::Live));
+        assert!(matches!(
+            Channel::Acp { manager: false }.stdin_mode(),
+            StdinMode::Live
+        ));
 
         // Only a conversational runner stops early, because only it stays alive
-        // after the work is done.
-        assert!(Channel::Acp.ends_at_terminal());
+        // after the work is done - and only when it is a worker, since a manager
+        // is meant to be spoken to again.
+        assert!(Channel::Acp { manager: false }.ends_at_terminal());
+        assert!(!Channel::Acp { manager: true }.ends_at_terminal());
         assert!(!Channel::OneShot.ends_at_terminal());
         assert!(!Channel::Steered(farseer_runner::claude_code::steer_frame).ends_at_terminal());
     }
@@ -1503,5 +1586,116 @@ mod tests {
             "the denominator is the reason this runner exists, and it must reach the record: {kinds:?}"
         );
         assert!(kinds.contains(&EventKind::MANAGER_ANSWERED), "{kinds:?}");
+    }
+
+    /// Live: an ACP **manager** answers, is steered, and answers again on the
+    /// same session - which is the whole reason `Channel::Acp` carries a role.
+    ///
+    /// Claude Code is deliberately not involved, per the operator's standing
+    /// request that farseer not compete with their interactive session.
+    ///
+    /// Run with: `cargo test -p farseer-manager steering_an_acp -- --ignored --nocapture`
+    #[test]
+    #[ignore = "spawns a real `goose acp` and spends a subscription on two turns"]
+    fn steering_an_acp_manager_reaches_the_same_session() {
+        // On disk rather than in memory: the watching thread needs its own
+        // connection, because `09 store decision`'s single writer is a
+        // `rusqlite::Connection` and one cannot be shared across threads.
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("record.db");
+        let store = Store::open(&db).unwrap();
+        let spec = WorkerContractSpec {
+            run_id: RunId::new(),
+            task_id: TaskId::new(),
+            cell_id: CellId::new("zero"),
+            goal: "Say hello in one short sentence.".into(),
+            workspace: WorkspaceStrategy::Worktree,
+            runner: "goose-acp".into(),
+            tool_grants: vec![],
+            autonomy_ceiling: Irreversibility::Reversible,
+            budget: Budget::default(),
+            definition_of_done: String::new(),
+        };
+        let run_id = spec.run_id;
+        let contract = WorkerContract::seal(spec);
+
+        let said = |store: &Store| -> Vec<String> {
+            store
+                .scan(0, 200, &farseer_store::ScanFilter::run(run_id))
+                .unwrap()
+                .iter()
+                .filter(|event| event.kind.as_str() == EventKind::MANAGER_ANSWERED)
+                .filter_map(|event| {
+                    event
+                        .payload
+                        .get("text")
+                        .and_then(|text| text.as_str())
+                        .map(str::to_string)
+                })
+                .collect()
+        };
+        let answers = |store: &Store| said(store).len();
+        let wait_for = |store: &Store, count: usize| {
+            let deadline = Instant::now() + std::time::Duration::from_secs(90);
+            while answers(store) < count {
+                assert!(Instant::now() < deadline, "waited 90s for answer {count}");
+                std::thread::sleep(std::time::Duration::from_millis(200));
+            }
+        };
+
+        let mut tick = 100i64;
+        let watched = db.clone();
+        let result = std::thread::scope(|scope| {
+            run_worker(
+                &store,
+                &contract,
+                &std::env::current_dir().unwrap(),
+                LivenessThresholds::default(),
+                &RunOptions {
+                    role: RunRole::Manager,
+                    ..RunOptions::default()
+                },
+                || {
+                    tick += 1;
+                    tick
+                },
+                |cancel, _, steer| {
+                    let steer = steer.expect("a manager on ACP is addressable");
+                    scope.spawn(move || {
+                        let reader = Store::open(&watched).unwrap();
+                        wait_for(&reader, 1);
+                        // The session is still open, which is the claim.
+                        steer
+                            .steer("Now say goodbye in one short sentence.")
+                            .expect("the steer reaches the live session");
+                        wait_for(&reader, 2);
+                        cancel.cancel();
+                    });
+                },
+            )
+        });
+
+        // Cancelled by the test, so the report comes back through the cancelled
+        // path - the run did not fail and did not end on its own.
+        assert!(
+            matches!(result, Err(ManagerError::Cancelled(_))),
+            "expected a cancelled manager, got {result:?}"
+        );
+        let said = said(&store);
+        // Printed so a live run leaves evidence of what the agent actually said.
+        eprintln!("turns: {said:#?}");
+        // Exactly two, not two-or-more: an answer is a **turn**, and an ACP
+        // agent streams one a fragment at a time. Before the chunks were
+        // assembled this assertion passed on a single "Hello" + "!" and the
+        // steer was never being tested at all.
+        assert_eq!(
+            said.len(),
+            2,
+            "one answer per turn, assembled from fragments: {said:?}"
+        );
+        assert_ne!(
+            said[0], said[1],
+            "the second turn is a reply to the steer, not an echo"
+        );
     }
 }

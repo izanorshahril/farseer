@@ -250,7 +250,7 @@ pub fn parse_line(line: &str) -> Result<Vec<RunnerSignal>, ParseError> {
             .and_then(|content| content.get("text"))
             .and_then(Value::as_str)
             .filter(|text| !text.is_empty())
-            .map(|text| RunnerSignal::Output(text.to_string())),
+            .map(|text| RunnerSignal::OutputChunk(text.to_string())),
         // The field `28 operator surface` had no source for. `used` and `size` are the
         // context window, not the subscription window - ACP has no concept of
         // the latter, which is why this runner is quota-blind.
@@ -336,17 +336,19 @@ mod tests {
         );
     }
 
+    /// The capture really did arrive as "Hello" then "!". A signal per fragment
+    /// would be two answers in the record for one sentence.
     #[test]
-    fn message_chunks_stream_one_fragment_at_a_time() {
+    fn message_chunks_are_fragments_rather_than_answers() {
         let hello = r#"{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"s","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"Hello"},"messageId":"resp_1"}}}"#;
         let bang = r#"{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"s","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"!"},"messageId":"resp_1"}}}"#;
         assert_eq!(
             parse_line(hello).unwrap(),
-            vec![RunnerSignal::Output("Hello".into())]
+            vec![RunnerSignal::OutputChunk("Hello".into())]
         );
         assert_eq!(
             parse_line(bang).unwrap(),
-            vec![RunnerSignal::Output("!".into())]
+            vec![RunnerSignal::OutputChunk("!".into())]
         );
     }
 

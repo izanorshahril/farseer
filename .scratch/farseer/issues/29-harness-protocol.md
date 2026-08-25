@@ -276,3 +276,34 @@ ACP does not standardise mode names, so an agent using another word for the same
 Guessing at a synonym would be inventing a grant `12 autonomy and deny list` did not give, so `ACP_UNATTENDED_MODE` is one constant with the reasoning attached rather than a table of guesses.
 
 Signals arriving **during** the handshake are dropped rather than recorded, because `bootstrap` has no store. In practice that is one `usage_update` the agent sends again after the turn.
+
+
+## Implementation note, 2026-08-26: the ACP manager, and a weak test hiding a real bug
+
+A manager on `goose-acp` now answers, is steered, and answers again on the same session:
+
+```
+turns: ["Hello!", "Goodbye!"]
+```
+
+Two turns, one session, through the same `run_worker` an HTTP request reaches.
+
+### A steer is not a function of its text
+
+`SteerHandle` held a `fn(&str) -> String`, which is enough for Claude Code and **cannot express an ACP steer at all**: a steer there is another `session/prompt`, addressed to the session the handshake opened and carrying a request id nobody else has used.
+`SteerWire::{Native, Acp}` names both, and the ACP arm shares the id counter with the process's own bootstrap so a steer arriving the instant the handle becomes reachable cannot collide with the goal.
+
+`Channel::Acp` also had to grow a role. What ends the read loop is not a property of the protocol but of **what the session is for**: a worker has one goal so the loop ends at the terminal signal, and a manager is a conversation so it stays open exactly as a live Claude Code manager's does.
+
+### The bug the first passing test was hiding
+
+The steer test asserted `answers >= 2` and passed in 2.08 seconds - before the steer could plausibly have mattered.
+It was passing on **one** turn, because farseer was appending a `manager_answered` event **per fragment**: `goose acp` streams an answer a few characters at a time, and the capture from earlier in this ticket shows the sentence "Hello!" arriving as `"Hello"` then `"!"`.
+
+`05 run state model` had already ruled on this - **token streams are activity, not progress** - and the ACP adapter was violating it while the record filled with a manager stuttering one word at a time.
+
+`RunnerSignal::OutputChunk` is the fix: a fragment is activity and accumulates, and one `Output` is emitted when the turn ends. `Output` still means what it always meant, one per turn, which is why no native adapter changed.
+
+The test now asserts **exactly two** answers and that they differ, which is what makes it a test of steering rather than of streaming.
+
+Worth naming: the assertion was weak in the direction that made a green test agree with a broken implementation. `>=` on a count of events is that shape by construction.
