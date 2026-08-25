@@ -56,8 +56,11 @@ const RUNTIME = String.raw`
   // the frame, which resizes the document, which reports again - the loop that
   // took the dev server's heap with it the first time this ran.
   const report = () => {
-    const height = Math.ceil(document.documentElement.getBoundingClientRect().height);
-    if (height === lastHeight) return;
+    // The content's own box, measured from the root element the widget rendered
+    // into - not the body, which the host's CSS height stretches to fill.
+    const root = document.getElementById("root");
+    const height = Math.ceil(root ? root.getBoundingClientRect().height : 0);
+    if (!height || height === lastHeight) return;
     lastHeight = height;
     port.postMessage({ height });
   };
@@ -71,6 +74,11 @@ const RUNTIME = String.raw`
     if (!event.ports.length || port) return;
     port = event.ports[0];
     port.onmessage = ({ data }) => {
+      // The host asks for a measurement rather than the frame volunteering one.
+      // Measuring from inside, at module time, reads zero - layout has not
+      // happened - and a frame whose CSS height the host controls cannot tell
+      // the difference between its content and its viewport afterwards.
+      if (data.measure) return report();
       const entry = pending.get(data.id);
       if (!entry) return;
       pending.delete(data.id);
@@ -83,7 +91,8 @@ const RUNTIME = String.raw`
     const url = URL.createObjectURL(new Blob([source], { type: "text/javascript" }));
     import(/* @vite-ignore */ url)
       .then(() => {
-        new ResizeObserver(report).observe(document.documentElement);
+        const root = document.getElementById("root");
+        if (root) new ResizeObserver(report).observe(root);
         report();
       })
       .catch((error) => fail(error.message))
@@ -146,12 +155,19 @@ export function SandboxWidget({ id, title, bridge, cell }: Props) {
       handed = true;
       element.contentWindow?.postMessage("farseer-bridge", "*", [channel.port2]);
     };
+    // Ask a few times while the widget settles, then stop. A widget that
+    // renders in one paint answers the first ask; one that fetches first
+    // answers a later one.
+    const asks = [200, 600, 1500, 3000, 6000].map((delay) =>
+      setTimeout(() => channel.port1.postMessage({ measure: true }), delay),
+    );
     // A `srcDoc` frame can finish loading before this effect runs, and a `load`
     // listener attached after the fact never fires - the widget would then sit
     // there forever with no port and no way to say so.
     if (element.contentDocument?.readyState === "complete") send();
     element.addEventListener("load", send);
     return () => {
+      asks.forEach(clearTimeout);
       element.removeEventListener("load", send);
       channel.port1.close();
     };

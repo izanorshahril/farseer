@@ -242,3 +242,52 @@ Verified live, and the rule held visibly:
 
 `28 operator surface` gate 3 hands a widget `read`, `ask` and its own state slice.
 A run verb is not among them, and adding one to the host bridge did not change that: a widget the operator did not write can **show** a run and cannot **cancel** one.
+
+## Implementation note, 2026-08-25: cell zero wrote one, and what it cost to find out
+
+The loop closes: the operator asked, cell zero read `widgets/AGENTS.md`, wrote two files, committed, left a branch, and its worktree was deleted. The canvas showed the branch as a pending widget, **keep** merged it, and it compiled and mounted sandboxed like any other.
+
+Three things had to be fixed before that worked, and each was invisible until a real run hit it.
+
+### A manager reads HEAD, not the working tree
+
+The first attempt failed with `File does not exist` for `widgets/AGENTS.md`.
+A run's workspace is a worktree of **HEAD**, so anything a manager must read has to be **committed**.
+An uncommitted contract file is a contract the manager cannot see, and it spends real tokens exploring before it gives up.
+
+### A manager that may not write is a manager that hangs
+
+The second attempt read the contract, decided correctly, and stalled on:
+
+> Claude requested permissions to write to `...\widgets\cost-today\widget.json`
+
+`--allowedTools` named only the four `mcp__farseer__*` tools, so every built-in write needed a permission answer nobody was there to give.
+This is the same class of bug as the one `06 cell transport` recorded: **a tool being reachable is not the same as being permitted**, and the failure looks exactly like a hang.
+
+`Write`, `Edit` and `Bash` are now granted to a manager whose pinned cell grants a shell-capable tool, and to no other.
+That is `12 autonomy and deny list`'s own boundary mapped onto the runner's flag rather than a second policy invented in the adapter - and the API already refuses to launch a native runner in a cell with no shell grant, so the two agree.
+
+**This means `28`'s section 3 was unimplementable as written until now.** "Cell zero authors widget code" was a decision the runtime could not carry out.
+
+### Delivery is a branch, because a worktree is detached
+
+`04 spike workspace teardown` deletes the workspace when the run ends, and `create_worktree` uses `--detach`, so a plain commit there is unreachable once the worktree is pruned.
+A **branch ref** survives: worktrees share one object store.
+
+So the contract tells a manager to finish with `git branch farseer/widget/<id>`, and the canvas lists those refs as pending widgets. Keep merges, undo deletes the branch.
+
+### What the widget got wrong, and what that says about the contract
+
+It guessed the shape of `/analytics/cost`, hedging with `total_usd ?? total ?? usd`.
+The endpoint answers an **array**, so the widget shows nothing useful.
+
+The contract lists the paths a widget may read and **not what they return**, which is a gap in the contract rather than a mistake by the manager.
+
+### Not verified
+
+**Auto-height.** A sandboxed frame reports its own layout as `0` in this environment, because the browser pane driving the check runs with `document.visibilityState: "hidden"` and does not lay out frame content. The host's own measurements are correct - the frame's box reads 274x120 - so the guard keeps the default height rather than collapsing a widget to nothing. It wants a look in a real window.
+
+### What it cost
+
+Three runs, **$1.35** in total, and two of the three were spent discovering the two bugs above rather than doing the work.
+That is the price of the finding, and it is cheaper than shipping a contract nobody could satisfy.
