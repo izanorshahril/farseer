@@ -52,6 +52,7 @@ pub fn parse_line(line: &str) -> Result<Vec<RunnerSignal>, ParseError> {
                 model: None,
                 session_id: Some(thread.to_string()),
                 provider: None,
+                configured: None,
             })
         }),
         "turn.completed" => Some(RunnerSignal::Finished(finished(&v, Outcome::Ok))),

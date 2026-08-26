@@ -276,8 +276,9 @@ pub struct StartedWorker {
     /// The next unused JSON-RPC request id, shared with any [`SteerHandle`] this
     /// worker hands out so two writers never collide on one.
     acp_next_id: Arc<AtomicI64>,
-    /// The Codex app-server thread this run is talking to, once started.
-    codex_thread: Option<String>,
+    /// The Codex app-server thread this run is talking to, once started, and
+    /// what that runner is configured to bring to it.
+    codex_thread: Option<farseer_runner::codex_app_server::ThreadOpened>,
 }
 
 /// A cloneable handle that writes a steer message into a run's live process,
@@ -474,7 +475,7 @@ impl StartedWorker {
                     self.acp_next_id.load(Ordering::Relaxed) - 1,
                 );
                 let mut discard = |_: Result<Vec<RunnerSignal>, ParseError>| {};
-                let thread = farseer_runner::codex_app_server::handshake(
+                let opened = farseer_runner::codex_app_server::handshake(
                     &mut self.proc,
                     cwd,
                     // `12 autonomy and deny list` decides reach before the run.
@@ -489,13 +490,18 @@ impl StartedWorker {
                 self.acp_next_id.store(goal_id + 1, Ordering::Relaxed);
                 self.proc
                     .write_line(&farseer_runner::codex_app_server::turn_start_frame(
-                        goal_id, &thread, goal,
-                        // Observed, never advertised: farseer asks for no model
-                        // and no effort until something decides them. `30 codex
-                        // app server` makes `effort` a contract question.
-                        None, None,
+                        goal_id,
+                        &opened.thread_id,
+                        goal,
+                        // Read, never written. The operator's own config says
+                        // `xhigh` on this machine, and a farseer that sent its
+                        // own value would silently downgrade every run they
+                        // configured up. The default is surfaced as a hint on
+                        // `session_started` instead.
+                        None,
+                        None,
                     ))?;
-                self.codex_thread = Some(thread);
+                self.codex_thread = Some(opened);
             }
         }
         Ok(())
@@ -535,10 +541,14 @@ impl StartedWorker {
         let codex_thread =
             self.codex_thread
                 .take()
-                .map(|thread| farseer_runner::claude_code::SessionInfo {
+                .map(|opened| farseer_runner::claude_code::SessionInfo {
+                    // Observed stays observed: the app-server names no model for
+                    // the turn, and the configured one is a hint rather than a
+                    // report of what ran. Different fields for that reason.
                     model: None,
                     provider: None,
-                    session_id: Some(thread),
+                    configured: opened.configured,
+                    session_id: Some(opened.thread_id),
                 });
         let opened = self.acp_opened.take().map(|opened| {
             farseer_runner::claude_code::SessionInfo {
@@ -548,6 +558,9 @@ impl StartedWorker {
                 // there and no provider; `goose acp` does the reverse.
                 model: opened.model().map(str::to_string),
                 provider: opened.provider().map(str::to_string),
+                // ACP exposes settings but no notion of a default farseer could
+                // separate from a current value, so there is no hint to give.
+                configured: None,
                 session_id: Some(opened.session_id),
             }
         });
@@ -685,6 +698,11 @@ impl StartedWorker {
                                 "session_id": info.session_id,
                                 "provider": info.provider,
                                 "runner": contract.runner,
+                                // Hints, named as hints on the wire so a reader
+                                // cannot mistake them for what the turn used.
+                                "configured_model": info.configured.as_ref().and_then(|c| c.model.clone()),
+                                "configured_effort": info.configured.as_ref().and_then(|c| c.effort.clone()),
+                                "configured_from": info.configured.as_ref().and_then(|c| c.from.clone()),
                             }),
                         );
                         if let Err(e) = sink.append(&event) {

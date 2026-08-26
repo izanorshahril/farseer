@@ -104,11 +104,48 @@ pub struct SessionInfo {
     /// which records what the **operator declared**. Only an ACP agent answers
     /// it today, and only when it uses ACP's un-standardised `provider` key.
     pub provider: Option<String>,
+    /// What the runner is **configured** to do, as opposed to what it did.
+    ///
+    /// A hint, and labelled one everywhere it surfaces. See [`Configured`].
+    pub configured: Option<Configured>,
+}
+
+/// The runner's own defaults, read from its own configuration.
+///
+/// This is deliberately **not** merged into the observed fields beside it.
+/// `10 runner inventory`'s rule is that farseer reports what it observed, and a
+/// configured default is a different claim: it says what the runner *will*
+/// reach for, not what this turn used. The two agree only while farseer sends
+/// no override - which it does not, and which is the point below.
+///
+/// Farseer reads these and **never sets them**. `codex app-server` takes a
+/// per-turn `model` and `effort`, and the operator's `config.toml` on this
+/// machine says `xhigh`; a farseer that passed its own value would quietly
+/// downgrade every run the operator had deliberately configured up. So the
+/// default is surfaced as a hint and left alone.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Configured {
+    pub model: Option<String>,
+    /// `low`, `medium`, `high`, `xhigh` on this machine - the runner states
+    /// which it supports, so farseer never has to know the list.
+    pub effort: Option<String>,
+    /// Which file said so. The app-server reports the origin of every setting,
+    /// which turns "why is this run slow" into a path rather than a guess.
+    pub from: Option<String>,
+}
+
+impl Configured {
+    pub fn is_empty(&self) -> bool {
+        self.model.is_none() && self.effort.is_none()
+    }
 }
 
 impl SessionInfo {
     pub fn is_empty(&self) -> bool {
-        self.model.is_none() && self.session_id.is_none() && self.provider.is_none()
+        self.model.is_none()
+            && self.session_id.is_none()
+            && self.provider.is_none()
+            && self.configured.is_none()
     }
 }
 
@@ -208,6 +245,7 @@ pub fn parse_line(line: &str) -> Result<Vec<RunnerSignal>, ParseError> {
                 // Claude Code names an account on `/status`, which does not
                 // fire headless. Absent rather than assumed.
                 provider: None,
+                configured: None,
             };
             (!info.is_empty()).then_some(RunnerSignal::Session(info))
         }
@@ -479,6 +517,7 @@ mod tests {
                 session_id: Some("abc".into()),
                 // Claude Code names no account headless.
                 provider: None,
+                configured: None,
             })]
         );
     }

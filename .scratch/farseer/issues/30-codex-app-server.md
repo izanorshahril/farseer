@@ -199,3 +199,53 @@ That was the point of doing this rather than deleting the old test: **`27` refus
 ### And the account is still declared
 
 The adapter fills every field **except** `account` and `runner`, and the API - the layer that reads runner config - fills those in. `27` is explicit that the account is declared by the operator and never inferred, so the adapter cannot supply it even though it knows `limitId: "codex"`. A test asserts the adapter leaves it blank.
+
+
+## Decided 2026-08-26: effort is read, never written - and the default is the hint
+
+Section 4 step 3 asked whether reasoning effort is a **contract field** or a **runner default**. The operator's answer: keep control where farseer has it, leave every other runner exactly as it is, and **research the default so it can be shown as a hint**.
+
+That turned out to be answerable rather than a judgement call, because the default is observable.
+
+### It was noted three times and never researched
+
+`28 operator surface` recorded the thinking level as unreportable. `29 harness protocol` corrected that to **unrequested**. `30` confirmed `effort` is accepted per turn. None of the three asked the question that matters: **what is it set to now?**
+
+`config/read` answers it, with provenance:
+
+```
+config.model_reasoning_effort = "xhigh"
+config.model                  = "gpt-5.6-sol"
+origins.model_reasoning_effort.name.file = C:\Users\...\.codex\config.toml
+```
+
+And `model/list` names each model's `supportedReasoningEfforts` - `low`, `medium`, `high`, `xhigh` - so farseer never has to hold that list itself.
+
+### Why farseer must not set it
+
+This machine is configured to `xhigh`. The first probe in this ticket passed `effort: "low"` and **silently overrode that**, which is what a farseer sending its own value would do to every run - downgrading work the operator had deliberately configured up, with nothing in the record saying so.
+
+So `turn_start_frame` carries no `effort` and no `model` in production, and a test pins that. The default is **surfaced as a hint instead**, on `session_started`:
+
+```json
+{"configured_effort":"xhigh",
+ "configured_from":"C:\\Users\\...\\.codex\\config.toml",
+ "configured_model":"gpt-5.6-sol",
+ "model":null,"provider":null,"runner":"codex-app-server"}
+```
+
+Verified live.
+
+### A hint is a different kind of fact, and lives in a different field
+
+`SessionInfo.model` stays **observed** and stays `null` here, because the app-server names no model for the turn. The configured model sits in `Configured` beside it and is named `configured_*` on the wire and **"configured effort"** in the meta strip.
+
+They agree today only because farseer sends no override. Merging them would make that coincidence look like a measurement, and would quietly become a lie the day farseer starts setting one.
+
+`10 runner inventory`'s rule extended, in one line: **observed, never advertised - and a default is neither.**
+
+### What this decides about the contract
+
+**Nothing yet, deliberately.** `05 run state model`'s contract gains no `effort` field, because farseer sets no effort. The question stays open behind a real precondition: it becomes a contract question the day farseer has a reason to override a default it can now see and name.
+
+Other runners are untouched. Claude Code, Codex `exec`, cursor-agent, goose and the ACP agents behave exactly as before - none of them exposes a default farseer can read, so none of them grows a hint, and none of them loses anything.

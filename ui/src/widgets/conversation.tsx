@@ -30,6 +30,9 @@ type Meta = {
   model?: string;
   /** The account the runner says it is using, which is not what was configured. */
   provider?: string;
+  /** A **hint**: what the runner is configured to reach for, not what this turn used. */
+  effort?: string;
+  effortFrom?: string;
   session_id?: string;
   cell?: string;
   cost?: number;
@@ -141,6 +144,8 @@ export function ConversationWidget({ bridge }: { bridge: Bridge }) {
           runner: str("runner") ?? current.runner,
           model: str("model"),
           provider: str("provider"),
+          effort: str("configured_effort"),
+          effortFrom: str("configured_from"),
           session_id: str("session_id"),
           cell: event.cell_id,
         }));
@@ -215,6 +220,10 @@ export function ConversationWidget({ bridge }: { bridge: Bridge }) {
         ["runner", meta.runner],
         ["model", meta.model],
         ["provider", meta.provider],
+        // Labelled `configured` rather than `thinking`: the runner states what
+        // it will reach for, and farseer never sets it, so calling it the level
+        // this turn used would be a claim nobody made.
+        ["configured effort", meta.effort],
         ["session", meta.session_id?.slice(0, 8)],
         ["context", context(meta)],
         ["tokens", meta.tokens?.toLocaleString()],
