@@ -115,3 +115,49 @@ Both generated on this machine, 2026-08-26, against `codex-cli 0.149.1`:
 
 - `codex app-server generate-json-schema --out <dir>` - `ClientRequest.json`, `ServerNotification.json`, and the payload definitions quoted above.
 - A live `codex app-server` probe: `initialize`, `thread/start` with `sandbox: read-only`, `turn/start` with `effort: low`. Twenty-seven lines, quoted verbatim above.
+
+
+## Implementation note, 2026-08-26: the read half, wired and proven
+
+`codex-app-server` is a runner. A live run through `run_worker` finished with `usage_updated`, `manager_answered` and `session_started` in the record:
+
+```json
+{"model":null,"provider":null,"runner":"codex-app-server","session_id":"01a03e29-1a68-76c3-b6c5-fdeb24d5d478"}
+```
+
+Every mapping is backed by a line from the probe. What landed, and what deliberately did not:
+
+| Notification | Mapped to | |
+|---|---|---|
+| `thread/tokenUsage/updated` | `usage_updated` with a real `modelContextWindow` | the denominator, natively |
+| `thread/compacted` | `context_compacted` | second runner able to say so |
+| `item/completed` (agentMessage) | `Output` | the **assembled** answer |
+| `item/agentMessage/delta` | activity only | `05 run state model`'s rule |
+| `turn/completed` | `Finished`, `interrupted` -> `Cancelled` | only a human choosing not to proceed |
+| `account/rateLimits/updated` | **nothing yet** | read into [`RateLimits`], not signalled |
+
+The last row is the deliberate one. `27 quota accounting`'s `WindowObservation` holds **one** window and this reports **two**, each with a percentage that shape has no field for. Forcing it through now would report a number farseer cannot stand behind, so the parser reads it into its own type with tests, and a test asserts `parse_line` stays silent about it.
+
+### The deltas taught nothing new, which is the point
+
+Codex streams `item/agentMessage/delta` **and** sends `item/completed` carrying the assembled `text`. ACP has no assembled form, which is why `RunnerSignal::OutputChunk` had to exist. Here the runner does the assembling, so the deltas are activity and the item is the answer - the same rule reaching two different conclusions because the runners differ, rather than one rule bent to fit.
+
+### One shared request loop, extracted on the second use
+
+`jsonrpc.rs` holds the write-a-request-and-read-past-everything-else loop that ACP and the app-server both need, extracted when the **second** protocol appeared rather than in anticipation of it - `08 generalization test`'s standard, applied to farseer's own code.
+
+The handshake differs in a way worth naming: the app-server does nothing until an `initialized` **notification** arrives, so a client that skips it waits forever on a `thread/start` the server has not begun listening for. That is the third time this crate has met a live process producing nothing because of a handshake detail, and it is spelled out in the code rather than left in a trace.
+
+### An `#[ignore]`d test does not run itself
+
+Running every live test at once found the ACP one **failing** - it asserted `RunnerSignal::Output`, which was true when it was written and became false hours later when the fragment bug was fixed and ACP started emitting `OutputChunk`.
+
+Nothing was broken except the test, but nothing said so either: `#[ignore]` keeps it out of `cargo test`, and it had not been run since the change. The whole point of these tests is that they are the only ones touching a real runner, and they are exactly the ones that rot silently.
+
+Worth a habit rather than a fix: **run the ignored sweep whenever a signal's shape changes**, not only when the runner does.
+
+### Not built, and each one is a decision rather than work
+
+- **Quota**, above: `27` needs two windows and a percentage field.
+- **`effort` and `model` on `turn/start`.** Both are wired to `None`. `30` section 4 says why: reasoning effort is a property of how a run executes, `05 run state model` sealed the contract, and it is a contract field or a runner default. Guessing is how a field ends up meaning neither.
+- **`turn/steer`.** Needs the `expectedTurnId` farseer does not track, and using it at all is the **correction to `20 worker control channel`** recorded on that ticket - the first evidence against turn-boundary granularity. A decision, not wiring.

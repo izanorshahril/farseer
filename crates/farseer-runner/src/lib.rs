@@ -28,9 +28,12 @@
 pub mod acp;
 pub mod claude_code;
 pub mod codex;
+pub mod codex_app_server;
 pub mod cursor_agent;
 pub mod goose;
 pub mod invocation;
+#[cfg(windows)]
+pub mod jsonrpc;
 pub mod resolve;
 
 #[cfg(windows)]

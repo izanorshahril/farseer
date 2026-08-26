@@ -33,28 +33,12 @@ use std::path::Path;
 
 use crate::acp::{self, SessionOpened};
 use crate::claude_code::{ParseError, RunnerSignal};
+use crate::jsonrpc::request;
 use crate::spawn::{StdinMode, SupervisedProcess};
-use serde_json::Value;
 
-#[derive(Debug, thiserror::Error)]
-pub enum AcpError {
-    #[error("could not start the ACP agent: {0}")]
-    Spawn(#[from] crate::spawn::SpawnError),
-    #[error("{0}")]
-    Io(#[from] std::io::Error),
-    /// The agent closed stdout before answering. Usually a misconfigured agent
-    /// writing its complaint to stderr, which this crate discards.
-    #[error("the ACP agent stopped before answering {method}")]
-    Closed { method: &'static str },
-    /// A JSON-RPC error response to something farseer asked for.
-    #[error("the ACP agent refused {method}: {message}")]
-    Refused {
-        method: &'static str,
-        message: String,
-    },
-    #[error("the ACP agent answered session/new without a session id")]
-    NoSession,
-}
+/// ACP's errors are the shared JSON-RPC ones - `29 harness protocol` found the
+/// second protocol needing the identical set, so there is one.
+pub use crate::jsonrpc::RpcError as AcpError;
 
 /// Walk the handshake on a process somebody else spawned.
 ///
@@ -84,6 +68,7 @@ where
         &acp::initialize_frame(id),
         id,
         "initialize",
+        acp::parse_line,
         on_line,
     )?;
 
@@ -93,9 +78,13 @@ where
         &acp::session_new_frame(id, &cwd.to_string_lossy()),
         id,
         "session/new",
+        acp::parse_line,
         on_line,
     )?;
-    let opened = acp::session_opened(&answer.to_string()).ok_or(AcpError::NoSession)?;
+    let opened = acp::session_opened(&answer.to_string()).ok_or(AcpError::Missing {
+        method: "session/new",
+        field: "sessionId",
+    })?;
 
     // Only if the agent said it would take it. `opencode acp` advertises **no
     // modes at all**, and asking it to set one is a JSON-RPC error that kills
@@ -110,7 +99,14 @@ where
     if let Some(mode) = mode.filter(|mode| opened.accepts_mode(mode)) {
         let id = take(next_id);
         let frame = acp::set_mode_frame(id, &opened.session_id, mode);
-        request(process, &frame, id, "session/set_mode", on_line)?;
+        request(
+            process,
+            &frame,
+            id,
+            "session/set_mode",
+            acp::parse_line,
+            on_line,
+        )?;
     }
     Ok(opened)
 }
@@ -136,47 +132,6 @@ pub fn ends_turn(parsed: &Result<Vec<RunnerSignal>, ParseError>) -> bool {
             .iter()
             .any(|signal| matches!(signal, RunnerSignal::Finished(_)))
     })
-}
-
-/// Write one request and read until its answer, forwarding everything else.
-fn request<F>(
-    process: &mut SupervisedProcess,
-    frame: &str,
-    id: i64,
-    method: &'static str,
-    on_line: &mut F,
-) -> Result<Value, AcpError>
-where
-    F: FnMut(Result<Vec<RunnerSignal>, ParseError>),
-{
-    process.write_line(frame)?;
-    while let Some(line) = process.read_line()? {
-        let parsed: Option<Value> = serde_json::from_str(&line).ok();
-        let is_answer = parsed
-            .as_ref()
-            .and_then(|v| v.get("id"))
-            .and_then(Value::as_i64)
-            == Some(id);
-        if !is_answer {
-            // Somebody else's line: activity, and possibly a signal. The
-            // handshake is not a quiet period.
-            on_line(acp::parse_line(&line));
-            continue;
-        }
-        let value = parsed.expect("an id was read out of it");
-        if let Some(error) = value.get("error") {
-            return Err(AcpError::Refused {
-                method,
-                message: error
-                    .get("message")
-                    .and_then(Value::as_str)
-                    .unwrap_or("no message")
-                    .to_string(),
-            });
-        }
-        return Ok(value);
-    }
-    Err(AcpError::Closed { method })
 }
 
 /// A live ACP conversation with one agent, in one workspace.
@@ -340,10 +295,21 @@ mod tests {
             window.is_some_and(|size| size > 0),
             "the denominator is the whole reason this runner exists"
         );
+        // Fragments, not an answer: an ACP agent streams a sentence a few
+        // characters at a time and there is no assembled form on the wire, so
+        // the adapter emits chunks and the manager assembles one turn out of
+        // them. This assertion said `Output` until 2026-08-26, which was true
+        // when it was written and quietly false for hours afterwards - an
+        // `#[ignore]`d test does not run itself.
+        let said: String = signals
+            .iter()
+            .filter_map(|signal| match signal {
+                RunnerSignal::OutputChunk(text) => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
         assert!(
-            signals
-                .iter()
-                .any(|signal| matches!(signal, RunnerSignal::Output(_))),
+            !said.trim().is_empty(),
             "a turn that answers must reach the record as text"
         );
         let finished = signals.iter().find_map(|signal| match signal {

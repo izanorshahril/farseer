@@ -44,7 +44,7 @@ pub struct RunnerChoice {
 /// The runner and its executable are **not the same string** - `claude-code` is
 /// driven by a binary called `claude` - and resolving the runner name instead of
 /// the executable reports a runner as missing while farseer launches it happily.
-const KNOWN: [(&str, &str, &str); 4] = [
+const KNOWN: [(&str, &str, &str); 5] = [
     (
         "claude-code",
         "claude",
@@ -54,6 +54,11 @@ const KNOWN: [(&str, &str, &str); 4] = [
         "codex",
         "codex",
         "one-shot per run; resumption is a new process, not a steer",
+    ),
+    (
+        "codex-app-server",
+        "codex",
+        "names its context window, its compaction and two quota windows",
     ),
     (
         "cursor-agent",

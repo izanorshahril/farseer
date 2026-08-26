@@ -216,13 +216,20 @@ pub enum Channel {
     /// The same distinction the native runners draw with `live_input`, drawn
     /// here by what the session is *for* rather than by a flag on the argv.
     Acp { manager: bool },
+    /// The Codex app-server, per `30 codex app server`.
+    ///
+    /// Conversational for the same reason as [`Self::Acp`] and by the same
+    /// rules - a thread outlives its turn - but a different handshake:
+    /// `initialize`, then an `initialized` **notification** the server will not
+    /// proceed without, then `thread/start`, then the goal as `turn/start`.
+    CodexAppServer { manager: bool },
 }
 
 impl Channel {
     fn stdin_mode(self) -> StdinMode {
         match self {
             // A goal or a handshake has to reach it.
-            Self::Steered(_) | Self::Acp { .. } => StdinMode::Live,
+            Self::Steered(_) | Self::Acp { .. } | Self::CodexAppServer { .. } => StdinMode::Live,
             Self::OneShot => StdinMode::Closed,
         }
     }
@@ -230,7 +237,10 @@ impl Channel {
     /// Whether the read loop stops at the terminal signal instead of at end of
     /// stream.
     fn ends_at_terminal(self) -> bool {
-        matches!(self, Self::Acp { manager: false })
+        matches!(
+            self,
+            Self::Acp { manager: false } | Self::CodexAppServer { manager: false }
+        )
     }
 }
 
@@ -259,6 +269,8 @@ pub struct StartedWorker {
     /// The next unused JSON-RPC request id, shared with any [`SteerHandle`] this
     /// worker hands out so two writers never collide on one.
     acp_next_id: Arc<AtomicI64>,
+    /// The Codex app-server thread this run is talking to, once started.
+    codex_thread: Option<String>,
 }
 
 /// A cloneable handle that writes a steer message into a run's live process,
@@ -349,6 +361,7 @@ impl StartedWorker {
             channel,
             acp_opened: None,
             acp_next_id: Arc::new(AtomicI64::new(1)),
+            codex_thread: None,
         })
     }
 
@@ -380,7 +393,14 @@ impl StartedWorker {
                     next_id: Arc::clone(&self.acp_next_id),
                 },
             }),
-            Channel::Acp { manager: false } | Channel::OneShot => None,
+            // `turn/steer` takes an `expectedTurnId`, which farseer does not
+            // track yet - and `30 codex app server` records that using it at all
+            // is a **correction to `20 worker control channel`**, whose
+            // turn-boundary finding this would be the first evidence against.
+            // That is a decision, not a wiring detail.
+            Channel::CodexAppServer { .. } | Channel::Acp { manager: false } | Channel::OneShot => {
+                None
+            }
         }
     }
 
@@ -442,6 +462,34 @@ impl StartedWorker {
                 )?;
                 self.acp_opened = Some(opened);
             }
+            Channel::CodexAppServer { .. } => {
+                let mut ids = farseer_runner::jsonrpc::Ids::starting_at(
+                    self.acp_next_id.load(Ordering::Relaxed) - 1,
+                );
+                let mut discard = |_: Result<Vec<RunnerSignal>, ParseError>| {};
+                let thread = farseer_runner::codex_app_server::handshake(
+                    &mut self.proc,
+                    cwd,
+                    // `12 autonomy and deny list` decides reach before the run.
+                    // `10 runner inventory` measured that this flag did not stop
+                    // a write on this machine, so it is a request and the
+                    // worktree is still the guarantee.
+                    CODEX_SANDBOX,
+                    &mut ids,
+                    &mut discard,
+                )?;
+                let goal_id = ids.next();
+                self.acp_next_id.store(goal_id + 1, Ordering::Relaxed);
+                self.proc
+                    .write_line(&farseer_runner::codex_app_server::turn_start_frame(
+                        goal_id, &thread, goal,
+                        // Observed, never advertised: farseer asks for no model
+                        // and no effort until something decides them. `30 codex
+                        // app server` makes `effort` a contract question.
+                        None, None,
+                    ))?;
+                self.codex_thread = Some(thread);
+            }
         }
         Ok(())
     }
@@ -476,6 +524,14 @@ impl StartedWorker {
         // Codex report the same facts. The handshake happens in `bootstrap`,
         // before any store is in reach, so this is the first moment it can be
         // recorded rather than a second way of recording it.
+        let codex_thread =
+            self.codex_thread
+                .take()
+                .map(|thread| farseer_runner::claude_code::SessionInfo {
+                    model: None,
+                    provider: None,
+                    session_id: Some(thread),
+                });
         let opened = self.acp_opened.take().map(|opened| {
             farseer_runner::claude_code::SessionInfo {
                 // Not from `session/set_model`, which `29 harness protocol`
@@ -628,7 +684,7 @@ impl StartedWorker {
             }
         };
 
-        if let Some(info) = opened {
+        if let Some(info) = opened.or(codex_thread) {
             on_line(Ok(vec![RunnerSignal::Session(info)]));
         }
 
@@ -638,7 +694,11 @@ impl StartedWorker {
             // waited for it anyway and hung.
             while let Some(line) = self.proc.read_line()? {
                 let parsed = (self.parse)(&line);
-                let ended = farseer_runner::acp_drive::ends_turn(&parsed);
+                let ended = parsed.as_ref().is_ok_and(|signals| {
+                    signals
+                        .iter()
+                        .any(|signal| matches!(signal, RunnerSignal::Finished(_)))
+                });
                 on_line(parsed);
                 if ended {
                     break;
@@ -682,6 +742,13 @@ impl StartedWorker {
         }
     }
 }
+
+/// What sandbox farseer asks the Codex app-server for.
+///
+/// A request rather than a guarantee: `10 runner inventory` measured Codex's own
+/// `--sandbox read-only` failing to prevent a write on this machine, so the
+/// worktree remains the boundary and this is defence in depth.
+pub const CODEX_SANDBOX: &str = "read-only";
 
 /// The ACP runners, as `name -> (executable, subcommand)`.
 ///
@@ -775,6 +842,25 @@ pub fn start_worker(
                 // continuing this one, and no `--input-format`-style flag
                 // exists, per this crate's own 2026-08-24 probe.
                 Channel::OneShot,
+            )
+        }
+        // The richest face of a runner farseer already drove, per
+        // `30 codex app server`. A separate runner from `codex` for the reason
+        // `29 harness protocol` set: same binary, different faces, and they
+        // report different things - this one names a context window, a
+        // compaction boundary and two quota windows.
+        "codex-app-server" => {
+            let exe =
+                resolve("codex").ok_or_else(|| ManagerError::ExecutableNotFound("codex".into()))?;
+            StartedWorker::spawn(
+                &exe,
+                &["app-server".to_string()],
+                cwd,
+                thresholds,
+                farseer_runner::codex_app_server::parse_line,
+                Channel::CodexAppServer {
+                    manager: options.role == RunRole::Manager,
+                },
             )
         }
         // The ACP runners, per `29 harness protocol`. A runner name here means
@@ -1578,6 +1664,17 @@ mod tests {
     #[ignore = "spawns a real `opencode acp` and spends a subscription"]
     fn an_acp_run_on_opencode_reaches_the_record_with_a_context_window() {
         one_acp_run("opencode-acp");
+    }
+
+    /// The third conversational runner, and the first one that is not ACP.
+    ///
+    /// `30 codex app server` found `codex exec --json` is the cut-down face of a
+    /// runner farseer already drove: this one names a **real**
+    /// `modelContextWindow`, where the native adapter has no denominator at all.
+    #[test]
+    #[ignore = "spawns a real `codex app-server` and spends a subscription"]
+    fn a_codex_app_server_run_reaches_the_record_with_a_context_window() {
+        one_acp_run("codex-app-server");
     }
 
     fn one_acp_run(runner: &str) {
