@@ -119,6 +119,7 @@ graph TD
   T27[27 quota accounting]
   T28[28 operator surface]
   T29[29 harness protocol]
+  T30[30 codex app server]
 
   T01 --> T02
   T01 --> T06
@@ -167,6 +168,10 @@ graph TD
   T23 -.-> T27
   T24 -.-> T27
   T10 -.-> T29
+  T29 -.-> T30
+  T30 -.-> T27
+  T30 -.-> T26
+  T30 -.-> T20
   T20 -.-> T29
   T29 -.-> T27
   T29 -.-> T28
@@ -247,6 +252,7 @@ Every correction is recorded on the corrected ticket itself as well as here, so 
 - `23` **amended `05`, `11`, `13`, `16` and `22`** - a fourth terminal outcome, an honest cost metric, the task-root and per-roster budget fields missing from `13`'s earlier field table, one fewer API verb, and a downgraded cycle refusal.
 - `24` corrected **this map** - a fog paragraph claimed UI state "should not get" a home, conflating *not in the record* with *not persisted*. The operator caught it. Recorded here because the correction was to the map's own prose rather than to a ticket, which is the one place a stale claim has nothing pointing at it.
 - `16 local api surface`'s promise that **the answer arrives on the event stream was never kept**, and building the conversation surface on 2026-08-25 is what found it: a manager's words went back to a delegating manager over MCP and nowhere else. `manager_answered` and `run_finished` carry them now. Underneath sat a worse one, in `spawn.rs`: **every child got a piped stdin held open for its lifetime**, and `codex exec` waits for EOF before it starts, so a run spawned a process and then never began - live, silent, and indistinguishable from a hang. The steer frame now decides whether a stdin exists at all.
+- `30 codex app server` **corrected three closed tickets at once on 2026-08-26**, from Codex's own generated schema and a live probe rather than from documentation: `codex exec --json` is the **cut-down face** of a runner farseer already depends on, and `codex app-server` has **95 methods and 75 notifications**. Three of those notifications arrived unprompted in a six-second headless turn. `thread/tokenUsage/updated` carries `last`, `total` **and** `modelContextWindow` - so the `28`-vs-`29` argument about which token scope to report was never a disagreement, it was two adapters each able to answer half. `thread/compacted` gives a compaction boundary, which `10` scored as a column only Claude Code passed and which ACP still lacks entirely. And `account/rateLimits/updated` carries **`usedPercent`, headless, for two windows** - which contradicts `10`'s "Codex emits nothing", shrinks the asymmetry `26` built its entire design on, and lands on `27`'s flat refusal to report a percentage. **`27`'s rule survives**: the percentage it refused was one farseer would compute *from its own spend*, a lower bound on a window other sessions drain; this one is the **provider's own**, which `10`'s observed-never-advertised rule admits. Also: `effort` is settable per turn, so `28`'s "unreportable thinking level" was unrequested; and `turn/steer` takes an `expectedTurnId`, the first evidence against `20`'s finding that steering is turn-boundary granular.
 - `29 harness protocol` **ran its second ACP agent on 2026-08-26 and found the first one's assumptions**. `ACP_RUNNERS` claims an entry means farseer has *seen that agent's output*, and `opencode-acp` was in the table having never been run - so the claim was false for half of it. `opencode acp` advertises **no modes at all**, and the handshake was sending `session/set_mode` unconditionally: a JSON-RPC error arriving **before the goal**, which would have failed every `opencode-acp` run in `bootstrap` having done nothing. A `goose`-shaped assumption generalised into "the protocol". It also **names a model where goose names a provider**, both read out of the same untouched `configOptions`, which is what keeping that map whole was for - and it fills `RunRow.model` from an ACP runner. The lesson is narrower than "test more": **a one-agent adapter cannot tell an agent's habits from a protocol's rules**, and only a second agent can.
 - `29 harness protocol` **got `28`'s provider field on 2026-08-26, observed rather than declared**: `goose-acp` answers `provider: chatgpt_codex` on `session/new`, where `runners.toml` could only ever say what the *operator* declared. It arrives in the handshake rather than the stream, so what the handshake learned is **replayed into the read loop** as though the agent had said it mid-stream - one path into the record, and `session_started` means the same thing whichever runner produced it. The value also happens to say that `goose-acp` and `codex` spend **one subscription**, which `27 quota accounting` requires the operator to declare because nothing made sharing detectable. That rule stands - it forbids *inferring*, and this is an observation - but it is the first time an agent has volunteered the fact, and it is a candidate for seeding the declaration.
 - `29 harness protocol` **reached the settings menu on 2026-08-26**, and the list is read from `farseer_manager::ACP_RUNNERS` rather than repeated in the shell: a menu that drifts from what dispatch accepts fails *after* the operator has committed a definition, which is worse than a missing entry. Presence still resolves against the **executable** rather than the runner name, which is the same reason `claude-code` needed it - `goose-acp` is driven by a binary called `goose`.

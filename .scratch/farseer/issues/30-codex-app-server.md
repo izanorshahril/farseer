@@ -1,0 +1,117 @@
+# Codex app-server: farseer has been driving the cut-down face of a runner it already depends on
+
+Type: research
+Status: closed
+Blocked by: none
+
+## Question
+
+`29 harness protocol` decided the rule **use the richest face a harness offers**, and kept Codex on its native adapter because `codex exec --json` reports things ACP does not.
+
+That was the right rule applied to a face nobody had looked at.
+`codex exec` is the **cut-down** face. `codex app-server` is the real one, and this ticket asks what farseer is leaving on the table.
+
+Answered 2026-08-26 from two primary sources, neither of them documentation:
+
+- **`codex app-server generate-json-schema --out <dir>`** - Codex generates its own protocol schema, so the method list and every payload shape is exact rather than transcribed.
+- **A live probe** of `codex app-server` 0.149.1 on this machine: `initialize` -> `thread/start` -> `turn/start`, twenty-seven captured lines.
+
+## 1. The surface
+
+**95 client methods** and **75 server notifications**.
+For comparison, farseer's Codex adapter reads one stream and recognises four line types.
+
+The methods that matter here:
+
+| | |
+|---|---|
+| `thread/start`, `thread/resume`, `thread/fork`, `thread/rollback` | a thread is durable and branchable |
+| `turn/start` | takes **`model`**, **`effort`**, `approvalPolicy`, `sandboxPolicy`, `cwd`, `personality`, `serviceTier` |
+| `turn/steer` | takes **`expectedTurnId`** - a steer *into a running turn*, guarded by optimistic concurrency |
+| `turn/interrupt` | cancel that the runner acknowledges |
+| `thread/compact/start` | compaction farseer can **ask for** |
+| `account/rateLimits/read`, `account/usage/read` | quota farseer can **ask for** |
+| `model/list`, `config/read` | what this installation can actually do |
+
+## 2. Three notifications that correct closed tickets
+
+All three arrived **unprompted, headless, in a six-second turn**.
+
+### `thread/tokenUsage/updated` - the denominator, and both scopes
+
+```json
+{"tokenUsage":{
+  "total":{"totalTokens":22287,"inputTokens":22281,"cachedInputTokens":0,
+           "cacheWriteInputTokens":0,"outputTokens":6,"reasoningOutputTokens":0},
+  "last":{"totalTokens":22287,"...":"..."},
+  "modelContextWindow":258400}}
+```
+
+`28 operator surface` asked for context info and got a token count with no denominator.
+`29 harness protocol` then argued that ACP's `used`/`size` was the answer and that the per-turn breakdown was the wrong thing to build.
+
+**Codex sends both, at the two scopes the argument was about**: `last` is the turn, `total` is the session, `modelContextWindow` is the denominator.
+So the `28`-vs-`29` disagreement was never a disagreement about what to report - it was two adapters each able to answer half.
+
+### `account/rateLimits/updated` - and it carries a percentage
+
+```json
+{"rateLimits":{"limitId":"codex","planType":"plus",
+  "primary":{"usedPercent":0,"windowDurationMins":300,"resetsAt":1787710593},
+  "secondary":{"usedPercent":0,"windowDurationMins":10080,"resetsAt":1788273509},
+  "credits":{"hasCredits":false,"unlimited":false,"balance":"0"}}}
+```
+
+This corrects **three** tickets at once.
+
+- **`10 runner inventory`** measured that "Codex and cursor-agent emit nothing" about quota, and that exhaustion is knowable only after a run fails. True of `codex exec`. **False of `codex app-server`**, which pushes a snapshot after every turn.
+- **`26 routing policy`** built its whole design on that asymmetry - *"two coherent designs: level down, or exploit it"* - with Claude Code as the only observable runner. The asymmetry is smaller than `26` believed, and `26` is unwired, so this lands before anything was built on it.
+- **`27 quota accounting`** is the sharp one. It says farseer sees no gauge: *"`used_percentage` exists but only on the status line, which provably does not fire headless"*, and **`GET /v1/quota` never reports a percentage, with tests asserting its absence**.
+
+`usedPercent` fires headless here, twice, for two windows.
+
+**`27`'s rule survives, and its reasoning is worth re-reading rather than deleting.** The percentage `27` refused was one farseer would have *computed from its own spend*, which is a lower bound on a window that other sessions drain - most wrong exactly near exhaustion. This percentage is **the provider's own**, which is a different number arrived at a different way, and `10 runner inventory`'s observed-never-advertised rule admits it. The tests asserting absence should keep asserting absence of a **derived** percentage.
+
+Also present and absent from every other runner: two windows at once (5-hour and weekly), a plan type, and a credit balance.
+
+### `thread/compacted` - a boundary, from a second runner
+
+`10 runner inventory` scored "does this harness say when it compacted" as its own column and found **only Claude Code** did.
+`29 harness protocol` found ACP still has no portable compaction boundary at all.
+
+Codex has `thread/compacted` as a notification and `thread/compact/start` as a method - it says when, and it lets farseer decide when.
+
+## 3. What else the probe showed, unasked
+
+- **`effort: "low"` was accepted on `turn/start`.** The "thinking level" `28 operator surface` reported as unreportable is **settable per turn**, and `29` was right that it was unrequested rather than unavailable.
+- **`item/agentMessage/delta`** streams fragments, and `item/completed` carries the assembled `text`. Same shape as ACP, and farseer already learned this lesson once: `RunnerSignal::OutputChunk` exists, and the terminal item is the honest answer.
+- **The operator's own hooks ran, and two failed.** `hook/started` / `hook/completed` reported three `sessionStart` hooks from `~/.codex/hooks.json`, of which `session-start:1` and `:2` came back `failed`.
+  `10 runner inventory` already warned that a runner inherits the operator's configuration unless the adapter prevents it - a one-word prompt once cost $0.32 loading plugins nobody granted. This is that, visible for the first time **as events farseer could record**.
+- **Three MCP servers started** (`node_repl`, `codex_apps`) from the operator's own config, before farseer said anything.
+- `22281` input tokens for "Say hello in one short sentence." That is the operator's environment, not the goal.
+
+## 4. Decision
+
+**Codex moves to `app-server`, as a distinct runner rather than a replacement.**
+
+`29 harness protocol` set the precedent and it applies unchanged: `goose` and `goose-acp` are two runners because they report different things, and `codex` and `codex-app-server` are two runners for the same reason and by a wider margin.
+
+The order to build it in, cheapest first:
+
+1. **The read half.** `thread/tokenUsage/updated` -> `usage_updated` with a real `modelContextWindow`; `account/rateLimits/updated` -> `27`'s `WindowObservation`, which needs a second window and a percentage field it does not have; `thread/compacted` -> `context_compacted`; `item/*` -> chunks and the assembled answer.
+2. **The write half.** `initialize` -> `thread/start` -> `turn/start`, which is the same shape as `acp_drive`'s handshake and should reuse its `Channel::Acp` machinery rather than grow a parallel one.
+3. **`effort` on the contract.** This is the one that needs a decision elsewhere: reasoning effort is a property of *how a run is executed*, and `05 run state model` made the worker contract immutable. It is a contract field or it is a runner default, and guessing is how a field ends up meaning neither.
+4. **`turn/steer` with `expectedTurnId`.** `20 worker control channel` concluded steering is **turn-boundary granular** after measuring the runners of the day. Codex now offers mid-turn steering with optimistic concurrency, which is the first evidence against that and should be recorded as a **correction to `20`** rather than quietly used.
+
+### Not decided here
+
+- Whether `codex exec` stays at all once the app-server runner exists. It is simpler and farseer already has it, but two adapters for one binary is the cost.
+- What to do about the **inherited environment**. The hooks and MCP servers are the operator's, and farseer now has events for them - `12 autonomy and deny list` should probably have an opinion about a runner farseer spawns loading hooks farseer did not grant.
+- Whether the app-server's long-lived process changes `19 rust toolchain`'s one-process-per-run assumption. It is a *server*: `thread/start` is cheap, and the same process could hold many threads. That is a different lifecycle from anything on this map.
+
+## Sources
+
+Both generated on this machine, 2026-08-26, against `codex-cli 0.149.1`:
+
+- `codex app-server generate-json-schema --out <dir>` - `ClientRequest.json`, `ServerNotification.json`, and the payload definitions quoted above.
+- A live `codex app-server` probe: `initialize`, `thread/start` with `sandbox: read-only`, `turn/start` with `effort: low`. Twenty-seven lines, quoted verbatim above.

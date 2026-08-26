@@ -135,3 +135,16 @@ Three constraints keep it honest:
 - `13 harness build kit` - a roster entry's runner slot holds an **ordered list**; the **price table belongs to runner config**, not the definition.
 - `27 quota accounting` - **budget-aware and quota-aware routing are one mechanism**, because a subscription's cost curve is a cliff at exhaustion rather than a slope. `27` should not model them separately.
 - `20 worker control channel` - the runner contract gains an **availability signal** with three states, and `unknown` is permanent rather than transitional.
+
+
+## Corrected by 30 (2026-08-26)
+
+**Section 2's asymmetry is smaller than it measured, and this ticket is unwired, so the correction arrives before anything was built on it.**
+
+Section 2 rests on `10 runner inventory`'s measurement that **Claude Code alone** reports quota in band, and that Codex and cursor-agent are knowable only after a run fails - then offers two designs, "level down" or "exploit it", with the second costing two code paths that will drift.
+
+That is true of `codex exec`. It is **false of `codex app-server`**, which pushes `account/rateLimits/updated` after every turn with `usedPercent`, `resetsAt` and `windowDurationMins` for two windows.
+
+So the choice this ticket framed - one observable runner against two blind ones - is now two observable runners against one blind one, and the observable ones **do not report the same shape**. "Level down" gets more expensive as more runners can see; "exploit it" was priced against one exception and now has two.
+
+Neither design is invalidated. The number they were being weighed against changed, and this ticket should be re-read before it is wired rather than wired as written.

@@ -202,3 +202,16 @@ That also separates the two native runners, which this table had scored identica
 - **Codex CLI** replays persisted events from disk into a **new process**.
 
 A real advantage for the native runner this ticket had already chosen, discovered after the choice.
+
+
+## Corrected by 30 (2026-08-26)
+
+**Mid-turn steering exists, on a runner this ticket scored as having no steering path at all.**
+
+This ticket concluded that steering is **turn-boundary granular** rather than interrupt-granular, and corrected `05 run state model` on exactly that point. `10 runner inventory` then scored Codex's follow-up as a **fail**, because `codex exec resume` replays into a new process.
+
+`codex app-server` has `turn/steer`, and its parameters are `threadId`, `input` and **`expectedTurnId`** - a message delivered into a turn that is still running, guarded by optimistic concurrency so a steer aimed at a turn that has already ended is rejected rather than misapplied.
+
+The conclusion held for every runner measured when it was written, and the measurement was of `codex exec`. It is the first evidence that turn-boundary granularity is a property of the **faces farseer happened to drive** rather than of agent harnesses.
+
+Not yet exercised - `30` records it as the fourth and last step of its build order, deliberately after the read half.
