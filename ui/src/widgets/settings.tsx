@@ -23,6 +23,8 @@ type Runner = {
   installed: boolean;
   path: string | null;
   note: string;
+  /** What farseer cannot do with this runner. Empty when it can do everything. */
+  cannot: string[];
 };
 
 type TopManager = { cell_id: string; runner: string; file: string };
@@ -103,6 +105,13 @@ export function SettingsWidget({ bridge: _bridge }: { bridge: Bridge }) {
               <span className="grow">
                 <b className="mono">{runner.name}</b>
                 <div className="dim small">{runner.note}</div>
+                {/* Everyone is offered. A runner farseer holds loosely says so
+                    rather than being dropped from the list. */}
+                {runner.cannot.map((warning) => (
+                  <div key={warning} className="dim small caveat">
+                    {warning}
+                  </div>
+                ))}
                 {!runner.installed && (
                   <div className="faint small">not on PATH here - farseer would fail at spawn</div>
                 )}

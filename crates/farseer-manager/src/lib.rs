@@ -777,6 +777,79 @@ impl StartedWorker {
     }
 }
 
+/// What farseer can actually do with a runner, as measured rather than claimed.
+///
+/// Every field is a **proven** capability: something farseer has driven against
+/// the real binary and left a test behind for. A missing one is not a defect in
+/// the runner - it is a thing the operator should know before putting that
+/// runner in front of a cell, because it changes what the surface can offer.
+///
+/// Nothing is hidden or refused on the strength of this. `13 harness build kit`
+/// found the inventory is a **menu rather than a survey**, and a menu that
+/// silently drops entries teaches the operator less than one that says why an
+/// entry is dimmer than its neighbour.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Control {
+    /// Farseer can put words into a run that is already going, per
+    /// `20 worker control channel`.
+    pub steer: bool,
+    /// The runner reports its subscription window, so `27 quota accounting` can
+    /// see exhaustion coming rather than discovering it by failing.
+    pub quota: bool,
+    /// The runner names its context window, so "how full is this" has a
+    /// denominator - see `29 harness protocol`.
+    pub context: bool,
+    /// The runner says when it compacted, so `02 record scope` can record that
+    /// a result was produced from a summary rather than from the whole thread.
+    pub compaction: bool,
+}
+
+/// What farseer has proven it can do with each runner.
+///
+/// Cancellation is absent because it is farseer's, not the runner's: the Job
+/// Object kill in `03 spike job objects` works on anything with a process id,
+/// and no runner has to agree to it.
+pub fn control_of(runner: &str) -> Control {
+    match runner {
+        // `10 runner inventory`: quota and cost both arrive in band, and
+        // `system/compact_boundary` names a compaction. No context window - it
+        // reports tokens with nothing to divide them by.
+        "claude-code" => Control {
+            steer: true,
+            quota: true,
+            context: false,
+            compaction: true,
+        },
+        // `30 codex app server`: two quota windows with the provider's own
+        // percentage, a real `modelContextWindow`, and `thread/compacted`.
+        // Steering needs an `expectedTurnId` farseer does not track yet, and
+        // `30` records using it at all as a correction to `20`.
+        "codex-app-server" => Control {
+            steer: false,
+            quota: true,
+            context: true,
+            compaction: true,
+        },
+        // `29 harness protocol`: an ACP agent names a context window and steers
+        // as a manager, and ACP has no quota concept and no compaction boundary
+        // at all - the trade is the protocol's, not the agent's.
+        runner if ACP_RUNNERS.iter().any(|(name, _, _)| *name == runner) => Control {
+            steer: true,
+            quota: false,
+            context: true,
+            compaction: false,
+        },
+        // Everything else is one-shot and silent about all four:
+        // `codex exec`, `cursor-agent`, `goose`. They run, they answer, they exit.
+        _ => Control {
+            steer: false,
+            quota: false,
+            context: false,
+            compaction: false,
+        },
+    }
+}
+
 /// What sandbox farseer asks the Codex app-server for.
 ///
 /// A request rather than a guarantee: `10 runner inventory` measured Codex's own
@@ -1639,6 +1712,29 @@ mod tests {
         assert!(!Channel::Acp { manager: true }.ends_at_terminal());
         assert!(!Channel::OneShot.ends_at_terminal());
         assert!(!Channel::Steered(farseer_runner::claude_code::steer_frame).ends_at_terminal());
+    }
+
+    #[test]
+    fn what_farseer_can_do_with_a_runner_is_recorded_per_runner_not_assumed() {
+        // The two faces of one binary differ, which is the whole reason they are
+        // separate runners.
+        assert!(!control_of("codex").context);
+        assert!(control_of("codex-app-server").context);
+        assert!(control_of("codex-app-server").quota);
+
+        // Every ACP agent gets the protocol's trade rather than its own: a
+        // context window, no quota. `29 harness protocol` measured that on two
+        // different agents.
+        for (name, _, _) in ACP_RUNNERS {
+            let control = control_of(name);
+            assert!(control.context, "{name}");
+            assert!(!control.quota, "{name}");
+        }
+
+        // An unknown runner is assumed to do nothing, which is the safe
+        // direction: it under-promises rather than offering a verb that stalls.
+        let unknown = control_of("something-nobody-has-driven");
+        assert!(!unknown.steer && !unknown.quota && !unknown.context && !unknown.compaction);
     }
 
     #[test]

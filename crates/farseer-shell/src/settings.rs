@@ -33,6 +33,39 @@ pub struct RunnerChoice {
     pub path: Option<String>,
     /// What farseer knows how to drive it as.
     pub note: &'static str,
+    /// What farseer **cannot** do with this runner, in the operator's words.
+    ///
+    /// Empty for a runner farseer has proven all four verbs against. Nothing is
+    /// hidden or refused on the strength of this - `13 harness build kit` found
+    /// the inventory is a menu rather than a survey, and a menu that silently
+    /// drops entries teaches less than one that says why an entry is dimmer
+    /// than its neighbour. Every runner stays choosable; the ones farseer holds
+    /// loosely say so.
+    pub cannot: Vec<&'static str>,
+}
+
+/// What farseer cannot do with this runner, worded as consequences rather than
+/// as missing fields - the operator picks a manager, not a feature matrix.
+fn cannot(runner: &str) -> Vec<&'static str> {
+    let control = farseer_manager::control_of(runner);
+    [
+        (!control.steer, "cannot be steered once a run starts"),
+        (
+            !control.quota,
+            "reports no quota, so exhaustion arrives as a failure",
+        ),
+        (
+            !control.context,
+            "reports no context window, so there is no denominator",
+        ),
+        (
+            !control.compaction,
+            "never says when it compacted, so a degraded answer looks like any other",
+        ),
+    ]
+    .into_iter()
+    .filter_map(|(missing, why)| missing.then_some(why))
+    .collect()
 }
 
 /// The runners farseer has verified **native** stream-json dialects for.
@@ -106,6 +139,7 @@ pub fn runners() -> Vec<RunnerChoice> {
         .map(|(name, executable, note)| {
             let path = farseer_runner::resolve::resolve(executable);
             RunnerChoice {
+                cannot: cannot(name),
                 name: name.to_string(),
                 installed: path.is_some(),
                 path: path.map(|p| p.display().to_string()),
@@ -227,6 +261,37 @@ mod tests {
         for name in &offered {
             assert!(known().iter().any(|(known, _, _)| known == name));
         }
+    }
+
+    #[test]
+    fn a_runner_farseer_holds_loosely_says_so_and_is_still_offered() {
+        let offered = runners();
+        // Nothing is hidden: every runner this build can launch is choosable,
+        // whatever farseer can or cannot do with it.
+        assert_eq!(offered.len(), known().len());
+
+        let goose = offered
+            .iter()
+            .find(|choice| choice.name == "goose")
+            .expect("goose is offerable");
+        assert_eq!(
+            goose.cannot.len(),
+            4,
+            "a one-shot runner farseer cannot steer, meter, size or catch compacting"
+        );
+
+        let codex_app_server = offered
+            .iter()
+            .find(|choice| choice.name == "codex-app-server")
+            .expect("codex-app-server is offerable");
+        assert!(
+            codex_app_server
+                .cannot
+                .iter()
+                .all(|warning| warning.contains("steered")),
+            "only steering is missing here: {:?}",
+            codex_app_server.cannot
+        );
     }
 
     #[test]

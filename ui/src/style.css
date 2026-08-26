@@ -468,3 +468,15 @@ code {
 .meta .bad b {
   color: var(--bad, #c0392b);
 }
+
+/* What farseer cannot do with a runner. A caveat, not an error: the runner is
+   still choosable, and the mark says why it is dimmer than its neighbour. */
+.caveat::before {
+  content: "!";
+  display: inline-block;
+  width: 11px;
+  margin-right: 5px;
+  text-align: center;
+  font-weight: 600;
+  color: var(--warn, #b78100);
+}

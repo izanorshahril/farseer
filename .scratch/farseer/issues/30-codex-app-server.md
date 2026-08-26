@@ -249,3 +249,27 @@ They agree today only because farseer sends no override. Merging them would make
 **Nothing yet, deliberately.** `05 run state model`'s contract gains no `effort` field, because farseer sets no effort. The question stays open behind a real precondition: it becomes a contract question the day farseer has a reason to override a default it can now see and name.
 
 Other runners are untouched. Claude Code, Codex `exec`, cursor-agent, goose and the ACP agents behave exactly as before - none of them exposes a default farseer can read, so none of them grows a hint, and none of them loses anything.
+
+
+## Decided 2026-08-26: nothing is hidden, and what farseer cannot do is said out loud
+
+The operator's rule, in their words: **everyone is welcome, though with notice or warning if we can't control it.**
+
+So the settings menu still offers every runner this build can launch, and each one carries what farseer **cannot** do with it, worded as a consequence rather than as a missing field:
+
+| runner | said out loud |
+|---|---|
+| `claude-code` | reports no context window, so there is no denominator |
+| `codex-app-server` | cannot be steered once a run starts |
+| `goose-acp`, `opencode-acp` | reports no quota; never says when it compacted |
+| `codex`, `cursor-agent`, `goose` | all four |
+
+`control_of` holds the table, next to the dispatch that proves it. Every field is a capability farseer has **driven against the real binary and left a test behind for** - not a claim read off documentation - and an unknown runner is assumed to do nothing, which under-promises rather than offering a verb that stalls.
+
+**Cancellation is deliberately not in the table.** It is farseer's, not the runner's: `03 spike job objects`'s kill works on anything with a process id, and no runner has to agree to it.
+
+### Why a warning rather than a shorter menu
+
+`13 harness build kit` found the inventory is a **menu rather than a survey**. A menu that silently drops entries teaches the operator less than one that says why an entry is dimmer than its neighbour - and the missing capability is usually a property of the *face*, not the tool: `codex` and `codex-app-server` are one binary with four caveats and one.
+
+That is the same lesson `29 harness protocol` and `30 codex app server` each arrived at from their own direction, now visible in the surface rather than only in the tickets.
