@@ -1,6 +1,18 @@
 # Working in this repository
 
 Twenty-eight decision tickets are closed, and the foundation is implemented against them: `farseer-core`, `farseer-store`, `farseer-api`, `farseer-runner`, `farseer-manager`, and the `farseer` binary.
+
+## Scope
+
+Farseer builds, tests and runs with **`cargo` and `bun` alone**.
+`cargo test`, `cargo clippy --all-targets`, `cargo fmt` and `bun run --cwd ui check` are the whole toolchain, and every live-runner test is `#[ignore]`d behind them.
+
+No push gate, review pipeline or daemon is part of this project. If one is installed on a machine it belongs to that machine, not to farseer, and farseer must keep working when it is absent.
+
+**`herdr`, `firstmate` and `buzz` appear in the decision record as prior art, never as dependencies.**
+`18 hang detection prior art` surveyed their Windows failures and `03 spike job objects` is the answer to them - Job Objects and explicit `.exe`/`.cmd` resolution exist *because* those tools' bugs traced to implementation choices rather than platform walls.
+Reading those names as integration points inverts the finding.
+
 `farseer-runner` resolves `claude`, `codex`, `cursor-agent`, or `goose`, builds each argv, supervises the process under a Job Object, maps verified stream-json shapes, and creates or tears down workspaces according to `04 spike workspace teardown`.
 It also speaks **ACP** ([`acp.rs`](crates/farseer-runner/src/acp.rs), [`acp_drive.rs`](crates/farseer-runner/src/acp_drive.rs)), which is one adapter rather than a fifth dialect: `goose-acp` and `opencode-acp` ship today and the same code path admits Gemini CLI, Amp, Droid, Copilot, Qwen, pi and Aider.
 An ACP runner name means an **executable and a subcommand**, because `goose` and `goose-acp` are one binary offering two faces and report different things - the ACP face names a **context window** and no native runner does, and it reports **no subscription window**, which is what `27 quota accounting` runs on.
