@@ -199,12 +199,6 @@ pub struct RateLimitWindow {
 }
 
 /// Read `account/rateLimits/updated`, or `None` for any other line.
-///
-/// Deliberately not a [`RunnerSignal`] yet. Mapping two windows onto a shape
-/// that holds one would report a number farseer cannot stand behind, and this
-/// crate's rule is that a runner declining to say something is recorded as
-/// absent rather than filled in - the same discipline applies to farseer
-/// declining to model something it has not decided.
 pub fn rate_limits(line: &str) -> Option<RateLimits> {
     let v: Value = serde_json::from_str(line).ok()?;
     if v.get("method").and_then(Value::as_str)? != "account/rateLimits/updated" {
@@ -232,6 +226,49 @@ fn text(v: &Value, field: &str) -> Option<String> {
         .and_then(Value::as_str)
         .filter(|s| !s.is_empty())
         .map(str::to_string)
+}
+
+impl RateLimits {
+    /// Both windows, in `27 quota accounting`'s own shape.
+    ///
+    /// `account` and `runner` are left empty: the adapter does not know which
+    /// login it is on, and `27` is explicit that the account is **declared by
+    /// the operator, never inferred**. The layer that reads runner config fills
+    /// them in.
+    ///
+    /// The provider's own `usedPercent` travels as-is. `27` refused a percentage
+    /// farseer would *derive from its own spend*; this is not that number, and
+    /// nothing here computes anything.
+    pub fn observations(&self) -> Vec<farseer_core::WindowObservation> {
+        [("primary", self.primary), ("secondary", self.secondary)]
+            .into_iter()
+            .filter_map(|(name, window)| {
+                let window = window?;
+                Some(farseer_core::WindowObservation {
+                    account: String::new(),
+                    runner: String::new(),
+                    // A percentage is not a status. Codex says how full a window
+                    // is and separately whether a limit has been **reached**, so
+                    // exhaustion is read from the latter and never inferred from
+                    // the former - 100% and refused are different claims.
+                    availability: match (&self.reached, window.resets_at) {
+                        (Some(_), Some(resets_at)) => {
+                            farseer_core::Availability::ExhaustedUntil { resets_at }
+                        }
+                        (_, resets_at) => farseer_core::Availability::Allowed { resets_at },
+                    },
+                    // The provider's own word for which window this is.
+                    rate_limit_type: name.to_string(),
+                    // Codex reports credits and a spend control, neither of which
+                    // is Claude Code's overage. Absent rather than mapped onto a
+                    // word that means something else.
+                    is_using_overage: false,
+                    used_percent: Some(window.used_percent),
+                    window_duration_mins: window.window_duration_mins,
+                })
+            })
+            .collect()
+    }
 }
 
 /// The thread id out of a `thread/start` response, for the driver that sent it.
@@ -282,6 +319,12 @@ pub fn parse_line(line: &str) -> Result<Vec<RunnerSignal>, ParseError> {
             kind: EventKind::new(EventKind::CONTEXT_COMPACTED),
             payload: json!({ "turn_id": params.get("turnId") }),
         }),
+        // The line `10 runner inventory` recorded as impossible for this
+        // runner, because it measured the other face of the same binary.
+        "account/rateLimits/updated" => rate_limits(line)
+            .map(|limits| limits.observations())
+            .filter(|windows| !windows.is_empty())
+            .map(RunnerSignal::Windows),
         "turn/completed" => {
             let turn = params.get("turn").unwrap_or(&Value::Null);
             let outcome = match turn.get("status").and_then(Value::as_str) {
@@ -404,13 +447,45 @@ mod tests {
     }
 
     #[test]
-    fn rate_limits_are_read_but_not_yet_signalled() {
-        // Deliberate, and `30 codex app server` says why: `27 quota accounting`
-        // holds one window and this reports two, so a mapping now would report a
-        // number farseer cannot stand behind.
-        let line = r#"{"method":"account/rateLimits/updated","params":{"rateLimits":{"primary":{"usedPercent":12}}}}"#;
-        assert!(rate_limits(line).is_some());
-        assert_eq!(parse_line(line).unwrap(), Vec::new());
+    fn both_windows_reach_the_record_in_the_shape_it_already_had() {
+        let line = r#"{"method":"account/rateLimits/updated","params":{"rateLimits":{"primary":{"usedPercent":12,"windowDurationMins":300,"resetsAt":1787710593},"secondary":{"usedPercent":3,"windowDurationMins":10080,"resetsAt":1788273509},"planType":"plus"}}}"#;
+        let signals = parse_line(line).unwrap();
+        let [RunnerSignal::Windows(windows)] = signals.as_slice() else {
+            panic!("expected one windows signal, got {signals:?}");
+        };
+        assert_eq!(windows.len(), 2);
+        assert_eq!(windows[0].rate_limit_type, "primary");
+        assert_eq!(windows[0].used_percent, Some(12));
+        assert_eq!(windows[1].window_duration_mins, Some(10080));
+        // Left for the layer that reads runner config: `27 quota accounting`
+        // declares the account, never infers it.
+        assert!(windows.iter().all(|w| w.account.is_empty()));
+    }
+
+    #[test]
+    fn a_full_window_is_not_an_exhausted_one_until_the_provider_says_so() {
+        // `usedPercent` is how full, `rateLimitReachedType` is whether refused.
+        // Reading exhaustion off the percentage would be farseer deciding a
+        // limit had been hit before the provider did.
+        let full = r#"{"method":"account/rateLimits/updated","params":{"rateLimits":{"primary":{"usedPercent":100,"resetsAt":9}}}}"#;
+        let signals = parse_line(full).unwrap();
+        let [RunnerSignal::Windows(windows)] = signals.as_slice() else {
+            panic!("expected a windows signal");
+        };
+        assert_eq!(
+            windows[0].availability,
+            farseer_core::Availability::Allowed { resets_at: Some(9) }
+        );
+
+        let reached = r#"{"method":"account/rateLimits/updated","params":{"rateLimits":{"primary":{"usedPercent":100,"resetsAt":9},"rateLimitReachedType":"rate_limit_reached"}}}"#;
+        let signals = parse_line(reached).unwrap();
+        let [RunnerSignal::Windows(windows)] = signals.as_slice() else {
+            panic!("expected a windows signal");
+        };
+        assert_eq!(
+            windows[0].availability,
+            farseer_core::Availability::ExhaustedUntil { resets_at: 9 }
+        );
     }
 
     #[test]

@@ -45,6 +45,17 @@ pub enum RunnerSignal {
         payload: Value,
     },
     RateLimit(RateLimitInfo),
+    /// Every window the runner reported at once, already in the record's own
+    /// shape bar the two fields only the caller knows.
+    ///
+    /// `RateLimit` above carries **one** window in Claude Code's own field
+    /// names. `30 codex app server` found a runner reporting **two** - a
+    /// five-hour and a weekly, each with the provider's own percentage - so a
+    /// second signal exists rather than a second meaning being loaded onto the
+    /// first. `account` and `runner` are left empty here: the adapter does not
+    /// know which login it is on, and `27 quota accounting` says that is
+    /// declared by the operator rather than inferred.
+    Windows(Vec<farseer_core::WindowObservation>),
     /// What the runner says about the session it just opened.
     ///
     /// Every field is optional because **every field is a claim the runner

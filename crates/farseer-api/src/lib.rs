@@ -839,27 +839,51 @@ fn observe_window(
         Err(farseer_manager::ManagerError::Cancelled(report)) => Some(report),
         Err(_) => None,
     };
-    let Some(info) = report.and_then(|report| report.window.as_ref()) else {
+    let account = state.runner_config().account_for(&contract.runner);
+
+    // Claude Code's single window, in its own field names, and every window a
+    // runner reported wholesale - `30 codex app server` found one reporting two.
+    // Both paths converge here because this is the layer that knows the account:
+    // `27 quota accounting` declares it in runner config and never infers it,
+    // which is exactly why the adapters leave it blank.
+    let mut observations: Vec<farseer_core::WindowObservation> = Vec::new();
+    if let Some(info) = report.and_then(|report| report.window.as_ref()) {
+        observations.push(farseer_core::WindowObservation {
+            account: account.clone(),
+            runner: contract.runner.clone(),
+            availability: info.availability(),
+            rate_limit_type: info.rate_limit_type.clone(),
+            is_using_overage: info.is_using_overage,
+            // Claude Code states no percentage headless - `10 runner inventory`
+            // measured that - and farseer never computes one.
+            used_percent: None,
+            window_duration_mins: None,
+        });
+    }
+    observations.extend(report.into_iter().flat_map(|report| {
+        report.windows.iter().cloned().map(|mut observation| {
+            observation.account = account.clone();
+            observation.runner = contract.runner.clone();
+            observation
+        })
+    }));
+    if observations.is_empty() {
         return;
-    };
-    let observation = farseer_core::WindowObservation {
-        account: state.runner_config().account_for(&contract.runner),
-        runner: contract.runner.clone(),
-        availability: info.availability(),
-        rate_limit_type: info.rate_limit_type.clone(),
-        is_using_overage: info.is_using_overage,
-    };
+    }
+
     let store = state.store();
-    if let Err(error) =
-        store.observe_window(&contract.cell_id, contract.run_id, &observation, now_ms())
-    {
-        // The record is the product, but a window transition is an observation
-        // about the machine rather than about the run, so losing one must not
-        // fail a run that already succeeded.
-        eprintln!(
-            "window observation for run {} was not recorded: {error}",
-            contract.run_id
-        );
+    for observation in &observations {
+        if let Err(error) =
+            store.observe_window(&contract.cell_id, contract.run_id, observation, now_ms())
+        {
+            // The record is the product, but a window transition is an
+            // observation about the machine rather than about the run, so
+            // losing one must not fail a run that already succeeded.
+            eprintln!(
+                "window observation for run {} was not recorded: {error}",
+                contract.run_id
+            );
+        }
     }
 }
 
@@ -3384,6 +3408,8 @@ account = "anthropic-max"
             availability,
             rate_limit_type: "five_hour".into(),
             is_using_overage: false,
+            used_percent: None,
+            window_duration_mins: None,
         };
         let observe = |observation: &WindowObservation, ts| {
             h.state

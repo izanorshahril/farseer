@@ -161,3 +161,41 @@ Worth a habit rather than a fix: **run the ignored sweep whenever a signal's sha
 - **Quota**, above: `27` needs two windows and a percentage field.
 - **`effort` and `model` on `turn/start`.** Both are wired to `None`. `30` section 4 says why: reasoning effort is a property of how a run executes, `05 run state model` sealed the contract, and it is a contract field or a runner default. Guessing is how a field ends up meaning neither.
 - **`turn/steer`.** Needs the `expectedTurnId` farseer does not track, and using it at all is the **correction to `20 worker control channel`** recorded on that ticket - the first evidence against turn-boundary granularity. A decision, not wiring.
+
+
+## Implementation note, 2026-08-26: quota widened, and the refusal kept
+
+`27 quota accounting` now holds what `codex app-server` reports. Live, on a real run:
+
+```
+report.windows == 2, both with the provider's own used_percent, both with a blank account
+```
+
+Three changes, and the third is the one that mattered most to get right.
+
+### A window is identified by its account **and** its limit
+
+`latest_observation` was keyed by account alone. With Codex reporting a five-hour and a weekly in the same notification, each would have differed from the one before it forever, and **append-on-change would have silently become append-everything** - the exact repetition `27` section 4 built this to avoid. `WindowObservation::window_key` is now `(account, rate_limit_type)`, and `windows()` groups by both.
+
+Claude Code's single `five_hour` window is untouched by this.
+
+### `used_percent` is reported, never computed
+
+The field is `Option`, skipped entirely on the wire when absent, and set only from what a provider states. Nothing anywhere turns spend into a percentage.
+
+**The test that encoded `27`'s refusal still passes unchanged**, because its fixture is a runner that states nothing - which is every runner but `codex-app-server`. A second test beside it asserts the provider's number is reported as stated, with unrelated spend on the same account, so the two claims sit next to each other and neither can quietly become the other.
+
+That was the point of doing this rather than deleting the old test: **`27` refused a percentage farseer would derive, not a percentage that exists.** Deleting the test would have thrown away the reasoning along with the assertion.
+
+### A window filling up is now a transition
+
+`differs_from` compares `used_percent`, so a window going 12% -> 85% is recorded **while the status is still `allowed`**. That is the first advance warning farseer has ever been able to see, and `26 routing policy` was designed believing no runner offered one - which is why its correction note says to re-read it before wiring rather than wire it as written.
+
+### Two things read but deliberately not mapped
+
+- **Exhaustion is read from `rateLimitReachedType`, never from the percentage.** 100% used and refused are different claims, and a test pins that a window at 100% with no `rateLimitReachedType` is still `Allowed`. Farseer deciding a limit had been hit before the provider did would be exactly the inference `12 autonomy and deny list` forbids.
+- **Codex's `credits` and `spendControlReached` are not `is_using_overage`.** Claude Code's overage means something specific; mapping a different provider's different concept onto that word would make the field mean two things. Left absent.
+
+### And the account is still declared
+
+The adapter fills every field **except** `account` and `runner`, and the API - the layer that reads runner config - fills those in. `27` is explicit that the account is declared by the operator and never inferred, so the adapter cannot supply it even though it knows `limitId: "codex"`. A test asserts the adapter leaves it blank.

@@ -104,6 +104,13 @@ pub struct RunReport {
     /// Boxed so a rarely-present observation does not widen every `Result` this
     /// crate returns - `ManagerError::Cancelled` carries a whole report.
     pub window: Option<Box<farseer_runner::claude_code::RateLimitInfo>>,
+    /// Every window the runner reported, when it reports more than one.
+    ///
+    /// `window` above is Claude Code's single one. `30 codex app server` found a
+    /// runner reporting a five-hour **and** a weekly, so this carries them out
+    /// whole and the layer that knows the account fills in the two fields the
+    /// adapter deliberately left empty.
+    pub windows: Vec<farseer_core::WindowObservation>,
     /// What the runner said about the session, if anything.
     ///
     /// Boxed for the same reason `window` is, and it grew a third field before
@@ -513,6 +520,7 @@ impl StartedWorker {
         // `manager_answered` when the turn ends - see `RunnerSignal::OutputChunk`.
         let mut chunks = String::new();
         let mut window = None;
+        let mut windows: Vec<farseer_core::WindowObservation> = Vec::new();
         let mut session: Option<farseer_runner::claude_code::SessionInfo> = None;
         let mut store_err = None;
         let cancel_on_store_failure = self.proc.cancel_token();
@@ -629,6 +637,7 @@ impl StartedWorker {
                             // inventory` observed `rate_limit_event` arriving
                             // around the terminal result, not before it.
                             window: None,
+                            windows: Vec::new(),
                             session: None,
                         });
                     }
@@ -636,6 +645,11 @@ impl StartedWorker {
                     // carried out on the report, and appended by the layer that
                     // knows which account it belongs to - on change only.
                     RunnerSignal::RateLimit(info) => window = Some(Box::new(info)),
+                    // The latest snapshot wins rather than accumulating: each
+                    // notification restates every window, so keeping them all
+                    // would be the repetition `27 quota accounting` section 4
+                    // built append-on-change to avoid.
+                    RunnerSignal::Windows(reported) => windows = reported,
                     // Straight into the record rather than onto the report:
                     // `28 operator surface`'s meta strip reads the event stream,
                     // and a reading that only survives to the end of the run
@@ -722,6 +736,7 @@ impl StartedWorker {
                     report.result = output;
                 }
                 report.window = window;
+                report.windows = std::mem::take(&mut windows);
                 report.session = session.clone().map(Box::new);
                 if was_cancelled {
                     report.outcome = Outcome::Cancelled;
@@ -736,6 +751,7 @@ impl StartedWorker {
                 tokens: None,
                 result: None,
                 window,
+                windows,
                 session: session.map(Box::new),
             })),
             None => Err(ManagerError::NoResult),
@@ -1237,6 +1253,7 @@ mod tests {
             tokens: Some(340),
             result: Some("the changelog is posted".into()),
             window: None,
+            windows: Vec::new(),
             session: None,
         }));
 
@@ -1253,6 +1270,7 @@ mod tests {
             tokens: None,
             result: Some("halfway through".into()),
             window: None,
+            windows: Vec::new(),
             session: None,
         })));
 
@@ -1276,6 +1294,7 @@ mod tests {
             tokens: Some(789),
             result: Some("reported result".into()),
             window: None,
+            windows: Vec::new(),
             session: None,
         }));
 
@@ -1295,6 +1314,7 @@ mod tests {
             tokens: None,
             result: None,
             window: None,
+            windows: Vec::new(),
             session: None,
         }));
 
@@ -1674,10 +1694,25 @@ mod tests {
     #[test]
     #[ignore = "spawns a real `codex app-server` and spends a subscription"]
     fn a_codex_app_server_run_reaches_the_record_with_a_context_window() {
-        one_acp_run("codex-app-server");
+        let report = one_acp_run("codex-app-server");
+        // `10 runner inventory` measured this runner as reporting no window at
+        // all. It reports two, with the provider's own percentage on each.
+        assert_eq!(
+            report.windows.len(),
+            2,
+            "a five-hour and a weekly: {:?}",
+            report.windows
+        );
+        assert!(
+            report.windows.iter().all(|w| w.used_percent.is_some()),
+            "{:?}",
+            report.windows
+        );
+        // Left blank on purpose: `27 quota accounting` declares the account.
+        assert!(report.windows.iter().all(|w| w.account.is_empty()));
     }
 
-    fn one_acp_run(runner: &str) {
+    fn one_acp_run(runner: &str) -> RunReport {
         let store = Store::open_in_memory().unwrap();
         let spec = WorkerContractSpec {
             run_id: RunId::new(),
@@ -1738,6 +1773,7 @@ mod tests {
             "{}",
             session.payload
         );
+        report
     }
 
     /// Live: an ACP **manager** answers, is steered, and answers again on the
