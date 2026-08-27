@@ -214,6 +214,22 @@ pub struct RunOptions {
     pub model: Option<String>,
     /// The effort the operator pinned, in the runner's own vocabulary.
     pub effort: Option<String>,
+    /// Extra environment for the runner process, added to what farseer
+    /// inherited.
+    ///
+    /// A manager on a runner with no MCP client gets its delegation endpoint
+    /// and token here, because `31 manager delegation reach`'s fix has to hand
+    /// a credential to an extension without putting it on the argv - visible to
+    /// every process listing - or in the prompt, where the model would read it.
+    pub runner_env: Vec<(String, String)>,
+    /// Absolute paths to runner extensions farseer itself supplies.
+    ///
+    /// Separate from [`Self::skills`] because they are different grants: a
+    /// skill is instructions, an extension is code that registers tools. The
+    /// only one today is the pi/omp delegation extension of `31 manager
+    /// delegation reach`, and the list is explicit so a run never loads one
+    /// farseer did not hand it.
+    pub extensions: Vec<PathBuf>,
     /// Absolute paths to the skill directories this run may load, resolved by
     /// the caller from the cell's declared skill names.
     ///
@@ -237,6 +253,8 @@ impl Default for RunOptions {
             account: None,
             model: None,
             effort: None,
+            runner_env: Vec::new(),
+            extensions: Vec::new(),
             skills: Vec::new(),
         }
     }
@@ -441,12 +459,13 @@ impl StartedWorker {
         exe: &Path,
         args: &[String],
         cwd: &Path,
+        env: &[(String, String)],
         thresholds: LivenessThresholds,
         parse: fn(&str) -> Result<Vec<RunnerSignal>, ParseError>,
         channel: Channel,
     ) -> Result<Self, ManagerError> {
         Ok(Self {
-            proc: SupervisedProcess::spawn(exe, args, cwd, channel.stdin_mode())?,
+            proc: SupervisedProcess::spawn(exe, args, cwd, env, channel.stdin_mode())?,
             activity: Arc::new(Mutex::new(ActivityClock::started_at(0))),
             monotonic_start: Instant::now(),
             thresholds,
@@ -1150,6 +1169,7 @@ pub fn start_worker(
                     },
                 ),
                 cwd,
+                &options.runner_env,
                 thresholds,
                 farseer_runner::claude_code::parse_line,
                 if options.role == RunRole::Manager {
@@ -1166,6 +1186,7 @@ pub fn start_worker(
                 &exe,
                 &farseer_runner::codex::build_args(contract),
                 cwd,
+                &options.runner_env,
                 thresholds,
                 farseer_runner::codex::parse_line,
                 // Codex has no steering path: `codex exec resume` starts a
@@ -1180,6 +1201,7 @@ pub fn start_worker(
                 &exe,
                 &farseer_runner::cursor_agent::build_args(contract),
                 cwd,
+                &options.runner_env,
                 thresholds,
                 farseer_runner::cursor_agent::parse_line,
                 // No `--input-format` flag exists on this CLI at all, per
@@ -1195,6 +1217,7 @@ pub fn start_worker(
                 &exe,
                 &farseer_runner::goose::build_args(contract),
                 cwd,
+                &options.runner_env,
                 thresholds,
                 farseer_runner::goose::parse_line,
                 // `-r/--resume` restarts into a new process rather than
@@ -1215,6 +1238,7 @@ pub fn start_worker(
                 &exe,
                 &["app-server".to_string()],
                 cwd,
+                &options.runner_env,
                 thresholds,
                 farseer_runner::codex_app_server::parse_line,
                 Channel::CodexAppServer {
@@ -1235,6 +1259,7 @@ pub fn start_worker(
                 &exe,
                 &farseer_runner::agy::build_args(&contract.goal, options.model.as_deref()),
                 cwd,
+                &options.runner_env,
                 thresholds,
                 farseer_runner::agy::parse_line,
                 Channel::OneShot,
@@ -1253,9 +1278,11 @@ pub fn start_worker(
                     options.model.as_deref(),
                     options.effort.as_deref(),
                     &options.skills,
+                    &options.extensions,
                     options.append_system_prompt.as_deref(),
                 ),
                 cwd,
+                &options.runner_env,
                 thresholds,
                 farseer_runner::pi::parse_line,
                 Channel::PiRpc {
@@ -1276,6 +1303,7 @@ pub fn start_worker(
                     &exe,
                     &[(*subcommand).to_string()],
                     cwd,
+                    &options.runner_env,
                     thresholds,
                     farseer_runner::acp::parse_line,
                     Channel::Acp {
@@ -1538,6 +1566,7 @@ mod tests {
             Path::new(r"C:\Windows\System32\cmd.exe"),
             &["/c".into(), "type".into(), path.to_str().unwrap().into()],
             &std::env::current_dir().unwrap(),
+            &[],
             LivenessThresholds::default(),
             farseer_runner::claude_code::parse_line,
             Channel::OneShot,
@@ -1808,6 +1837,7 @@ mod tests {
                 script_path.to_string_lossy().into_owned(),
             ],
             &std::env::current_dir().unwrap(),
+            &[],
             LivenessThresholds::default(),
             completed_turn_fixture,
             Channel::OneShot,
@@ -1837,6 +1867,7 @@ mod tests {
             Path::new(r"C:\Windows\System32\cmd.exe"),
             &["/c".into(), "ping -n 30 127.0.0.1 >nul".into()],
             &std::env::current_dir().unwrap(),
+            &[],
             LivenessThresholds::default(),
             farseer_runner::claude_code::parse_line,
             // Exercises the bootstrap-write path alongside cancellation:
@@ -1960,6 +1991,7 @@ mod tests {
             Path::new(r"C:\Windows\System32\cmd.exe"),
             &["/c".into(), "ping -n 30 127.0.0.1 >nul".into()],
             &std::env::current_dir().unwrap(),
+            &[],
             LivenessThresholds {
                 stalled_secs: 0,
                 likely_hung_secs: 1,

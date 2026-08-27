@@ -60,7 +60,7 @@ pub struct FarseerMcp {
 }
 
 impl FarseerMcp {
-    fn new(state: Arc<AppState>) -> Self {
+    pub(crate) fn new(state: Arc<AppState>) -> Self {
         Self {
             state,
             tool_router: Self::tool_router(),
@@ -201,6 +201,87 @@ impl FarseerMcp {
         &self,
         Parameters(args): Parameters<DelegateToWorkerArgs>,
     ) -> Result<CallToolResult, McpError> {
+        Ok(CallToolResult::success(vec![ContentBlock::text(
+            self.delegate_to_worker_json(args)?.to_string(),
+        )]))
+    }
+
+    #[tool(
+        description = "Call another cell named in this manager's pinned roster. Fire-and-forget: returns a call_id and the callee's run_id immediately, and the result arrives on the event stream. The callee owns its own workspace, runner and tool grants; you state the goal, the ceiling and the budget."
+    )]
+    fn delegate_to_cell(
+        &self,
+        Parameters(args): Parameters<DelegateToCellArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        Ok(CallToolResult::success(vec![ContentBlock::text(
+            self.delegate_to_cell_json(args)?.to_string(),
+        )]))
+    }
+
+    /// Creates the workspace, runs the contract to completion, and tears the workspace down synchronously because the manager's turn is waiting for the answer.
+    fn run_delegated_worker(
+        &self,
+        contract: WorkerContract,
+        pinned_cell: &farseer_core::CellDefinition,
+        cancel_requested: &std::sync::atomic::AtomicBool,
+        // The roster entry's own skill directories, already resolved and
+        // checked by the caller - this function has the contract but not the
+        // roster entry it came from.
+        skill_dirs: &[std::path::PathBuf],
+    ) -> Result<farseer_manager::RunReport, McpError> {
+        let run_id = contract.run_id;
+        let (cwd, repo_for_teardown) =
+            create_workspace(&self.state, contract.workspace, run_id).map_err(api_error)?;
+
+        let result = execute_run(
+            &self.state,
+            &contract,
+            &cwd,
+            &farseer_manager::RunOptions {
+                actor: farseer_core::Actor::Manager,
+                role: farseer_manager::RunRole::Worker,
+                manager_cell: Some(pinned_cell.clone()),
+                claude_mcp_config: None,
+                append_system_prompt: None,
+        runner_env: Vec::new(),
+        extensions: Vec::new(),
+                account: Some(self.state.runner_config().account_for(&contract.runner)),
+                skills: skill_dirs.to_vec(),
+                // What the operator pinned, or nothing at all. `30 codex app
+                // server`: farseer passes a model or an effort only when a
+                // person wrote one down, so an unpinned runner keeps whatever
+                // its own config says.
+                model: self.state.runner_config().launch_of(&contract.runner).0.map(str::to_string),
+                effort: self.state.runner_config().launch_of(&contract.runner).1.map(str::to_string),
+            },
+            Some(cancel_requested),
+        );
+
+        // `04 spike workspace teardown`: teardown starts only after
+        // `run_worker` returns and the process has closed its stdout pipe, so
+        // the cwd handle that blocks deletion is already gone.
+        if let Err(e) =
+            farseer_runner::workspace::teardown_workspace(&cwd, repo_for_teardown.as_deref())
+        {
+            eprintln!("workspace teardown for delegated run {run_id} did not complete: {e}");
+        }
+
+        preserve_cancelled_report(result)
+    }
+}
+
+/// The two delegation verbs, as plain JSON in and plain JSON out.
+///
+/// Lifted out of the `#[tool]` wrappers by `31 manager delegation reach`: the
+/// MCP face is one way to ask for a delegation and it is not the only one, so
+/// the logic cannot live inside the transport that happened to be first.
+/// `/v1/manager/delegate/*` calls exactly these, which is what lets a runner
+/// with no MCP client delegate on the same terms as one that has it.
+impl FarseerMcp {
+    pub(crate) fn delegate_to_worker_json(
+        &self,
+        args: DelegateToWorkerArgs,
+    ) -> Result<serde_json::Value, McpError> {
         let manager = self.authorize_manager(&args.manager_run_id, &args.manager_token)?;
         if manager
             .cancel_requested
@@ -367,18 +448,13 @@ impl FarseerMcp {
             "cost_usd_micros": report.cost_usd_micros,
             "tokens": report.tokens,
         });
-        Ok(CallToolResult::success(vec![ContentBlock::text(
-            body.to_string(),
-        )]))
+        Ok(body)
     }
 
-    #[tool(
-        description = "Call another cell named in this manager's pinned roster. Fire-and-forget: returns a call_id and the callee's run_id immediately, and the result arrives on the event stream. The callee owns its own workspace, runner and tool grants; you state the goal, the ceiling and the budget."
-    )]
-    fn delegate_to_cell(
+    pub(crate) fn delegate_to_cell_json(
         &self,
-        Parameters(args): Parameters<DelegateToCellArgs>,
-    ) -> Result<CallToolResult, McpError> {
+        args: DelegateToCellArgs,
+    ) -> Result<serde_json::Value, McpError> {
         let manager = self.authorize_manager(&args.manager_run_id, &args.manager_token)?;
         if manager
             .cancel_requested
@@ -526,58 +602,7 @@ impl FarseerMcp {
             "to_cell": to_cell.as_str(),
             "autonomy_ceiling": ceiling.as_str(),
         });
-        Ok(CallToolResult::success(vec![ContentBlock::text(
-            body.to_string(),
-        )]))
-    }
-
-    /// Creates the workspace, runs the contract to completion, and tears the workspace down synchronously because the manager's turn is waiting for the answer.
-    fn run_delegated_worker(
-        &self,
-        contract: WorkerContract,
-        pinned_cell: &farseer_core::CellDefinition,
-        cancel_requested: &std::sync::atomic::AtomicBool,
-        // The roster entry's own skill directories, already resolved and
-        // checked by the caller - this function has the contract but not the
-        // roster entry it came from.
-        skill_dirs: &[std::path::PathBuf],
-    ) -> Result<farseer_manager::RunReport, McpError> {
-        let run_id = contract.run_id;
-        let (cwd, repo_for_teardown) =
-            create_workspace(&self.state, contract.workspace, run_id).map_err(api_error)?;
-
-        let result = execute_run(
-            &self.state,
-            &contract,
-            &cwd,
-            &farseer_manager::RunOptions {
-                actor: farseer_core::Actor::Manager,
-                role: farseer_manager::RunRole::Worker,
-                manager_cell: Some(pinned_cell.clone()),
-                claude_mcp_config: None,
-                append_system_prompt: None,
-                account: Some(self.state.runner_config().account_for(&contract.runner)),
-                skills: skill_dirs.to_vec(),
-                // What the operator pinned, or nothing at all. `30 codex app
-                // server`: farseer passes a model or an effort only when a
-                // person wrote one down, so an unpinned runner keeps whatever
-                // its own config says.
-                model: self.state.runner_config().launch_of(&contract.runner).0.map(str::to_string),
-                effort: self.state.runner_config().launch_of(&contract.runner).1.map(str::to_string),
-            },
-            Some(cancel_requested),
-        );
-
-        // `04 spike workspace teardown`: teardown starts only after
-        // `run_worker` returns and the process has closed its stdout pipe, so
-        // the cwd handle that blocks deletion is already gone.
-        if let Err(e) =
-            farseer_runner::workspace::teardown_workspace(&cwd, repo_for_teardown.as_deref())
-        {
-            eprintln!("workspace teardown for delegated run {run_id} did not complete: {e}");
-        }
-
-        preserve_cancelled_report(result)
+        Ok(body)
     }
 }
 
@@ -607,7 +632,7 @@ fn api_error(e: crate::ApiError) -> McpError {
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
-struct DelegateToWorkerArgs {
+pub(crate) struct DelegateToWorkerArgs {
     /// The active manager identity injected into this manager's system prompt.
     manager_run_id: String,
     /// The per-manager capability injected beside `manager_run_id`.
@@ -638,7 +663,7 @@ impl From<DelegationBudgetArgs> for Budget {
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
-struct DelegateToCellArgs {
+pub(crate) struct DelegateToCellArgs {
     /// The active manager identity injected into this manager's system prompt.
     manager_run_id: String,
     /// The per-manager capability injected beside `manager_run_id`.

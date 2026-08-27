@@ -163,7 +163,7 @@ impl AcpSession {
         // `StdinMode::Closed` rule `28 operator surface` learned the hard way is
         // about one-shot runners; this is the other case it exists to
         // distinguish.
-        let mut process = SupervisedProcess::spawn(exe, args, cwd, StdinMode::Live)?;
+        let mut process = SupervisedProcess::spawn(exe, args, cwd, &[], StdinMode::Live)?;
         let mut next_id = 1;
         let opened = handshake(&mut process, cwd, mode, &mut next_id, on_line)?;
         let session = Self {

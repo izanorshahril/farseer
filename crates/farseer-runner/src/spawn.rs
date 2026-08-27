@@ -151,14 +151,23 @@ impl SupervisedProcess {
     /// `exe` must already be resolved - see [`crate::resolve`] - since
     /// `CreateProcessW` does not consult `PATHEXT` and neither does
     /// `std::process::Command`.
+    ///
+    /// `env` is added to the inherited environment rather than replacing it.
+    /// It exists because a credential belongs there and nowhere else: not on
+    /// the argv, which every process listing on this machine can read, and not
+    /// in the prompt, where the model itself would learn it. `31 manager
+    /// delegation reach` needed a delegation token to reach a pi extension;
+    /// Codex's `bearer_token_env_var` will want the same channel.
     pub fn spawn(
         exe: &Path,
         args: &[String],
         cwd: &Path,
+        env: &[(String, String)],
         stdin_mode: StdinMode,
     ) -> Result<Self, SpawnError> {
         let mut child = Command::new(exe)
             .args(args)
+            .envs(env.iter().map(|(k, v)| (k.as_str(), v.as_str())))
             .current_dir(cwd)
             .stdin(match stdin_mode {
                 StdinMode::Live => Stdio::piped(),
@@ -292,6 +301,7 @@ mod tests {
             Path::new(r"C:\Windows\System32\cmd.exe"),
             &cmd(&["/c", "echo one&echo two"]),
             &std::env::current_dir().unwrap(),
+            &[],
             StdinMode::Live,
         )
         .unwrap();
@@ -313,6 +323,7 @@ mod tests {
             Path::new(r"C:\Windows\System32\cmd.exe"),
             &cmd(&["/c", "ping -n 30 127.0.0.1 >nul"]),
             &std::env::current_dir().unwrap(),
+            &[],
             StdinMode::Live,
         )
         .unwrap();
@@ -334,6 +345,7 @@ mod tests {
             Path::new(r"C:\Windows\System32\cmd.exe"),
             &cmd(&["/c", "ping -n 30 127.0.0.1 >nul"]),
             &std::env::current_dir().unwrap(),
+            &[],
             StdinMode::Live,
         )
         .unwrap();
@@ -362,6 +374,7 @@ mod tests {
             Path::new(r"C:\Windows\System32\cmd.exe"),
             &cmd(&["/c", "echo hi"]),
             &std::env::current_dir().unwrap(),
+            &[],
             StdinMode::Live,
         )
         .unwrap();
@@ -377,6 +390,7 @@ mod tests {
             Path::new(r"C:\Windows\System32\cmd.exe"),
             &cmd(&["/c", "echo hi"]),
             &std::env::current_dir().unwrap(),
+            &[],
             StdinMode::Live,
         )
         .unwrap();

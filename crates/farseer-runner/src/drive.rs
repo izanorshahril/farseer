@@ -66,6 +66,7 @@ mod tests {
             Path::new(r"C:\Windows\System32\cmd.exe"),
             &cmd(&["/c", "type", fixture.to_str().unwrap()]),
             &std::env::current_dir().unwrap(),
+            &[],
             StdinMode::Live,
         )
         .unwrap();

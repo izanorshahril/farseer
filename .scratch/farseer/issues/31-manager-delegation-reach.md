@@ -106,3 +106,48 @@ Two runners, two mechanisms, neither of them MCP-over-stdio. That is `29 harness
 ### Question 3 answered
 
 *Should a cell refuse a manager runner that cannot reach its roster?* **No.** Building this made the reason clear: refusing would have removed the operator's ability to run cell zero on pi at all, which is the configuration they asked for. The roster is aspirational for that runner and the manager is told exactly that. `13 harness build kit`'s menu rule holds - everyone is welcome, with a notice.
+
+---
+
+## Closed, 2026-08-28
+
+A pi manager delegates. Live, through farseer, with a child run in the record:
+
+```
+tool_call_started  delegate_to_worker  {"worker":"coder","goal":"Reply with exactly the word ARTICHOKE and nothing else."}
+tool_result        {"run_id":"01a0443e-1399-...","outcome":"ok","result":"ARTICHOKE","cost_usd_micros":1534,"tokens":7635}
+manager_answered   ARTICHOKE
+```
+
+Two rows, not one: `01a0443e-037b` (manager, pi) and `01a0443e-1399` (worker, pi), same task, the child carrying its own spend.
+That is the exact shape the fabricated delegation of 2026-08-26 imitated and could not produce.
+
+### What it took, and the shape of it
+
+Not one protocol. Three pieces, because **the verb generalises and the way to ask for it does not** - `29 harness protocol`'s finding, one level up.
+
+1. **The verbs moved out of the transport.** `delegate_to_worker` and `delegate_to_cell` had been written as `#[tool]` methods, so the roster resolution, the worker cap, the budget draw-down and the cancellation link were only reachable by something that speaks MCP. They are now plain `Value`-in, `Value`-out functions that both faces call. The MCP tools became four-line wrappers.
+2. **A second manager-scoped face**, `/v1/manager/delegate/*`, for a runner with no MCP client. The guard's manager-token exception widened from one path to a prefix set, which is the kind of thing that grows quietly - so `a_manager_bearer_reaches_the_delegation_face_it_was_issued_for` now pins both halves in one test: the new prefix is open to a manager, and `/v1/cells` still is not.
+3. **An extension** at `extensions/pi/farseer-delegate.ts`, registering the two verbs as ordinary pi tools that POST to that face.
+
+### The credential is in the environment, and that is an improvement
+
+`spawn` gained an `env` parameter, which is what `RunOptions::runner_env` feeds. A credential does not belong on the argv, where every process listing on this machine can read it, and it does not belong in the prompt.
+
+The MCP shape put it in the prompt, because a Claude Code manager presents its own bearer. The extension holds its own instead, so **the pi manager's prompt contains no token at all** - the model names a worker and a goal and cannot read, spend or quote the thing that authorises the call. The runner farseer reached last is now the one with the better shape.
+
+### Two things the build corrected on the way
+
+**pi's extension API is not omp's.** The extension was written from the examples bundled with `@oh-my-pi/pi-coding-agent` - `pi.zod.object(...)`, `pi.logger` - and pi 0.84.3 has neither. Probed: its `ExtensionAPI` carries 26 methods, no schema builder among them, and `parameters` is plain JSON Schema. The failure mode is the bad kind: the extension threw at load, pi exited before its first turn, and farseer recorded `the process exited without ever emitting a terminal result` - a manager that died for a reason nothing on the surface names. **`10 runner inventory`'s observed-never-advertised rule applies to a harness's extension API exactly as it does to its output**, and the bundled examples are advertising.
+
+**A run that promises a tool that fails to load is worse than one with no tool.** So [`delegate_extension`] checks the file is on disk and downgrades to `Reach::None` when it is not, rather than telling a manager to call something that will not exist.
+
+### And one test whose premise expired
+
+`a_manager_that_cannot_delegate_is_told_so_and_told_not_to_claim_it_did` asserted against `pi`. pi can delegate now, so that assertion had quietly stopped meaning anything - it would have passed on a prompt that was simply wrong. Repointed at `goose-acp`, which is now the only manager runner with no channel for the verbs at all. **A test that still passes after its subject changed is not a passing test.**
+
+### What is left
+
+- **ACP.** `goose-acp` and `opencode-acp` get the roster prompt and no reach. The client serves capabilities in ACP, and farseer currently declines `fs` and `terminal`; whether it can serve tools instead is unprobed.
+- **codex-app-server.** Its route was the one this ticket predicted - `thread/start`'s free-form `config` plus `bearer_token_env_var` - and `spawn` can now set that variable. Untried, because pi got there first and the operator runs pi.
+- **omp's own subagents next to farseer's workers.** `32 harness capability floor` left `hub` open; an omp manager can now delegate two different ways, and they do not know about each other.
