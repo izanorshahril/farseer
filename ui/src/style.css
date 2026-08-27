@@ -548,3 +548,11 @@ code {
 .run-title {
   flex: 1 1 auto;
 }
+
+/* A cost the runner computed rather than was charged. Marked, because summing
+   it with money that actually moved would be the one mistake `27` forbids. */
+.notional::after {
+  content: "~";
+  margin-left: 2px;
+  opacity: 0.7;
+}

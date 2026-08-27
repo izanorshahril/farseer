@@ -214,7 +214,7 @@ impl FarseerMcp {
         if args.goal.trim().is_empty() {
             return Err(McpError::invalid_params("goal must not be empty", None));
         }
-        let (runner, roster_budget) = manager
+        let (runner, roster_budget, skill_names) = manager
             .cell
             .roster
             .iter()
@@ -223,7 +223,14 @@ impl FarseerMcp {
                     name,
                     runner,
                     max_budget,
-                } if *name == args.worker => Some((runner.clone(), *max_budget)),
+                    skills,
+                } if *name == args.worker => {
+                    // The roster entry's own skills, not the manager's:
+                    // `22 cell addressing` made the roster the grant, and a
+                    // reviewer and a coder should not get the same instructions
+                    // by accident.
+                    Some((runner.clone(), *max_budget, skills.clone()))
+                }
                 _ => None,
             })
             .ok_or_else(|| {
@@ -235,6 +242,19 @@ impl FarseerMcp {
                     None,
                 )
             })?;
+        // Resolved here, where the roster entry is in hand: a worker that names
+        // a skill farseer cannot find is a refusal at delegation time rather
+        // than a worse answer later for a reason nobody can see.
+        let skill_dirs = skill_names
+            .iter()
+            .map(|name| crate::skill_dir(self.state.repo_root(), name))
+            .collect::<Vec<_>>();
+        if let Some(missing) = skill_dirs.iter().find(|dir| !dir.join("SKILL.md").is_file()) {
+            return Err(McpError::invalid_params(
+                format!("skill `{}` is not in this repository", missing.display()),
+                None,
+            ));
+        }
         ensure_runner_authority(&manager.cell, &runner).map_err(api_error)?;
         let _worker_permit = self
             .state
@@ -307,7 +327,12 @@ impl FarseerMcp {
         // starving it, matching `main.rs`'s `new_multi_thread` builder.
         let started = std::time::Instant::now();
         let report = match tokio::task::block_in_place(|| {
-            self.run_delegated_worker(contract, &manager.cell, &manager.cancel_requested)
+            self.run_delegated_worker(
+                contract,
+                &manager.cell,
+                &manager.cancel_requested,
+                &skill_dirs,
+            )
         }) {
             Ok(report) => report,
             Err(error) => {
@@ -512,6 +537,10 @@ impl FarseerMcp {
         contract: WorkerContract,
         pinned_cell: &farseer_core::CellDefinition,
         cancel_requested: &std::sync::atomic::AtomicBool,
+        // The roster entry's own skill directories, already resolved and
+        // checked by the caller - this function has the contract but not the
+        // roster entry it came from.
+        skill_dirs: &[std::path::PathBuf],
     ) -> Result<farseer_manager::RunReport, McpError> {
         let run_id = contract.run_id;
         let (cwd, repo_for_teardown) =
@@ -528,6 +557,7 @@ impl FarseerMcp {
                 claude_mcp_config: None,
                 claude_append_system_prompt: None,
                 account: Some(self.state.runner_config().account_for(&contract.runner)),
+                skills: skill_dirs.to_vec(),
                 // What the operator pinned, or nothing at all. `30 codex app
                 // server`: farseer passes a model or an effort only when a
                 // person wrote one down, so an unpinned runner keeps whatever

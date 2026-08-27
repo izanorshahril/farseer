@@ -39,9 +39,9 @@
 //! at two settings - so a separate `--effort` would be a second place to say the
 //! same thing, and the two could disagree.
 
-use serde_json::Value;
+use serde_json::{Value, json};
 
-use farseer_core::Outcome;
+use farseer_core::{EventKind, Outcome};
 
 use crate::claude_code::{FinishedSignal, ParseError, RunnerSignal, SessionInfo};
 
@@ -57,12 +57,39 @@ pub fn build_args(goal: &str, model: Option<&str>) -> Vec<String> {
         goal.to_string(),
         "--output-format".to_string(),
         "stream-json".to_string(),
+        // Without this, agy **silently produces nothing**. Headless agy cannot
+        // prompt, so it auto-denies every tool needing permission and then
+        // reports `"status": "SUCCESS"` with an empty response - measured
+        // 2026-08-27, and worse than the hang pi's `ask_question` caused,
+        // because a hang is visible and a quiet success is not.
+        //
+        // The flag's name is accurate about what it turns off and misleading
+        // about the risk here: `12 autonomy and deny list` decides autonomy
+        // **before** the run and the git worktree is the boundary, exactly as
+        // for `30 codex app server`'s sandbox request. What is skipped is a
+        // prompt nobody is there to answer, not a bound farseer relies on.
+        "--dangerously-skip-permissions".to_string(),
     ];
     if let Some(model) = model {
         args.push("--model".to_string());
         args.push(model.to_string());
     }
     args
+}
+
+/// A tool result, bounded.
+///
+/// `02 record scope` wants the record to say what happened rather than become a
+/// second copy of the workspace, and a `run_command` on a build can emit
+/// megabytes. Clipped results end in an ellipsis rather than being trimmed
+/// silently.
+fn clipped(text: Option<&str>) -> Option<String> {
+    const LIMIT: usize = 2_000;
+    let text = text.filter(|text| !text.is_empty())?;
+    if text.chars().count() <= LIMIT {
+        return Some(text.to_string());
+    }
+    Some(format!("{}...", text.chars().take(LIMIT).collect::<String>()))
 }
 
 pub fn parse_line(line: &str) -> Result<Vec<RunnerSignal>, ParseError> {
@@ -89,16 +116,49 @@ pub fn parse_line(line: &str) -> Result<Vec<RunnerSignal>, ParseError> {
             provider: None,
             configured: None,
         })),
-        // Answer text arrives a delta at a time on the step that is producing
-        // it. `05 run state model`: **token streams are activity, not
-        // progress**, so these accumulate into one answer rather than becoming
-        // one event each.
-        "step_update" => body
-            .get("text_delta")
-            .and_then(Value::as_str)
-            .filter(|delta| !delta.is_empty())
-            .filter(|_| body.get("step_type").and_then(Value::as_str) == Some("agent_response"))
-            .map(|delta| RunnerSignal::OutputChunk(delta.to_string())),
+        // A step is agy's unit of work, and its `step_type` says what kind.
+        "step_update" => match body.get("step_type").and_then(Value::as_str) {
+            // Answer text arrives a delta at a time. `05 run state model`:
+            // **token streams are activity, not progress**, so these
+            // accumulate into one answer rather than becoming one event each.
+            Some("agent_response") => body
+                .get("text_delta")
+                .and_then(Value::as_str)
+                .filter(|delta| !delta.is_empty())
+                .map(|delta| RunnerSignal::OutputChunk(delta.to_string())),
+            // What the runner did, as opposed to what it said it did - the
+            // distinction `31 manager delegation reach` exists because of.
+            // agy reuses one step for the whole tool call and moves its
+            // `state`, so the state is what separates the call from its result.
+            Some("tool") => {
+                let info = body.get("tool_info").unwrap_or(&Value::Null);
+                match body.get("state").and_then(Value::as_str) {
+                    Some("ACTIVE") => Some(RunnerSignal::Progress {
+                        kind: EventKind::new(EventKind::TOOL_CALL_STARTED),
+                        payload: json!({
+                            "tool_name": body.get("tool_name"),
+                            "tool_call_id": body.get("step_index"),
+                            "args": info.get("parameters"),
+                        }),
+                    }),
+                    Some(state @ ("DONE" | "ERROR")) => Some(RunnerSignal::Progress {
+                        kind: EventKind::new(EventKind::TOOL_RESULT),
+                        payload: json!({
+                            "tool_name": body.get("tool_name"),
+                            "tool_call_id": body.get("step_index"),
+                            "is_error": state == "ERROR",
+                            "text": clipped(
+                                info.get("output")
+                                    .or_else(|| info.get("error").and_then(|e| e.get("message")))
+                                    .and_then(Value::as_str),
+                            ),
+                        }),
+                    }),
+                    _ => None,
+                }
+            }
+            _ => None,
+        },
         "result" => Some(RunnerSignal::Finished(FinishedSignal {
             outcome: match body.get("status").and_then(Value::as_str) {
                 Some("SUCCESS") => Outcome::Ok,
@@ -159,6 +219,41 @@ mod tests {
         assert_eq!(parse_line(line).unwrap(), vec![]);
     }
 
+    /// agy moves one step through its states, so the state is what separates
+    /// the call from the result. Both reach the record as facts.
+    #[test]
+    fn a_tool_step_reaches_the_record_at_both_ends() {
+        let started = r#"{"event":"step_update","step_update":{"step_index":2,"state":"ACTIVE","step_type":"tool","tool_name":"run_command","tool_info":{"name":"run_command","parameters":{"CommandLine":"echo hi"}}}}"#;
+        let signals = parse_line(started).unwrap();
+        let [RunnerSignal::Progress { kind, payload }] = &signals[..] else {
+            panic!("{signals:?}")
+        };
+        assert_eq!(kind.as_str(), EventKind::TOOL_CALL_STARTED);
+        assert_eq!(payload["args"]["CommandLine"], "echo hi");
+
+        let done = r#"{"event":"step_update","step_update":{"step_index":2,"state":"DONE","step_type":"tool","tool_name":"run_command","tool_info":{"name":"run_command","output":"hi"}}}"#;
+        let signals = parse_line(done).unwrap();
+        let [RunnerSignal::Progress { kind, payload }] = &signals[..] else {
+            panic!("{signals:?}")
+        };
+        assert_eq!(kind.as_str(), EventKind::TOOL_RESULT);
+        assert_eq!(payload["text"], "hi");
+        assert_eq!(payload["is_error"], false);
+    }
+
+    /// The failure that produced nothing and called it success: headless agy
+    /// auto-denies a tool it cannot prompt for. The record gets the denial.
+    #[test]
+    fn a_denied_tool_is_recorded_as_an_error_rather_than_as_silence() {
+        let line = r#"{"event":"step_update","step_update":{"step_index":2,"state":"ERROR","step_type":"tool","tool_name":"run_command","tool_info":{"name":"run_command","error":{"type":"TOOL_ERROR","message":"user denied permission to run command"}}}}"#;
+        let signals = parse_line(line).unwrap();
+        let [RunnerSignal::Progress { payload, .. }] = &signals[..] else {
+            panic!("{signals:?}")
+        };
+        assert_eq!(payload["is_error"], true);
+        assert_eq!(payload["text"], "user denied permission to run command");
+    }
+
     #[test]
     fn the_result_carries_the_outcome_and_the_tokens_but_no_money() {
         let line = r#"{"event":"result","result":{"conversation_id":"8a55adea","status":"SUCCESS","response":"agy online.\n","duration_seconds":2.43,"num_turns":1,"usage":{"input_tokens":13804,"output_tokens":25,"thinking_tokens":22,"cache_read_tokens":0,"total_tokens":13829}}}"#;
@@ -192,18 +287,17 @@ mod tests {
     fn the_operator_pins_the_model_and_an_unpinned_one_stays_agys_own() {
         assert_eq!(
             build_args("say hi", None),
-            ["-p", "say hi", "--output-format", "stream-json"]
-        );
-        assert_eq!(
-            build_args("say hi", Some("gemini-3.7-flash-low")),
             [
                 "-p",
                 "say hi",
                 "--output-format",
                 "stream-json",
-                "--model",
-                "gemini-3.7-flash-low"
+                "--dangerously-skip-permissions"
             ]
         );
+        assert!(build_args("say hi", Some("gemini-3.7-flash-low")).ends_with(&[
+            "--model".to_string(),
+            "gemini-3.7-flash-low".to_string()
+        ]));
     }
 }

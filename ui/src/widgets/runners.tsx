@@ -44,7 +44,13 @@ type Run = {
 };
 
 /** What the settings menu already knows about each runner, joined by name. */
-type RunnerFacts = { name: string; note: string; cannot: string[] };
+type RunnerFacts = {
+  name: string;
+  note: string;
+  cannot: string[];
+  /** How to read this runner's money, or null when it reports none. */
+  cost_basis: string | null;
+};
 
 const usd = (micros: number) => `$${(micros / 1_000_000).toFixed(4)}`;
 
@@ -283,7 +289,17 @@ export function RunnersWidget({ bridge }: { bridge: Bridge }) {
                       <span className="mono faint small">
                         {run.tokens.toLocaleString()} tok
                       </span>
-                      <span className="mono faint small">{usd(run.usd_micros)}</span>
+                      {/* Never a bare dollar figure. `27 quota accounting`
+                          refused a derived percentage where a reported one
+                          existed; pi's cost is an API list price and not what
+                          a subscription was billed, and the two must never be
+                          read as the same number. */}
+                      <span
+                        className={`mono faint small${facts[run.runner]?.cost_basis === "at list price, not billed" ? " notional" : ""}`}
+                        title={facts[run.runner]?.cost_basis ?? "this runner reports no cost"}
+                      >
+                        {facts[run.runner]?.cost_basis ? usd(run.usd_micros) : "-"}
+                      </span>
                       <button
                         className="chip danger"
                         disabled={busy !== null}

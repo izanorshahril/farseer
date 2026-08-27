@@ -207,6 +207,16 @@ pub struct RunOptions {
     pub model: Option<String>,
     /// The effort the operator pinned, in the runner's own vocabulary.
     pub effort: Option<String>,
+    /// Absolute paths to the skill directories this run may load, resolved by
+    /// the caller from the cell's declared skill names.
+    ///
+    /// Paths rather than names, for the same reason [`Self::account`] is a
+    /// string rather than a lookup: this crate reads no config and knows no
+    /// cell layout. Empty means the run loads **no** skills, which is the
+    /// deliberate default - `32 harness capability floor` found every harness
+    /// discovering the operator's own installed skills, and a run bounded by
+    /// `12 autonomy and deny list` should not silently inherit them.
+    pub skills: Vec<PathBuf>,
 }
 
 impl Default for RunOptions {
@@ -220,6 +230,7 @@ impl Default for RunOptions {
             account: None,
             model: None,
             effort: None,
+            skills: Vec::new(),
         }
     }
 }
@@ -945,6 +956,17 @@ pub struct Control {
     /// The runner reports its subscription window, so `27 quota accounting` can
     /// see exhaustion coming rather than discovering it by failing.
     pub quota: bool,
+    /// Where a cost figure comes from, when there is one.
+    ///
+    /// `27 quota accounting` refused a **derived** percentage where a reported
+    /// one existed, and this is the same distinction for money. Two runners
+    /// report a dollar figure and they do not mean the same thing: Claude Code
+    /// passes on what the provider charged, while pi and omp price every
+    /// message from their own per-model table. On a subscription nobody is
+    /// charged per token at all, so pi's number is **what this would have cost
+    /// at list price** - which is worth reporting, and worth never being
+    /// summed together with money that actually moved.
+    pub cost: CostBasis,
     /// The runner names its context window, so "how full is this" has a
     /// denominator - see `29 harness protocol`.
     pub context: bool,
@@ -958,12 +980,39 @@ pub struct Control {
 /// Cancellation is absent because it is farseer's, not the runner's: the Job
 /// Object kill in `03 spike job objects` works on anything with a process id,
 /// and no runner has to agree to it.
+/// Where a runner's cost figure comes from. See [`Control::cost`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CostBasis {
+    /// The runner says nothing about money. Most of the inventory.
+    Silent,
+    /// The provider told the runner what it charged, and the runner passed it
+    /// on. Money that moved.
+    Reported,
+    /// The runner multiplied its own token counts by its own price table.
+    /// Accurate as an API list price and **not** what a subscription was
+    /// billed - which makes it the number that says what the subscription
+    /// saved, as long as nothing presents it as spend.
+    ListPrice,
+}
+
+impl CostBasis {
+    /// How to describe this to an operator, in six words or fewer.
+    pub fn note(self) -> Option<&'static str> {
+        match self {
+            Self::Silent => None,
+            Self::Reported => Some("as charged by the provider"),
+            Self::ListPrice => Some("at list price, not billed"),
+        }
+    }
+}
+
 pub fn control_of(runner: &str) -> Control {
     match runner {
         // `10 runner inventory`: quota and cost both arrive in band, and
         // `system/compact_boundary` names a compaction. No context window - it
         // reports tokens with nothing to divide them by.
         "claude-code" => Control {
+            cost: CostBasis::Reported,
             steer: true,
             quota: true,
             context: false,
@@ -974,6 +1023,7 @@ pub fn control_of(runner: &str) -> Control {
         // Steering needs an `expectedTurnId` farseer does not track yet, and
         // `30` records using it at all as a correction to `20`.
         "codex-app-server" => Control {
+            cost: CostBasis::Silent,
             steer: false,
             quota: true,
             context: true,
@@ -984,6 +1034,7 @@ pub fn control_of(runner: &str) -> Control {
         // the way Codex and cursor-agent do. It names its model and its tokens
         // and nothing else, which is the honest floor rather than a gap.
         "agy" => Control {
+            cost: CostBasis::Silent,
             steer: false,
             quota: false,
             context: false,
@@ -996,6 +1047,9 @@ pub fn control_of(runner: &str) -> Control {
         // denominator but the event stream never sends it, and half an answer is
         // the thing `10 runner inventory`'s rule exists to refuse.
         runner if PI_RUNNERS.iter().any(|(name, _)| *name == runner) => Control {
+            // pi prices its own messages from its own table. Real, and not
+            // what a ChatGPT subscription was billed.
+            cost: CostBasis::ListPrice,
             steer: true,
             quota: false,
             context: false,
@@ -1005,6 +1059,7 @@ pub fn control_of(runner: &str) -> Control {
         // as a manager, and ACP has no quota concept and no compaction boundary
         // at all - the trade is the protocol's, not the agent's.
         runner if ACP_RUNNERS.iter().any(|(name, _, _)| *name == runner) => Control {
+            cost: CostBasis::Silent,
             steer: true,
             quota: false,
             context: true,
@@ -1013,6 +1068,7 @@ pub fn control_of(runner: &str) -> Control {
         // Everything else is one-shot and silent about all four:
         // `codex exec`, `cursor-agent`, `goose`. They run, they answer, they exit.
         _ => Control {
+            cost: CostBasis::Silent,
             steer: false,
             quota: false,
             context: false,
@@ -1183,6 +1239,7 @@ pub fn start_worker(
                 &farseer_runner::pi::build_args(
                     options.model.as_deref(),
                     options.effort.as_deref(),
+                    &options.skills,
                 ),
                 cwd,
                 thresholds,

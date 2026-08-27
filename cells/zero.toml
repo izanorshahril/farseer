@@ -12,6 +12,11 @@ workspace_strategy = "worktree"
 
 [manager]
 runner = "pi"
+# Declared, never inherited. `32 harness capability floor` found every harness
+# discovering skills from the operator's home directory, so a run reached
+# whatever happened to be installed; farseer denies that discovery and passes
+# only what a cell names here. These two are test skills - see `skills/`.
+skills = ["farseer-echo", "farseer-record"]
 prompt = """
 You are the manager of cell zero.
 You plan, delegate to workers, and call other cells that appear in your roster.
@@ -27,6 +32,7 @@ yourself rather than delegate.
 kind = "worker"
 name = "coder"
 runner = "pi"
+skills = ["farseer-record"]
 
 [[roster]]
 kind = "worker"

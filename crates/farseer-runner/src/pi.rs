@@ -96,7 +96,11 @@ pub fn abort_frame() -> String {
 /// declaration. Absent means absent: a model farseer does not pass is a model pi
 /// chooses from its own config, which is the same deference `30 codex app
 /// server` settled for effort.
-pub fn build_args(model: Option<&str>, effort: Option<&str>) -> Vec<String> {
+pub fn build_args(
+    model: Option<&str>,
+    effort: Option<&str>,
+    skills: &[std::path::PathBuf],
+) -> Vec<String> {
     let mut args = vec![
         "--mode".to_string(),
         "rpc".to_string(),
@@ -122,6 +126,17 @@ pub fn build_args(model: Option<&str>, effort: Option<&str>) -> Vec<String> {
     if let Some(effort) = effort {
         args.push("--thinking".to_string());
         args.push(effort.to_string());
+    }
+    // `--no-skills` first, then the cell's own by path. Without the denial pi
+    // discovers whatever is installed under the operator's `~/.agents/skills`,
+    // which `32 harness capability floor` measured at 28 commands on this
+    // machine - instructions farseer never chose loading into a run
+    // `12 autonomy and deny list` is bounding. A cell gets what it declared and
+    // nothing else, and a cell that declared nothing runs bare.
+    args.push("--no-skills".to_string());
+    for skill in skills {
+        args.push("--skill".to_string());
+        args.push(skill.display().to_string());
     }
     args
 }
@@ -543,12 +558,29 @@ mod tests {
         assert_eq!(parse_line(line).unwrap(), vec![]);
     }
 
+    /// A cell gets the skills it declared and nothing the machine happens to
+    /// have installed - the denial is what makes the declaration mean anything.
+    #[test]
+    fn a_cell_gets_its_own_skills_and_never_the_machines() {
+        let bare = build_args(None, None, &[]);
+        assert!(bare.contains(&"--no-skills".to_string()));
+        assert!(!bare.contains(&"--skill".to_string()));
+
+        let declared = build_args(None, None, &[std::path::PathBuf::from("/repo/skills/echo")]);
+        let flat = declared.join(" ");
+        assert!(flat.contains("--no-skills"), "{flat}");
+        assert!(flat.contains("--skill /repo/skills/echo"), "{flat}");
+    }
+
     /// The tool that waits for a person is never on the argv of an unattended
     /// run, whatever else is. Asserted separately from the model pinning
     /// because it is not an option - it is the thing that stops a run hanging.
     #[test]
     fn an_unattended_run_can_never_reach_the_tool_that_waits_for_a_human() {
-        for args in [build_args(None, None), build_args(Some("m"), Some("low"))] {
+        for args in [
+            build_args(None, None, &[]),
+            build_args(Some("m"), Some("low"), &[]),
+        ] {
             let flat = args.join(" ");
             assert!(flat.contains("--exclude-tools ask_question"), "{flat}");
         }
@@ -557,11 +589,11 @@ mod tests {
     #[test]
     fn the_operator_pins_the_model_and_an_unpinned_one_stays_pis_own() {
         assert_eq!(
-            build_args(None, None),
-            ["--mode", "rpc", "--exclude-tools", "ask_question"]
+            build_args(None, None, &[]),
+            ["--mode", "rpc", "--exclude-tools", "ask_question", "--no-skills"]
         );
         assert_eq!(
-            build_args(Some("gpt-5.6-luna"), Some("low")),
+            build_args(Some("gpt-5.6-luna"), Some("low"), &[]),
             [
                 "--mode",
                 "rpc",
@@ -570,7 +602,8 @@ mod tests {
                 "--model",
                 "gpt-5.6-luna",
                 "--thinking",
-                "low"
+                "low",
+                "--no-skills"
             ]
         );
     }

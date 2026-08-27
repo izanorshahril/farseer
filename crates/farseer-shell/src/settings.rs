@@ -42,6 +42,14 @@ pub struct RunnerChoice {
     /// than its neighbour. Every runner stays choosable; the ones farseer holds
     /// loosely say so.
     pub cannot: Vec<&'static str>,
+    /// How to read this runner's cost figure, or `None` when it reports none.
+    ///
+    /// `27 quota accounting` refused a derived percentage where a reported one
+    /// existed; this is the same distinction for money. pi and omp price their
+    /// own messages from their own table, which is an API list price and **not**
+    /// what a subscription was billed - useful, and never the same number as
+    /// money that moved.
+    pub cost_basis: Option<&'static str>,
 }
 
 /// What farseer cannot do with this runner, worded as consequences rather than
@@ -61,6 +69,10 @@ fn cannot(runner: &str) -> Vec<&'static str> {
         (
             !control.compaction,
             "never says when it compacted, so a degraded answer looks like any other",
+        ),
+        (
+            control.cost == farseer_manager::CostBasis::ListPrice,
+            "prices its own answers at list, which is not what a subscription was billed",
         ),
     ]
     .into_iter()
@@ -158,6 +170,7 @@ pub fn runners() -> Vec<RunnerChoice> {
             let path = farseer_runner::resolve::resolve(executable);
             RunnerChoice {
                 cannot: cannot(name),
+                cost_basis: farseer_manager::control_of(name).cost.note(),
                 name: name.to_string(),
                 installed: path.is_some(),
                 path: path.map(|p| p.display().to_string()),
@@ -309,6 +322,20 @@ mod tests {
                 .all(|warning| warning.contains("steered")),
             "only steering is missing here: {:?}",
             codex_app_server.cannot
+        );
+
+        // The distinction `27 quota accounting` drew for percentages, drawn
+        // again for money: two runners report dollars and they do not mean the
+        // same thing.
+        let pi = offered
+            .iter()
+            .find(|choice| choice.name == "pi")
+            .expect("pi is offerable");
+        assert_eq!(pi.cost_basis, Some("at list price, not billed"));
+        assert!(
+            pi.cannot.iter().any(|w| w.contains("list")),
+            "{:?}",
+            pi.cannot
         );
     }
 

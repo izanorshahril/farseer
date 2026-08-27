@@ -276,6 +276,10 @@ impl AppState {
         Ok(orphans.len())
     }
 
+    pub(crate) fn repo_root(&self) -> &std::path::Path {
+        &self.repo_root
+    }
+
     pub fn runner_config(&self) -> &RunnerConfig {
         &self.runner_config
     }
@@ -691,6 +695,8 @@ fn manager_run_options(
         // and passed down rather than derived: the manager crate reads no
         // config, and an undeclared runner is its own account.
         account: Some(state.runner_config().account_for(&contract.runner)),
+                // The manager's own declared skills, resolved to directories.
+                skills: skill_paths(state, &cell.manager.skills)?,
                 // What the operator pinned, or nothing at all. `30 codex app
                 // server`: farseer passes a model or an effort only when a
                 // person wrote one down, so an unpinned runner keeps whatever
@@ -821,6 +827,10 @@ pub(crate) fn spawn_run(
             claude_mcp_config: None,
             claude_append_system_prompt: None,
             account: Some(state.runner_config().account_for(&contract.runner)),
+                // A run reached without a manager context - a rerun, or a
+                // direct worker - carries no declared skills rather than
+                // inheriting the cell manager's.
+                skills: Vec::new(),
                 // What the operator pinned, or nothing at all. `30 codex app
                 // server`: farseer passes a model or an effort only when a
                 // person wrote one down, so an unpinned runner keeps whatever
@@ -1392,6 +1402,40 @@ fn queued_facts(state: &Arc<AppState>, run_id: RunId) -> (Option<String>, Option
             .and_then(serde_json::Value::as_str)
             .map(str::to_string),
     )
+}
+
+/// Where a cell's skills live: `<repo>/skills/<name>/SKILL.md`.
+///
+/// One layout, not a search path. `32 harness capability floor` found every
+/// harness discovering skills from the operator's home directory, so a run got
+/// whatever happened to be installed there; a cell that names a skill should get
+/// **that** skill, from a place that is in the repository and reviewable.
+pub(crate) fn skill_dir(repo_root: &std::path::Path, name: &str) -> PathBuf {
+    repo_root.join("skills").join(name)
+}
+
+/// Resolve declared skill names to directories, refusing any that is not there.
+///
+/// Refused rather than skipped: a run that quietly drops a skill produces a
+/// worse answer for a reason nobody can see, and `13 harness build kit` is
+/// explicit that failing after the operator has committed is the bad direction.
+/// A name with a path separator in it is refused too - a skill is a name in the
+/// cell's own vocabulary, never a way to reach an arbitrary directory.
+fn skill_paths(state: &AppState, names: &[String]) -> ApiResult<Vec<PathBuf>> {
+    names
+        .iter()
+        .map(|name| {
+            if name.is_empty() || name.contains(['/', '\\']) || name.contains("..") {
+                return Err(ApiError::BadRequest("a skill is a name, not a path"));
+            }
+            let dir = skill_dir(&state.repo_root, name);
+            if dir.join("SKILL.md").is_file() {
+                Ok(dir)
+            } else {
+                Err(ApiError::NotFound("skill"))
+            }
+        })
+        .collect()
 }
 
 fn run_view(state: &Arc<AppState>, row: RunRow) -> RunView {

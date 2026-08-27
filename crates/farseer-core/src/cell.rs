@@ -26,6 +26,18 @@ pub struct Manager {
     pub runner: String,
     #[serde(default)]
     pub prompt: String,
+    /// Skills this manager runs with, by directory name under the cell file's
+    /// own `skills/` folder.
+    ///
+    /// Named here rather than inherited from the machine, which is the whole
+    /// point: `32 harness capability floor` found every harness discovering
+    /// skills from the operator's home directory, so a run reached whatever
+    /// happened to be installed and the cell had no say. A cell that says
+    /// nothing gets nothing, because a skill is **someone else's instructions
+    /// loading into a run `12 autonomy and deny list` is bounding**, and
+    /// inheriting those silently is the opposite of deciding autonomy up front.
+    #[serde(default)]
+    pub skills: Vec<String>,
 }
 
 /// What a cell may use.
@@ -43,6 +55,11 @@ pub enum RosterEntry {
         /// `23 prototype loose ends` makes this the per-callee cap, narrowed again by the caller's remaining task budget.
         #[serde(default)]
         max_budget: Budget,
+        /// Skills this worker runs with. Same rule as [`Manager::skills`]:
+        /// declared per roster entry, never inherited, because a reviewer and a
+        /// coder should not get the same instructions by accident.
+        #[serde(default)]
+        skills: Vec<String>,
     },
     /// A call that returns or errors. Declares its own irreversibility level,
     /// which policy then gates on, per `12 autonomy and deny list`.
