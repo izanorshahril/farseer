@@ -527,6 +527,7 @@ impl FarseerMcp {
                 manager_cell: Some(pinned_cell.clone()),
                 claude_mcp_config: None,
                 claude_append_system_prompt: None,
+                account: Some(self.state.runner_config().account_for(&contract.runner)),
             },
             Some(cancel_requested),
         );

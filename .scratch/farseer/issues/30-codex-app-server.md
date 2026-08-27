@@ -273,3 +273,38 @@ So the settings menu still offers every runner this build can launch, and each o
 `13 harness build kit` found the inventory is a **menu rather than a survey**. A menu that silently drops entries teaches the operator less than one that says why an entry is dimmer than its neighbour - and the missing capability is usually a property of the *face*, not the tool: `codex` and `codex-app-server` are one binary with four caveats and one.
 
 That is the same lesson `29 harness protocol` and `30 codex app server` each arrived at from their own direction, now visible in the surface rather than only in the tickets.
+
+
+## MVP, 2026-08-26: a manager, a runner and a quota widget, all on one subscription
+
+Cell zero's manager **and** its `coder` worker now run on `codex-app-server`, and the canvas shows the account's real windows while the manager is still alive:
+
+```
+allowed | codex-app-server | secondary | 1% used | resets in 121h 55m
+allowed | codex-app-server | primary   | 1% used | resets in 4h 4m
+```
+
+```
+you          Reply with exactly: farseer online.
+top manager  farseer online.
+
+CELL zero  RUNNER codex-app-server  CONFIGURED EFFORT xhigh
+SESSION 01a0433d  CONTEXT 27,436 / 258,400 (11%)  TOKENS 34,213  LAST RUN ok
+```
+
+### The gap this found, and it was structural
+
+The first attempt showed `{"windows":[]}` with a healthy run in flight. `observe_window` was only called **when a run finished**, out of `report.windows` - and a manager does not finish. It stays open for as long as the operator is talking to it, which is exactly the period they are spending.
+
+So a quota surface built on end-of-run reporting is empty during the only time it matters.
+
+Window observations are now appended **as they arrive**, in the read loop, the same correction `28 operator surface` already made for the context window: *a reading that only survives to the end of a run cannot show a window filling up while it fills.*
+
+Two things that made this safe rather than a duplicate path:
+
+- **The store's on-change guard makes it idempotent.** The end-of-run path still runs and is a no-op when nothing changed, so nothing had to be removed to add this.
+- **The account still comes from the operator.** `RunOptions` grew an `account`, filled by the API from runner config, because `27 quota accounting` declares accounts and never infers them - and `farseer-manager` reads no config. A window observed without one is **dropped rather than filed under a guess**, which is the same refusal the adapter makes when it leaves the field blank.
+
+### Still true and worth seeing in the surface
+
+`account` reads `codex-app-server` because nothing is declared in `runners.toml`. That is `27`'s deliberate default - an undeclared runner is its own account - and it is also the moment to declare one, since this machine's goose delegates through the same ChatGPT login: `goose-acp`, `codex` and `codex-app-server` are one subscription being counted as three.

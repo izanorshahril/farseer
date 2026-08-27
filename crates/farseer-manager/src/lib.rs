@@ -55,6 +55,21 @@ use farseer_store::{RunRow, Store, StoreError};
 pub trait RunSink {
     fn append(&self, event: &NewEvent) -> Result<Seq, StoreError>;
     fn upsert_run(&self, row: &RunRow) -> Result<(), StoreError>;
+    /// Append a window transition, per `27 quota accounting`'s on-change rule.
+    ///
+    /// Here rather than only at the end of a run because **a window is a fact
+    /// about the machine, not about the run**. A manager stays open for as long
+    /// as the operator is talking to it, and a quota surface that waits for the
+    /// run to finish shows nothing during exactly the period the operator is
+    /// spending. Same correction `28 operator surface` already made for the
+    /// context window.
+    fn observe_window(
+        &self,
+        cell_id: &farseer_core::CellId,
+        run_id: farseer_core::RunId,
+        observation: &farseer_core::WindowObservation,
+        ts: i64,
+    ) -> Result<bool, StoreError>;
 }
 
 impl RunSink for Store {
@@ -64,6 +79,16 @@ impl RunSink for Store {
 
     fn upsert_run(&self, row: &RunRow) -> Result<(), StoreError> {
         Store::upsert_run(self, row)
+    }
+
+    fn observe_window(
+        &self,
+        cell_id: &farseer_core::CellId,
+        run_id: farseer_core::RunId,
+        observation: &farseer_core::WindowObservation,
+        ts: i64,
+    ) -> Result<bool, StoreError> {
+        Store::observe_window(self, cell_id, run_id, observation, ts)
     }
 }
 
@@ -165,6 +190,14 @@ pub struct RunOptions {
     pub claude_mcp_config: Option<PathBuf>,
     /// Manager identity and roster guidance, separate from the operator's goal.
     pub claude_append_system_prompt: Option<String>,
+    /// Which subscription this run spends, as the **operator declared it** in
+    /// runner config.
+    ///
+    /// Passed in rather than derived here: `27 quota accounting` is explicit
+    /// that the account is declared and never inferred, and this crate has no
+    /// business reading config. Absent means the caller did not say, and a
+    /// window observed without one is dropped rather than filed under a guess.
+    pub account: Option<String>,
 }
 
 impl Default for RunOptions {
@@ -175,6 +208,7 @@ impl Default for RunOptions {
             manager_cell: None,
             claude_mcp_config: None,
             claude_append_system_prompt: None,
+            account: None,
         }
     }
 }
@@ -519,6 +553,7 @@ impl StartedWorker {
         contract: &WorkerContract,
         progress_actor: Actor,
         mut now_ms: impl FnMut() -> i64,
+        account: Option<&str>,
     ) -> Result<RunReport, ManagerError> {
         let mut report = None;
         let mut output = None;
@@ -527,6 +562,7 @@ impl StartedWorker {
         let mut chunks = String::new();
         let mut window = None;
         let mut windows: Vec<farseer_core::WindowObservation> = Vec::new();
+        let account = account.map(str::to_string);
         let mut session: Option<farseer_runner::claude_code::SessionInfo> = None;
         let mut store_err = None;
         let cancel_on_store_failure = self.proc.cancel_token();
@@ -662,7 +698,38 @@ impl StartedWorker {
                     // notification restates every window, so keeping them all
                     // would be the repetition `27 quota accounting` section 4
                     // built append-on-change to avoid.
-                    RunnerSignal::Windows(reported) => windows = reported,
+                    RunnerSignal::Windows(reported) => {
+                        // Recorded now rather than at the end of the run. A
+                        // manager stays open for as long as the operator is
+                        // talking to it, so waiting would leave the quota
+                        // surface empty during exactly the period being spent.
+                        //
+                        // The store's own on-change guard makes this idempotent,
+                        // which is what lets the end-of-run path stay as it is.
+                        for observation in &reported {
+                            let Some(account) = account.as_ref() else {
+                                // Nobody said which subscription this is. `27`
+                                // declares accounts and never infers them, so an
+                                // unattributed window is dropped rather than
+                                // filed under a guess.
+                                break;
+                            };
+                            let mut observation = observation.clone();
+                            observation.account = account.clone();
+                            observation.runner = contract.runner.clone();
+                            if let Err(e) = sink.observe_window(
+                                &contract.cell_id,
+                                contract.run_id,
+                                &observation,
+                                now_ms(),
+                            ) {
+                                store_err = Some(e);
+                                cancel_on_store_failure.cancel();
+                                return;
+                            }
+                        }
+                        windows = reported;
+                    }
                     // Straight into the record rather than onto the report:
                     // `28 operator surface`'s meta strip reads the event stream,
                     // and a reading that only survives to the end of the run
@@ -1056,7 +1123,13 @@ pub fn run_worker(
             RunRole::Manager => Actor::Manager,
             RunRole::Worker => Actor::Worker,
         };
-        started.run_to_completion(sink, contract, progress_actor, &mut now_ms)
+        started.run_to_completion(
+            sink,
+            contract,
+            progress_actor,
+            &mut now_ms,
+            options.account.as_deref(),
+        )
     });
 
     let finished_ts = now_ms();
@@ -1249,7 +1322,7 @@ mod tests {
         ]);
 
         let report = started
-            .run_to_completion(&store, &contract, Actor::Worker, || 1)
+            .run_to_completion(&store, &contract, Actor::Worker, || 1, None)
             .unwrap();
 
         assert_eq!(report.outcome, Outcome::Ok);
@@ -1278,7 +1351,7 @@ mod tests {
         ]);
 
         let report = started
-            .run_to_completion(&store, &contract, Actor::Worker, || 1)
+            .run_to_completion(&store, &contract, Actor::Worker, || 1, None)
             .unwrap();
         assert_eq!(report.outcome, Outcome::Ok);
         assert!(
@@ -1512,7 +1585,7 @@ mod tests {
             token.cancel();
         });
 
-        let result = started.run_to_completion(&store, &contract, Actor::Worker, || 1);
+        let result = started.run_to_completion(&store, &contract, Actor::Worker, || 1, None);
         let Err(ManagerError::Cancelled(report)) = result else {
             panic!("expected cancellation with the completed turn report, got {result:?}");
         };
@@ -1551,7 +1624,7 @@ mod tests {
         // `05 run state model`: cancelled is never failed. Without the result line a crash
         // and a deliberate cancel look identical on the wire; `Cancelled`
         // proves the distinction survived rather than collapsing to `NoResult`.
-        let result = started.run_to_completion(&store, &contract, Actor::Worker, || 1);
+        let result = started.run_to_completion(&store, &contract, Actor::Worker, || 1, None);
         let Err(ManagerError::Cancelled(report)) = result else {
             panic!("expected cancellation with an unknown report, got {result:?}");
         };
@@ -1682,7 +1755,7 @@ mod tests {
         let handle = started.liveness_handle();
 
         started
-            .run_to_completion(&store, &contract, Actor::Worker, || 1)
+            .run_to_completion(&store, &contract, Actor::Worker, || 1, None)
             .unwrap();
 
         assert_eq!(

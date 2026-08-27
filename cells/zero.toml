@@ -11,7 +11,7 @@ version = "1"
 workspace_strategy = "worktree"
 
 [manager]
-runner = "codex"
+runner = "codex-app-server"
 prompt = """
 You are the manager of cell zero.
 You plan, delegate to workers, and call other cells that appear in your roster.
@@ -26,7 +26,7 @@ yourself rather than delegate.
 [[roster]]
 kind = "worker"
 name = "coder"
-runner = "codex"
+runner = "codex-app-server"
 
 [[roster]]
 kind = "worker"

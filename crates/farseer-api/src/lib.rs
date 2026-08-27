@@ -304,6 +304,17 @@ impl RunSink for AppState {
     fn upsert_run(&self, row: &RunRow) -> Result<(), StoreError> {
         self.store().upsert_run(row)
     }
+
+    fn observe_window(
+        &self,
+        cell_id: &CellId,
+        run_id: RunId,
+        observation: &farseer_core::WindowObservation,
+        ts: i64,
+    ) -> Result<bool, StoreError> {
+        self.store()
+            .observe_window(cell_id, run_id, observation, ts)
+    }
 }
 
 #[derive(Debug, Default, Serialize)]
@@ -645,6 +656,10 @@ fn manager_run_options(
         manager_cell: Some(cell.clone()),
         claude_mcp_config: None,
         claude_append_system_prompt: None,
+        // Declared by the operator in runner config, per `27 quota accounting`,
+        // and passed down rather than derived: the manager crate reads no
+        // config, and an undeclared runner is its own account.
+        account: Some(state.runner_config().account_for(&contract.runner)),
     };
     if contract.runner != "claude-code" {
         return Ok(options);
@@ -768,6 +783,7 @@ pub(crate) fn spawn_run(
             manager_cell: Some(pinned_cell),
             claude_mcp_config: None,
             claude_append_system_prompt: None,
+            account: Some(state.runner_config().account_for(&contract.runner)),
         })
     };
     let options = match options {
