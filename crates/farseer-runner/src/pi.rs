@@ -100,6 +100,7 @@ pub fn build_args(
     model: Option<&str>,
     effort: Option<&str>,
     skills: &[std::path::PathBuf],
+    append_system_prompt: Option<&str>,
 ) -> Vec<String> {
     let mut args = vec![
         "--mode".to_string(),
@@ -137,6 +138,14 @@ pub fn build_args(
     for skill in skills {
         args.push("--skill".to_string());
         args.push(skill.display().to_string());
+    }
+    // Who this manager is and what its roster contains, per `31 manager
+    // delegation reach`. Appended rather than replacing: pi's own coding-agent
+    // prompt is why the runner is worth driving, and `13 harness build kit`
+    // says farseer configures a harness rather than reimplementing one.
+    if let Some(prompt) = append_system_prompt.filter(|text| !text.trim().is_empty()) {
+        args.push("--append-system-prompt".to_string());
+        args.push(prompt.to_string());
     }
     args
 }
@@ -558,15 +567,31 @@ mod tests {
         assert_eq!(parse_line(line).unwrap(), vec![]);
     }
 
+    /// `31 manager delegation reach`: a manager that does not know its roster
+    /// cannot say it has one, and a manager asked to delegate with no way to do
+    /// so improvises. The prompt is how it finds out.
+    #[test]
+    fn a_manager_is_told_who_it_is_when_the_caller_says_so() {
+        assert!(!build_args(None, None, &[], None).contains(&"--append-system-prompt".to_string()));
+
+        let args = build_args(None, None, &[], Some("You are the manager for cell zero."));
+        let at = args.iter().position(|a| a == "--append-system-prompt").expect("passed");
+        assert_eq!(args[at + 1], "You are the manager for cell zero.");
+
+        // Whitespace is not an identity. An empty prompt sends no flag rather
+        // than an empty one, which pi would take literally.
+        assert!(!build_args(None, None, &[], Some("  ")).contains(&"--append-system-prompt".to_string()));
+    }
+
     /// A cell gets the skills it declared and nothing the machine happens to
     /// have installed - the denial is what makes the declaration mean anything.
     #[test]
     fn a_cell_gets_its_own_skills_and_never_the_machines() {
-        let bare = build_args(None, None, &[]);
+        let bare = build_args(None, None, &[], None);
         assert!(bare.contains(&"--no-skills".to_string()));
         assert!(!bare.contains(&"--skill".to_string()));
 
-        let declared = build_args(None, None, &[std::path::PathBuf::from("/repo/skills/echo")]);
+        let declared = build_args(None, None, &[std::path::PathBuf::from("/repo/skills/echo")], None);
         let flat = declared.join(" ");
         assert!(flat.contains("--no-skills"), "{flat}");
         assert!(flat.contains("--skill /repo/skills/echo"), "{flat}");
@@ -578,8 +603,8 @@ mod tests {
     #[test]
     fn an_unattended_run_can_never_reach_the_tool_that_waits_for_a_human() {
         for args in [
-            build_args(None, None, &[]),
-            build_args(Some("m"), Some("low"), &[]),
+            build_args(None, None, &[], None),
+            build_args(Some("m"), Some("low"), &[], None),
         ] {
             let flat = args.join(" ");
             assert!(flat.contains("--exclude-tools ask_question"), "{flat}");
@@ -589,11 +614,11 @@ mod tests {
     #[test]
     fn the_operator_pins_the_model_and_an_unpinned_one_stays_pis_own() {
         assert_eq!(
-            build_args(None, None, &[]),
+            build_args(None, None, &[], None),
             ["--mode", "rpc", "--exclude-tools", "ask_question", "--no-skills"]
         );
         assert_eq!(
-            build_args(Some("gpt-5.6-luna"), Some("low"), &[]),
+            build_args(Some("gpt-5.6-luna"), Some("low"), &[], None),
             [
                 "--mode",
                 "rpc",

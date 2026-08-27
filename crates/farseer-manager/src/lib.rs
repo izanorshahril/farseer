@@ -189,7 +189,14 @@ pub struct RunOptions {
     /// Manager-only Claude Code MCP config generated after the API binds.
     pub claude_mcp_config: Option<PathBuf>,
     /// Manager identity and roster guidance, separate from the operator's goal.
-    pub claude_append_system_prompt: Option<String>,
+    ///
+    /// Not Claude's any more. `31 manager delegation reach` found this was
+    /// built for one runner and skipped for the rest, so a manager on any other
+    /// runner never learned it had a roster - and one asked to delegate did the
+    /// work itself and described it as delegation. Every runner that has
+    /// somewhere to put it now gets it: pi and omp on the argv, the Codex
+    /// app-server as `developerInstructions`, Claude Code as before.
+    pub append_system_prompt: Option<String>,
     /// Which subscription this run spends, as the **operator declared it** in
     /// runner config.
     ///
@@ -226,7 +233,7 @@ impl Default for RunOptions {
             role: RunRole::Worker,
             manager_cell: None,
             claude_mcp_config: None,
-            claude_append_system_prompt: None,
+            append_system_prompt: None,
             account: None,
             model: None,
             effort: None,
@@ -354,6 +361,9 @@ pub struct StartedWorker {
     /// own configuration, per `30 codex app server`.
     pinned_model: Option<String>,
     pinned_effort: Option<String>,
+    /// Manager identity and roster, for the protocols that carry it in a frame
+    /// rather than on the argv. See [`RunOptions::append_system_prompt`].
+    identity: Option<String>,
 }
 
 /// A cloneable handle that writes a steer message into a run's live process,
@@ -447,6 +457,7 @@ impl StartedWorker {
             codex_thread: None,
             pinned_model: None,
             pinned_effort: None,
+            identity: None,
         })
     }
 
@@ -574,6 +585,7 @@ impl StartedWorker {
                     self.acp_next_id.load(Ordering::Relaxed) - 1,
                 );
                 let mut discard = |_: Result<Vec<RunnerSignal>, ParseError>| {};
+                let identity = self.identity.clone();
                 let opened = farseer_runner::codex_app_server::handshake(
                     &mut self.proc,
                     cwd,
@@ -582,6 +594,7 @@ impl StartedWorker {
                     // a write on this machine, so it is a request and the
                     // worktree is still the guarantee.
                     CODEX_SANDBOX,
+                    identity.as_deref(),
                     &mut ids,
                     &mut discard,
                 )?;
@@ -1129,7 +1142,7 @@ pub fn start_worker(
                     farseer_runner::invocation::ClaudeCodeLaunch {
                         live_input: options.role == RunRole::Manager,
                         mcp_config: options.claude_mcp_config.as_deref(),
-                        append_system_prompt: options.claude_append_system_prompt.as_deref(),
+                        append_system_prompt: options.append_system_prompt.as_deref(),
                         edits_granted: options
                             .manager_cell
                             .as_ref()
@@ -1240,6 +1253,7 @@ pub fn start_worker(
                     options.model.as_deref(),
                     options.effort.as_deref(),
                     &options.skills,
+                    options.append_system_prompt.as_deref(),
                 ),
                 cwd,
                 thresholds,
@@ -1279,6 +1293,7 @@ pub fn start_worker(
     // operator declared it once.
     started.pinned_model = options.model.clone();
     started.pinned_effort = options.effort.clone();
+    started.identity = options.append_system_prompt.clone();
     started.bootstrap(&contract.goal, cwd)?;
     Ok(started)
 }
@@ -2233,6 +2248,88 @@ mod tests {
         // a fact this test should notice.
         assert!(report.tokens.is_some_and(|tokens| tokens > 0), "{report:?}");
         assert_eq!(report.cost_usd_micros, None, "{report:?}");
+    }
+
+    /// Live: what the runner wrote is what the record holds, byte for byte.
+    ///
+    /// Written after a false alarm worth keeping the guard from: a manager's
+    /// typographic apostrophe *appeared* to reach the record double-encoded, and
+    /// the corruption turned out to be in the shell one-liner doing the
+    /// checking - `curl | python` decodes stdin as cp1252 on Windows. farseer
+    /// was correct throughout.
+    ///
+    /// The test stays because the failure it was chasing is real elsewhere and
+    /// silent when it happens: a record that mangles what a runner said cannot
+    /// be trusted to quote it, and both ends render as *something* in a
+    /// terminal. Two runner families are covered so a regression names its own
+    /// side of the spawn - pi is bun, the Codex app-server is a Rust binary.
+    ///
+    /// It is also a standing reminder that a verification tool is part of the
+    /// system under test.
+    ///
+    /// Run with: `cargo test -p farseer-manager text_reaches -- --ignored --nocapture`
+    #[test]
+    #[ignore = "spawns real runners and spends a subscription"]
+    fn text_reaches_the_record_as_the_runner_wrote_it() {
+        for (runner, model) in [
+            ("pi", Some("openai-codex/gpt-5.6-luna")),
+            ("codex-app-server", None),
+        ] {
+            let store = Store::open_in_memory().unwrap();
+            let spec = WorkerContractSpec {
+                run_id: RunId::new(),
+                task_id: TaskId::new(),
+                cell_id: CellId::new("zero"),
+                goal: "Reply with exactly this line and nothing else, using a real typographic \
+                       apostrophe (U+2019): it can{APOS}t work"
+                    .into(),
+                workspace: WorkspaceStrategy::Worktree,
+                runner: runner.into(),
+                tool_grants: vec![],
+                autonomy_ceiling: Irreversibility::Reversible,
+                budget: Budget::default(),
+                definition_of_done: String::new(),
+            };
+            let run_id = spec.run_id;
+            let contract = WorkerContract::seal(spec);
+            let mut tick = 100i64;
+            let report = run_worker(
+                &store,
+                &contract,
+                &std::env::current_dir().unwrap(),
+                LivenessThresholds::default(),
+                &RunOptions {
+                    model: model.map(str::to_string),
+                    effort: Some("low".into()),
+                    ..RunOptions::default()
+                },
+                || {
+                    tick += 1;
+                    tick
+                },
+                |_, _, _| {},
+            )
+            .expect("the run completes");
+            assert_eq!(report.outcome, Outcome::Ok, "{runner}: {report:?}");
+
+            let events = store
+                .scan(0, 200, &farseer_store::ScanFilter::run(run_id))
+                .unwrap();
+            let answer = events
+                .iter()
+                .find(|e| e.kind.as_str() == EventKind::MANAGER_ANSWERED)
+                .and_then(|e| e.payload.get("text"))
+                .and_then(|t| t.as_str())
+                .unwrap_or_default()
+                .to_string();
+            eprintln!("{runner}: {:?}", answer.as_bytes());
+            // The first character of the cp1252 misreading of any UTF-8
+            // punctuation. Cheap, and specific enough not to fire on prose.
+            assert!(
+                !answer.contains('\u{e2}'),
+                "{runner} reached the record double-encoded - see `34 record mojibake`: {answer:?}"
+            );
+        }
     }
 
     fn one_pi_run(runner: &str, model: Option<&str>, effort: Option<&str>) -> RunReport {

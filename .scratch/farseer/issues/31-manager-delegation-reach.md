@@ -71,3 +71,38 @@ Whether `12 autonomy and deny list` should have an opinion about a runner loadin
 ## Correction to `28 operator surface`
 
 `28`'s design review said the record cannot distinguish absent-because-unreportable from absent-because-nothing-happened, and treated it as a display problem. It is not only a display problem. When the missing thing is a **capability**, the gap does not stay empty - an agent fills it. The Runners widget added on 2026-08-27 shows what farseer *cannot* do with each live process for exactly this reason, and that is a mitigation rather than the fix.
+
+
+---
+
+## Half fixed, 2026-08-27
+
+The **prompt** half is done and proven. The **reach** half is not.
+
+`manager_run_options` no longer returns early for every runner but Claude Code. Every manager is now told which cell it manages and exactly what its roster names, on whatever channel its runner has for it: pi and omp take `--append-system-prompt`, the Codex app-server takes `developerInstructions` on `thread/start`, Claude Code is unchanged. ACP has no such field and still gets nothing, which is now the only silent case.
+
+A manager that **cannot** reach its roster is told so, in the same breath as being told the roster exists:
+
+> You CANNOT reach any of them: farseer has no delegation channel for this runner ... Never state or imply that you delegated, spawned, dispatched or handed off anything - you did not, and farseer records what actually ran.
+
+That last sentence is the whole fix. The same prompt that produced the fabricated delegation this ticket opened on -
+
+> spawn the coder worker with luna medium, let it wait 10 sec then report
+
+now produces:
+
+> I can't reach or spawn the `coder` worker from this runner, so no worker was started or delayed.
+
+The credentials are withheld too: a manager with no MCP face is not handed a `manager_token` for a face it cannot call, which removes the other thing it could have improvised around.
+
+### What this did not fix
+
+A pi manager still cannot delegate. It now **says so** instead of pretending, which converts a false record into an honest limit - but the cell's roster remains unreachable for every runner but Claude Code.
+
+The route for pi and omp is known and not yet taken: pi has no MCP client, but its extension API has `defineTool`/`registerTool`, so farseer can ship a small extension registering `delegate_to_worker` and `delegate_to_cell` against the runtime's own HTTP face. The Codex app-server route is different again - `thread/start` takes a free-form `config`, and Codex's streamable-HTTP MCP config wants `url` plus `bearer_token_env_var`, which means the spawn path must set an environment variable it does not set today.
+
+Two runners, two mechanisms, neither of them MCP-over-stdio. That is `29 harness protocol`'s finding arriving one level up: **the thing farseer wants is universal and the way to ask for it is not.**
+
+### Question 3 answered
+
+*Should a cell refuse a manager runner that cannot reach its roster?* **No.** Building this made the reason clear: refusing would have removed the operator's ability to run cell zero on pi at all, which is the configuration they asked for. The roster is aspirational for that runner and the manager is told exactly that. `13 harness build kit`'s menu rule holds - everyone is welcome, with a notice.

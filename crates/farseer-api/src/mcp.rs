@@ -555,7 +555,7 @@ impl FarseerMcp {
                 role: farseer_manager::RunRole::Worker,
                 manager_cell: Some(pinned_cell.clone()),
                 claude_mcp_config: None,
-                claude_append_system_prompt: None,
+                append_system_prompt: None,
                 account: Some(self.state.runner_config().account_for(&contract.runner)),
                 skills: skill_dirs.to_vec(),
                 // What the operator pinned, or nothing at all. `30 codex app

@@ -69,12 +69,25 @@ pub fn initialized_frame() -> String {
 /// and `10 runner inventory` measured that Codex's own `--sandbox read-only`
 /// did not prevent a write on this machine - so this is a request, not a
 /// guarantee, and the guarantee remains the worktree.
-pub fn thread_start_frame(id: i64, cwd: &str, sandbox: &str) -> String {
+pub fn thread_start_frame(
+    id: i64,
+    cwd: &str,
+    sandbox: &str,
+    developer_instructions: Option<&str>,
+) -> String {
+    let mut params = json!({ "cwd": cwd, "sandbox": sandbox });
+    // Who this manager is and what its roster contains, per `31 manager
+    // delegation reach`. `developerInstructions` rather than `baseInstructions`:
+    // the base is Codex's own agent prompt, and replacing it would be farseer
+    // deciding how Codex works instead of telling it what it is working on.
+    if let Some(instructions) = developer_instructions.filter(|text| !text.trim().is_empty()) {
+        params["developerInstructions"] = json!(instructions);
+    }
     json!({
         "jsonrpc": "2.0",
         "id": id,
         "method": "thread/start",
-        "params": { "cwd": cwd, "sandbox": sandbox }
+        "params": params
     })
     .to_string()
 }
@@ -132,6 +145,7 @@ pub fn handshake<F>(
     process: &mut crate::spawn::SupervisedProcess,
     cwd: &std::path::Path,
     sandbox: &str,
+    developer_instructions: Option<&str>,
     ids: &mut crate::jsonrpc::Ids,
     on_line: &mut F,
 ) -> Result<ThreadOpened, crate::jsonrpc::RpcError>
@@ -154,7 +168,7 @@ where
     let id = ids.next();
     let answer = request(
         process,
-        &thread_start_frame(id, &cwd.to_string_lossy(), sandbox),
+        &thread_start_frame(id, &cwd.to_string_lossy(), sandbox, developer_instructions),
         id,
         "thread/start",
         parse_line,

@@ -690,7 +690,7 @@ fn manager_run_options(
         role: RunRole::Manager,
         manager_cell: Some(cell.clone()),
         claude_mcp_config: None,
-        claude_append_system_prompt: None,
+        append_system_prompt: None,
         // Declared by the operator in runner config, per `27 quota accounting`,
         // and passed down rather than derived: the manager crate reads no
         // config, and an undeclared runner is its own account.
@@ -704,30 +704,8 @@ fn manager_run_options(
                 model: state.runner_config().launch_of(&contract.runner).0.map(str::to_string),
                 effort: state.runner_config().launch_of(&contract.runner).1.map(str::to_string),
     };
-    if contract.runner != "claude-code" {
-        return Ok(options);
-    }
-    let Some(endpoint) = state.mcp_endpoint.get() else {
-        return Ok(options);
-    };
-
-    let config_path = security::manager_config_path(&contract.run_id.to_string());
-    let config = serde_json::json!({
-        "mcpServers": {
-            "farseer": {
-                "type": "http",
-                "url": endpoint,
-                "headers": {
-                    "Authorization": format!("Bearer {}", manager_token.as_str()),
-                },
-            },
-        },
-    });
-    let bytes = serde_json::to_vec_pretty(&config)
-        .map_err(|e| ApiError::Workspace(format!("serializing manager MCP config: {e}")))?;
-    security::write_user_only_file(&config_path, &bytes)
-        .map_err(|e| ApiError::Workspace(format!("writing manager MCP config: {e}")))?;
-
+    // `22 cell addressing` section 3: the roster is the grant, so the prompt
+    // names exactly what is callable. A manager that has to guess will guess.
     let workers = cell
         .roster
         .iter()
@@ -737,8 +715,6 @@ fn manager_run_options(
         })
         .collect::<Vec<_>>()
         .join(", ");
-    // `22 cell addressing` section 3: the roster is the grant, so the prompt
-    // names exactly what is callable. A manager that has to guess will guess.
     let callable_cells = cell
         .roster
         .iter()
@@ -748,32 +724,84 @@ fn manager_run_options(
         })
         .collect::<Vec<_>>()
         .join(", ");
-    let mut prompt = format!(
-        "You are the manager for farseer cell `{}`. Your manager_run_id is `{}` and your \
-         manager_token is `{}`. The roster workers available to delegate to are: {}. \
-         The cells you may call are: {}. \
-         Pass both credentials to every farseer MCP tool call. When you delegate, name a \
-         roster worker and give it a precise sub-goal, then relay the returned result. \
-         Calling a cell is different: delegate_to_cell is fire-and-forget, it returns a \
-         call_id rather than an answer, and the callee owns its own workspace, runner and \
-         tools. Anything not named above is not callable, and asking again will not make \
-         it callable. The task remains yours to own.",
-        cell.cell_id,
-        contract.run_id,
-        manager_token.as_str(),
-        if workers.is_empty() { "none" } else { &workers },
-        if callable_cells.is_empty() {
-            "none"
-        } else {
-            &callable_cells
-        },
-    );
+    let workers = if workers.is_empty() { "none" } else { &workers };
+    let callable_cells = if callable_cells.is_empty() {
+        "none"
+    } else {
+        &callable_cells
+    };
+
+    // Whether this run can actually reach the roster, as opposed to merely
+    // having one. Today only Claude Code carries farseer's MCP face; the rest
+    // are told their roster exists and that they cannot call it, which is the
+    // whole point of `31 manager delegation reach`.
+    let mcp_endpoint = state.mcp_endpoint.get().filter(|_| contract.runner == "claude-code");
+
+    let mut prompt = match mcp_endpoint {
+        Some(_) => format!(
+            "You are the manager for farseer cell `{}`. Your manager_run_id is `{}` and your \
+             manager_token is `{}`. The roster workers available to delegate to are: {}. \
+             The cells you may call are: {}. \
+             Pass both credentials to every farseer MCP tool call. When you delegate, name a \
+             roster worker and give it a precise sub-goal, then relay the returned result. \
+             Calling a cell is different: delegate_to_cell is fire-and-forget, it returns a \
+             call_id rather than an answer, and the callee owns its own workspace, runner and \
+             tools. Anything not named above is not callable, and asking again will not make \
+             it callable. The task remains yours to own.",
+            cell.cell_id,
+            contract.run_id,
+            manager_token.as_str(),
+            workers,
+            callable_cells,
+        ),
+        // The honest limit, stated in the one place the manager will read it.
+        //
+        // `31 manager delegation reach` records what the silence cost: a
+        // manager asked to spawn a sub-agent ran a command itself and reported
+        // the wait as a delegation, because an agent asked to delegate with no
+        // delegation tool will do the nearest available thing and describe it
+        // as compliance. The last sentence is the one that matters - it is
+        // cheaper to be told than to have the record hold a false claim about
+        // farseer's own execution.
+        None => format!(
+            "You are the manager for farseer cell `{}`, running on the `{}` runner. \
+             This cell's roster names these workers: {}. It names these callable cells: {}. \
+             You CANNOT reach any of them: farseer has no delegation channel for this runner, \
+             so there is no tool you can call to hand work to a worker or to another cell, and \
+             none will appear during this run. \
+             Do the work yourself, within this workspace. \
+             If a task genuinely requires a worker you cannot reach, say so plainly and stop. \
+             Never state or imply that you delegated, spawned, dispatched or handed off \
+             anything - you did not, and farseer records what actually ran.",
+            cell.cell_id, contract.runner, workers, callable_cells,
+        ),
+    };
     if !cell.manager.prompt.trim().is_empty() {
         prompt.push_str("\n\nCell manager instructions:\n");
         prompt.push_str(&cell.manager.prompt);
     }
-    options.claude_mcp_config = Some(config_path);
-    options.claude_append_system_prompt = Some(prompt);
+    options.append_system_prompt = Some(prompt);
+
+    // The MCP config is the reach, and only Claude Code has it today.
+    if let Some(endpoint) = mcp_endpoint {
+        let config_path = security::manager_config_path(&contract.run_id.to_string());
+        let config = serde_json::json!({
+            "mcpServers": {
+                "farseer": {
+                    "type": "http",
+                    "url": endpoint,
+                    "headers": {
+                        "Authorization": format!("Bearer {}", manager_token.as_str()),
+                    },
+                },
+            },
+        });
+        let bytes = serde_json::to_vec_pretty(&config)
+            .map_err(|e| ApiError::Workspace(format!("serializing manager MCP config: {e}")))?;
+        security::write_user_only_file(&config_path, &bytes)
+            .map_err(|e| ApiError::Workspace(format!("writing manager MCP config: {e}")))?;
+        options.claude_mcp_config = Some(config_path);
+    }
     Ok(options)
 }
 
@@ -825,7 +853,7 @@ pub(crate) fn spawn_run(
             role,
             manager_cell: Some(pinned_cell),
             claude_mcp_config: None,
-            claude_append_system_prompt: None,
+            append_system_prompt: None,
             account: Some(state.runner_config().account_for(&contract.runner)),
                 // A run reached without a manager context - a rerun, or a
                 // direct worker - carries no declared skills rather than
@@ -3753,5 +3781,76 @@ account = "anthropic-max"
 
         let (_, capped) = h.get("/v1/runs?limit=1").await;
         assert_eq!(capped.as_array().unwrap().len(), 1);
+    }
+
+
+    fn cell_with(runner: &str) -> CellDefinition {
+        farseer_core::CellDefinition::load(&format!(
+            r#"
+cell_id = "zero"
+name = "Zero"
+description = "d"
+version = "1"
+workspace_strategy = "worktree"
+
+[manager]
+runner = "{runner}"
+
+[[roster]]
+kind = "worker"
+name = "coder"
+runner = "{runner}"
+"#
+        ))
+        .expect("a valid cell")
+        .0
+    }
+
+    fn prompt_for(runner: &str) -> String {
+        let h = harness();
+        let spec = WorkerContractSpec {
+            run_id: RunId::new(),
+            task_id: farseer_core::TaskId::new(),
+            cell_id: CellId::new("zero"),
+            goal: "g".into(),
+            workspace: farseer_core::WorkspaceStrategy::Worktree,
+            runner: runner.into(),
+            tool_grants: vec![],
+            autonomy_ceiling: farseer_core::Irreversibility::Reversible,
+            budget: farseer_core::Budget::default(),
+            definition_of_done: String::new(),
+        };
+        let contract = WorkerContract::seal(spec);
+        let options = manager_run_options(
+            &h.state,
+            &contract,
+            &cell_with(runner),
+            &RuntimeToken::generate(),
+        )
+        .expect("options build");
+        options.append_system_prompt.expect("every manager is told who it is")
+    }
+
+    /// `31 manager delegation reach`: this used to return early for every
+    /// runner but Claude Code, so a pi manager never learned it had a roster.
+    #[test]
+    fn a_manager_on_any_runner_is_told_which_cell_it_manages() {
+        for runner in ["pi", "omp", "codex-app-server", "goose-acp"] {
+            let prompt = prompt_for(runner);
+            assert!(prompt.contains("cell `zero`"), "{runner}: {prompt}");
+            assert!(prompt.contains("coder"), "{runner}: {prompt}");
+        }
+    }
+
+    /// The sentence that exists because a manager fabricated a delegation.
+    /// A roster it cannot reach must be named **and** disclaimed, or the model
+    /// does the nearest available thing and calls it compliance.
+    #[test]
+    fn a_manager_that_cannot_delegate_is_told_so_and_told_not_to_claim_it_did() {
+        let prompt = prompt_for("pi");
+        assert!(prompt.contains("CANNOT reach"), "{prompt}");
+        assert!(prompt.contains("Never state or imply that you delegated"), "{prompt}");
+        // And it is not handed credentials for a face it cannot call.
+        assert!(!prompt.contains("manager_token"), "{prompt}");
     }
 }
