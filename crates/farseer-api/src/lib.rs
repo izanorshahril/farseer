@@ -763,7 +763,7 @@ fn manager_run_options(
         // config, and an undeclared runner is its own account.
         account: Some(state.runner_config().account_for(&contract.runner)),
                 // The manager's own declared skills, resolved to directories.
-                skills: skill_paths(state, &cell.manager.skills)?,
+                skills: skill_paths(state, &contract.runner, &cell.manager.skills)?,
                 // What the operator pinned, or nothing at all. `30 codex app
                 // server`: farseer passes a model or an effort only when a
                 // person wrote one down, so an unpinned runner keeps whatever
@@ -1602,7 +1602,24 @@ pub(crate) fn skill_dir(repo_root: &std::path::Path, name: &str) -> PathBuf {
 /// explicit that failing after the operator has committed is the bad direction.
 /// A name with a path separator in it is refused too - a skill is a name in the
 /// cell's own vocabulary, never a way to reach an arbitrary directory.
-fn skill_paths(state: &AppState, names: &[String]) -> ApiResult<Vec<PathBuf>> {
+/// Resolve declared skill names to directories, for a runner that can load them.
+///
+/// The runner is checked here rather than at launch because dropping a declared
+/// skill is invisible from the outside: the run works, the answer is worse, and
+/// nothing in the record says why. `32 harness capability floor` made a cell
+/// declare its skills so a run would stop inheriting whatever was installed on
+/// the machine; a runner that silently ignores the declaration puts the run
+/// straight back to not knowing what it loaded.
+///
+/// Same call `31 manager delegation reach` made about delegation, and the same
+/// call [`mcp::FarseerMcp::delegate_to_worker_json`] already makes about a skill
+/// that is not in the repository: refuse where a person can see it.
+fn skill_paths(state: &AppState, runner: &str, names: &[String]) -> ApiResult<Vec<PathBuf>> {
+    if !names.is_empty() && !runner_loads_skills(runner) {
+        return Err(ApiError::Policy(format!(
+            "runner `{runner}` cannot be given a skill by name, and this cell declares {names:?}"
+        )));
+    }
     names
         .iter()
         .map(|name| {
@@ -1617,6 +1634,18 @@ fn skill_paths(state: &AppState, names: &[String]) -> ApiResult<Vec<PathBuf>> {
             }
         })
         .collect()
+}
+
+/// Whether farseer has a way to hand this runner a named skill.
+///
+/// One arm today, and stated as a list rather than a negation so a new runner
+/// is silent until somebody probes it - `10 runner inventory`'s observed-never-
+/// advertised rule. omp is the instructive absence: it speaks pi's protocol
+/// verbatim and shares pi's adapter, and its `--skills` is a glob filter over
+/// what it discovered rather than a loader, so with discovery denied there is
+/// no argv at all that gives it a directory.
+fn runner_loads_skills(runner: &str) -> bool {
+    farseer_runner::pi::loads_skills_by_path(runner)
 }
 
 fn run_view(state: &Arc<AppState>, row: RunRow) -> RunView {

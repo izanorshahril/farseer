@@ -1275,6 +1275,7 @@ pub fn start_worker(
             StartedWorker::spawn(
                 &exe,
                 &farseer_runner::pi::build_args(
+                    other,
                     options.model.as_deref(),
                     options.effort.as_deref(),
                     &options.skills,

@@ -90,6 +90,21 @@ pub fn abort_frame() -> String {
     json!({ "type": "abort" }).to_string()
 }
 
+/// Whether this runner can be handed a skill directory on the argv.
+///
+/// pi takes `--skill <path>`, repeatable. omp takes `--skills <globs>`, which
+/// filters what it **discovered** - so with discovery denied there is nothing
+/// left for the filter to match, and no argv at all that loads a named
+/// directory. Probed 2026-08-28: `omp --skill` is `unknown flag`.
+///
+/// Exported because the answer has to be known **before** a run starts. A cell
+/// declares its skills per `32 harness capability floor`, and a runner that
+/// silently drops them gives back exactly the failure that ticket closed: a
+/// worse answer, for a reason nobody can see.
+pub fn loads_skills_by_path(runner: &str) -> bool {
+    runner == "pi"
+}
+
 /// The launch argv, given what the operator pinned in `runners.toml`.
 ///
 /// `--mode rpc` is the whole runner; everything after it is the operator's
@@ -97,15 +112,17 @@ pub fn abort_frame() -> String {
 /// chooses from its own config, which is the same deference `30 codex app
 /// server` settled for effort.
 pub fn build_args(
+    // Which of the two. They speak one protocol and not one command line -
+    // see [`loads_skills_by_path`] and [`UNATTENDED_EXCLUDED_TOOLS`].
+    runner: &str,
     model: Option<&str>,
     effort: Option<&str>,
     skills: &[std::path::PathBuf],
     extensions: &[std::path::PathBuf],
     append_system_prompt: Option<&str>,
 ) -> Vec<String> {
-    let mut args = vec![
-        "--mode".to_string(),
-        "rpc".to_string(),
+    let mut args = vec!["--mode".to_string(), "rpc".to_string()];
+    if runner == "pi" {
         // The tool that waits for a person. `12 autonomy and deny list` decides
         // autonomy **before** the run, and nobody is watching a question
         // farseer did not expect - so a run that asks one is a run that hangs,
@@ -118,9 +135,14 @@ pub fn build_args(
         // and `30 codex app server` made for the sandbox, and the third time
         // this family has bitten - `06 cell transport` hit it first, as a
         // Claude Code tool missing from `--allowedTools`.
-        "--exclude-tools".to_string(),
-        UNATTENDED_EXCLUDED_TOOLS.to_string(),
-    ];
+        //
+        // pi only: omp has no `ask_question` and no `--exclude-tools` to name
+        // it with. Probed 2026-08-28, both facts - its twenty tools are
+        // `read`, `bash`, `task`, `hub` and the rest, and none of them waits
+        // for a person.
+        args.push("--exclude-tools".to_string());
+        args.push(UNATTENDED_EXCLUDED_TOOLS.to_string());
+    }
     if let Some(model) = model {
         args.push("--model".to_string());
         args.push(model.to_string());
@@ -136,9 +158,15 @@ pub fn build_args(
     // `12 autonomy and deny list` is bounding. A cell gets what it declared and
     // nothing else, and a cell that declared nothing runs bare.
     args.push("--no-skills".to_string());
-    for skill in skills {
-        args.push("--skill".to_string());
-        args.push(skill.display().to_string());
+    // ...and only pi can then be handed one back by path. omp's `--skills`
+    // is a **glob filter over what it discovered**, which is the opposite
+    // operation, so there is no argv that gives omp a specific directory.
+    // Callers ask [`loads_skills_by_path`] before promising a cell its skills.
+    if loads_skills_by_path(runner) {
+        for skill in skills {
+            args.push("--skill".to_string());
+            args.push(skill.display().to_string());
+        }
     }
     // The same rule for extensions, and for the same reason: an extension is
     // arbitrary code registering arbitrary tools into a run farseer is
@@ -167,6 +195,12 @@ pub fn build_args(
 /// human who is not there. Everything pi can actually *do* stays available -
 /// `12 autonomy and deny list` bounds reach with the worktree and the deny
 /// list, not by taking tools away.
+/// pi's tool that waits for a person, denied because nobody is watching.
+///
+/// **pi's, not omp's.** They share this adapter because they share a protocol
+/// verbatim, and sharing it hid that they do not share a command line: omp has
+/// neither this tool nor the `--exclude-tools` flag to name it with, and
+/// rejected the launch outright. See [`build_args`].
 pub const UNATTENDED_EXCLUDED_TOOLS: &str = "ask_question";
 
 /// What pi said about itself, from a `get_state` reply.
@@ -583,26 +617,26 @@ mod tests {
     /// so improvises. The prompt is how it finds out.
     #[test]
     fn a_manager_is_told_who_it_is_when_the_caller_says_so() {
-        assert!(!build_args(None, None, &[], &[], None).contains(&"--append-system-prompt".to_string()));
+        assert!(!build_args("pi", None, None, &[], &[], None).contains(&"--append-system-prompt".to_string()));
 
-        let args = build_args(None, None, &[], &[], Some("You are the manager for cell zero."));
+        let args = build_args("pi", None, None, &[], &[], Some("You are the manager for cell zero."));
         let at = args.iter().position(|a| a == "--append-system-prompt").expect("passed");
         assert_eq!(args[at + 1], "You are the manager for cell zero.");
 
         // Whitespace is not an identity. An empty prompt sends no flag rather
         // than an empty one, which pi would take literally.
-        assert!(!build_args(None, None, &[], &[], Some("  ")).contains(&"--append-system-prompt".to_string()));
+        assert!(!build_args("pi", None, None, &[], &[], Some("  ")).contains(&"--append-system-prompt".to_string()));
     }
 
     /// A cell gets the skills it declared and nothing the machine happens to
     /// have installed - the denial is what makes the declaration mean anything.
     #[test]
     fn a_cell_gets_its_own_skills_and_never_the_machines() {
-        let bare = build_args(None, None, &[], &[], None);
+        let bare = build_args("pi", None, None, &[], &[], None);
         assert!(bare.contains(&"--no-skills".to_string()));
         assert!(!bare.contains(&"--skill".to_string()));
 
-        let declared = build_args(None, None, &[std::path::PathBuf::from("/repo/skills/echo")], &[], None);
+        let declared = build_args("pi", None, None, &[std::path::PathBuf::from("/repo/skills/echo")], &[], None);
         let flat = declared.join(" ");
         assert!(flat.contains("--no-skills"), "{flat}");
         assert!(flat.contains("--skill /repo/skills/echo"), "{flat}");
@@ -614,8 +648,8 @@ mod tests {
     #[test]
     fn an_unattended_run_can_never_reach_the_tool_that_waits_for_a_human() {
         for args in [
-            build_args(None, None, &[], &[], None),
-            build_args(Some("m"), Some("low"), &[], &[], None),
+            build_args("pi", None, None, &[], &[], None),
+            build_args("pi", Some("m"), Some("low"), &[], &[], None),
         ] {
             let flat = args.join(" ");
             assert!(flat.contains("--exclude-tools ask_question"), "{flat}");
@@ -625,11 +659,11 @@ mod tests {
     #[test]
     fn the_operator_pins_the_model_and_an_unpinned_one_stays_pis_own() {
         assert_eq!(
-            build_args(None, None, &[], &[], None),
+            build_args("pi", None, None, &[], &[], None),
             ["--mode", "rpc", "--exclude-tools", "ask_question", "--no-skills", "--no-extensions"]
         );
         assert_eq!(
-            build_args(Some("gpt-5.6-luna"), Some("low"), &[], &[], None),
+            build_args("pi", Some("gpt-5.6-luna"), Some("low"), &[], &[], None),
             [
                 "--mode",
                 "rpc",
@@ -643,5 +677,32 @@ mod tests {
                 "--no-extensions"
             ]
         );
+    }
+
+    /// omp shares this adapter and does **not** share this command line.
+    ///
+    /// Found the hard way on 2026-08-28: omp had never actually launched
+    /// through farseer, because `--exclude-tools` is pi's flag and omp exits
+    /// with `unknown flag` before it reads anything else. The protocol matching
+    /// verbatim is what made it look safe to share the launch too.
+    #[test]
+    fn omp_is_not_launched_with_pis_flags() {
+        let omp = build_args("omp", None, None, &[], &[], None).join(" ");
+        assert!(!omp.contains("--exclude-tools"), "{omp}");
+        assert!(omp.contains("--mode rpc"), "{omp}");
+        assert!(omp.contains("--no-skills"), "{omp}");
+
+        let pi = build_args("pi", None, None, &[], &[], None).join(" ");
+        assert!(pi.contains("--exclude-tools ask_question"), "{pi}");
+    }
+
+    /// A skill omp cannot be given must not be quietly put on its argv anyway.
+    /// The refusal lives in the API, above this - see `runner_loads_skills` -
+    /// and this pins the half that would otherwise fail silently.
+    #[test]
+    fn a_skill_path_is_only_ever_passed_to_the_runner_that_takes_one() {
+        let skill = [std::path::PathBuf::from("/repo/skills/farseer-echo")];
+        assert!(build_args("pi", None, None, &skill, &[], None).contains(&"--skill".to_string()));
+        assert!(!build_args("omp", None, None, &skill, &[], None).contains(&"--skill".to_string()));
     }
 }

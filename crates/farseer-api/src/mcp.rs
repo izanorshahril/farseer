@@ -326,6 +326,16 @@ impl FarseerMcp {
         // Resolved here, where the roster entry is in hand: a worker that names
         // a skill farseer cannot find is a refusal at delegation time rather
         // than a worse answer later for a reason nobody can see.
+        if !skill_names.is_empty() && !crate::runner_loads_skills(&runner) {
+            return Err(McpError::invalid_params(
+                format!(
+                    "worker `{}` runs on `{runner}`, which farseer cannot hand a skill by name, \
+                     and its roster entry declares {skill_names:?}",
+                    args.worker
+                ),
+                None,
+            ));
+        }
         let skill_dirs = skill_names
             .iter()
             .map(|name| crate::skill_dir(self.state.repo_root(), name))

@@ -86,3 +86,51 @@ Stripped of the shared floor, three real differences:
 - Skills, per the three consequences above. The largest gap on this page.
 - omp's `hub` tool - background jobs are farseer's own concern (`05 run state model` has a whole vocabulary for a run in flight), and a runner having its own parallel one is worth a look before the two collide.
 - Whether `agent_end`'s under-counting is fixed in the adapter or in `RunReport`. It is the design review's "RunReport is becoming a bag" finding arriving with a concrete cost attached.
+
+---
+
+## omp had never actually launched, 2026-08-28
+
+`31 manager delegation reach`'s fix went in for both pi and omp, on the strength of this ticket's own finding that they speak one protocol verbatim. Then omp was run through farseer for the first time and died before its first turn:
+
+```
+run_finished  "the process exited without ever emitting a terminal result"
+```
+
+`omp --exclude-tools` is `unknown flag`. **They share a protocol and not a command line**, and this ticket's "omp is pi plus subagents" said the first half loudly enough to hide the second.
+
+Probed rather than read, since that is this ticket's own rule:
+
+| | pi 0.84.3 | omp 18.0.4 |
+|---|---|---|
+| deny the tool that waits for a person | `--exclude-tools ask_question` | **no such tool, and no such flag** - its twenty are `read`, `bash`, `task`, `hub` and the rest |
+| load a named skill | `--skill <path>`, repeatable | **no way at all**: `--skills` is a glob filter over what it *discovered*, so with discovery denied there is nothing to match |
+| load an extension | `-e <path>` | `-e <path>` |
+| deny discovery | `--no-skills`, `--no-extensions` | same |
+| extension API | 26 methods, no schema builder, `parameters` is JSON Schema | superset: `zod`, `arktype`, `typebox`, `logger`, plus the same methods |
+
+So `build_args` takes the runner name now, and the shared adapter carries two command lines rather than pretending to carry one.
+
+### The skill gap became a refusal
+
+omp cannot be given a declared skill, and the failure mode is the one this ticket exists to prevent: the run works, the answer is worse, and nothing says why. So farseer refuses at the point a person can see it:
+
+```
+runner `omp` cannot be given a skill by name, and this cell declares ["farseer-echo", "farseer-record"]
+```
+
+Same call `31` made about delegation, and the same call `delegate_to_worker` already made about a skill missing from the repository. **A capability a runner lacks must be named where the run is configured, not absorbed where nobody is looking.**
+
+### omp does delegate, through a mount
+
+With the flags fixed, an omp manager delegated live and returned `RUTABAGA` from a real pi worker. It reached the tool a way pi does not:
+
+```
+tool_call_started  write  {"path":"xd://mcp__farseer__delegate_to_worker", ...}   -> No such tool
+tool_call_started  read   {"path":"xd://delegate_to_worker"}                      -> the schema
+tool_call_started  write  {"path":"xd://delegate_to_worker", "content":"{...}"}   -> ok
+```
+
+omp mounts extension tools as **devices addressed by writing JSON to `xd://<tool>`**. It guessed an MCP-shaped name first, read the schema, then called correctly - self-correcting, and farseer's tool descriptions were enough to do it from.
+
+One consequence for `02 record scope`: the event's `tool_name` is `write`, and the verb is inside `args.path`. **An operator scanning omp's events sees a file write where a delegation happened.** The delegation itself is recorded correctly - the child run row exists, under the parent task, with its own spend - so this is a legibility gap in the event stream rather than a false record. Not fixed here.
