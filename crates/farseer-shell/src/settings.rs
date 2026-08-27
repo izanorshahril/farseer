@@ -104,11 +104,19 @@ const KNOWN: [(&str, &str, &str); 6] = [
         "one-shot; terminal line carries no failure field",
     ),
     (
-        "pi",
-        "pi",
-        "steers mid-run, prices its own answers, takes a pinned model and effort",
+        "agy",
+        "agy",
+        "one-shot; names its model and tokens, and bakes effort into the model id",
     ),
 ];
+
+/// What every runner speaking pi's RPC mode is, in the operator's terms.
+///
+/// One note for both because the protocol is what they have in common, the same
+/// argument [`ACP_NOTE`] makes. What differs between them is not in the note:
+/// `omp` bundles task agents and `pi` does not, and that is a roster question
+/// rather than a control one.
+const PI_NOTE: &str = "steers mid-run, prices its own answers, takes a pinned model and effort";
 
 /// What every ACP runner is, in the operator's terms.
 ///
@@ -134,6 +142,11 @@ fn known() -> Vec<(&'static str, &'static str, &'static str)> {
             farseer_manager::ACP_RUNNERS
                 .into_iter()
                 .map(|(name, executable, _)| (name, executable, ACP_NOTE)),
+        )
+        .chain(
+            farseer_manager::PI_RUNNERS
+                .into_iter()
+                .map(|(name, executable)| (name, executable, PI_NOTE)),
         )
         .collect()
 }

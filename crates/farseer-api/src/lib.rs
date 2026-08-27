@@ -245,6 +245,37 @@ impl AppState {
         self
     }
 
+    /// Close every run row a previous process left marked running, recording
+    /// why. Returns how many.
+    ///
+    /// Called once at startup, before anything reads the fleet. See
+    /// [`farseer_store::Store::reap_orphaned_runs`] for why these cannot simply
+    /// be cancelled: `cancel` asks the in-memory handle, and an orphan has none,
+    /// so every attempt answers `404` while the row stays `running` forever.
+    pub fn reap_orphaned_runs(&self) -> Result<usize, StoreError> {
+        let now = now_ms();
+        let store = self.store();
+        let orphans = store.reap_orphaned_runs(now)?;
+        for row in &orphans {
+            // `02 record scope`: the record says **why**, so a reaped run is
+            // distinguishable from one that failed on its own. `05 run state
+            // model` gets no new outcome for this - it is `Failed` because
+            // something broke and nobody chose it.
+            store.append(&farseer_core::NewEvent::new(
+                row.cell_id.clone(),
+                row.run_id,
+                farseer_core::EventKind::new(farseer_core::EventKind::RUN_FINISHED),
+                farseer_core::Actor::Operator,
+                now,
+                serde_json::json!({
+                    "outcome": "failed",
+                    "reason": "the farseer process that started this run is gone",
+                }),
+            ))?;
+        }
+        Ok(orphans.len())
+    }
+
     pub fn runner_config(&self) -> &RunnerConfig {
         &self.runner_config
     }
@@ -1255,6 +1286,22 @@ pub struct RunView {
     /// survival over run survival, so a restart losing this is the same
     /// trade already made everywhere else, not a new gap.
     pub liveness: Option<String>,
+    /// What this run is *for*, in one line, derived from the goal it was queued
+    /// with.
+    ///
+    /// Derived rather than stored, and read from the record rather than from a
+    /// column: `run_queued` already carries the whole sealed contract, so the
+    /// answer exists and asking the operator to also name a run would be asking
+    /// them to repeat themselves. `None` when the record has no `run_queued` -
+    /// which is a corrupt run rather than an untitled one, and says so by
+    /// staying absent.
+    pub title: Option<String>,
+    /// `manager` or `worker`, as recorded when the run was queued.
+    ///
+    /// The difference an operator most wants on a fleet view - a manager is a
+    /// conversation they can still steer, a worker is a job - and it was in the
+    /// record all along while no surface showed it.
+    pub role: Option<String>,
 }
 
 /// The fleet, newest first.
@@ -1301,8 +1348,55 @@ async fn get_run(
 /// Shared by the list and the single read so the two can never disagree about
 /// what a run is - and `05 run state model` keeps liveness **derived** here,
 /// asked of the live handle rather than read from the row.
+/// The one-line name of a run, from the goal it was sealed with.
+///
+/// First non-empty line, clipped on a word boundary. Clipped here rather than in
+/// each surface so two widgets cannot come to disagree about what a run is
+/// called - `14 vocabulary lock`'s argument, applied to a derived string.
+fn title_of(goal: &str) -> Option<String> {
+    let line = goal.lines().map(str::trim).find(|line| !line.is_empty())?;
+    const LIMIT: usize = 64;
+    if line.chars().count() <= LIMIT {
+        return Some(line.to_string());
+    }
+    let clipped: String = line.chars().take(LIMIT).collect();
+    let cut = clipped.rfind(char::is_whitespace).unwrap_or(clipped.len());
+    Some(format!("{}...", clipped[..cut].trim_end()))
+}
+
+/// The goal and role a run was queued with, read from its first recorded event.
+///
+/// One indexed row per run - `events_run(run_id, seq)` makes `LIMIT 1` cheap -
+/// rather than the full scan `original_run` does, because a list of fifty runs
+/// must not cost fifty full scans.
+fn queued_facts(state: &Arc<AppState>, run_id: RunId) -> (Option<String>, Option<String>) {
+    let store = state.store();
+    let Ok(events) = store.scan(0, 1, &ScanFilter::run(run_id)) else {
+        return (None, None);
+    };
+    let Some(queued) = events
+        .first()
+        .filter(|e| e.kind.as_str() == farseer_core::EventKind::RUN_QUEUED)
+    else {
+        return (None, None);
+    };
+    (
+        queued
+            .payload
+            .get("goal")
+            .and_then(serde_json::Value::as_str)
+            .and_then(title_of),
+        queued
+            .payload
+            .get(RUN_ROLE_FIELD)
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string),
+    )
+}
+
 fn run_view(state: &Arc<AppState>, row: RunRow) -> RunView {
     let run_id = row.run_id;
+    let (title, role) = queued_facts(state, run_id);
     #[allow(clippy::let_and_return)]
     let view = RunView {
         run_id: run_id.to_string(),
@@ -1327,8 +1421,57 @@ fn run_view(state: &Arc<AppState>, row: RunRow) -> RunView {
             .runs()
             .get(&run_id)
             .map(|h| liveness_str(h.liveness.liveness()).to_string()),
+        title,
+        role,
     };
     view
+}
+
+#[cfg(test)]
+mod title_tests {
+    use super::title_of;
+
+    #[test]
+    fn a_short_goal_is_its_own_title() {
+        assert_eq!(
+            title_of("Reply with exactly: pi online.").as_deref(),
+            Some("Reply with exactly: pi online.")
+        );
+    }
+
+    /// A manager prompt is a paragraph. The first line is what the operator
+    /// actually asked for; the rest is how.
+    #[test]
+    fn a_multi_line_goal_is_named_by_its_first_real_line() {
+        assert_eq!(
+            title_of("
+
+  Add a quota widget  
+and make it live.
+").as_deref(),
+            Some("Add a quota widget")
+        );
+    }
+
+    #[test]
+    fn a_long_line_is_clipped_on_a_word_rather_than_mid_word() {
+        let title = title_of(
+            "Investigate why the manager reported a delegation that never happened and fix it",
+        )
+        .unwrap();
+        assert!(title.ends_with("..."), "{title}");
+        assert!(title.chars().count() <= 67, "{title}");
+        assert!(!title.contains("happene."), "clipped mid-word: {title}");
+    }
+
+    /// An empty goal has no title rather than an empty one: `10 runner
+    /// inventory`'s rule, that an absent answer stays absent.
+    #[test]
+    fn a_goal_with_nothing_in_it_has_no_title() {
+        assert_eq!(title_of("   
+  
+"), None);
+    }
 }
 
 fn liveness_str(liveness: farseer_core::Liveness) -> &'static str {

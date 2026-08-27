@@ -27,6 +27,8 @@ type Run = {
   operator_touched: boolean;
   started_ts: number;
   liveness: "live" | "stalled" | "likely_hung" | null;
+  title: string | null;
+  role: string | null;
 };
 
 /** What `05 run state model` permits, given where the run actually is. */
@@ -127,7 +129,9 @@ export function RunsWidget({ bridge }: { bridge: Bridge }) {
                 className={`dot ${run.liveness ?? (run.lifecycle === "running" ? "live" : "done")}`}
                 title={run.liveness ?? run.lifecycle}
               />
-              <span className="mono faint">{run.run_id.slice(0, 8)}</span>
+              <span className="run-title" title={run.run_id}>
+                {run.title ?? run.run_id.slice(0, 8)}
+              </span>
               <span className="badge">{run.cell_id}</span>
               <span className="dim mono small">{run.runner}</span>
               <span className={`kind ${TONE[run.outcome ?? ""] ?? ""}`}>

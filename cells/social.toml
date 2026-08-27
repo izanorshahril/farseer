@@ -16,18 +16,18 @@ version = "1"
 workspace_strategy = "plain_directory"
 
 [manager]
-runner = "claude-code"
+runner = "pi"
 prompt = "You are the manager of the social cell. You plan posts and delegate."
 
 [[roster]]
 kind = "worker"
 name = "writer"
-runner = "codex"
+runner = "pi"
 
 [[roster]]
 kind = "worker"
 name = "media"
-runner = "codex"
+runner = "pi"
 
 [[roster]]
 kind = "tool"

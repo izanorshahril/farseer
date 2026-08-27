@@ -95,7 +95,24 @@ pub fn abort_frame() -> String {
 /// chooses from its own config, which is the same deference `30 codex app
 /// server` settled for effort.
 pub fn build_args(model: Option<&str>, effort: Option<&str>) -> Vec<String> {
-    let mut args = vec!["--mode".to_string(), "rpc".to_string()];
+    let mut args = vec![
+        "--mode".to_string(),
+        "rpc".to_string(),
+        // The tool that waits for a person. `12 autonomy and deny list` decides
+        // autonomy **before** the run, and nobody is watching a question
+        // farseer did not expect - so a run that asks one is a run that hangs,
+        // silently and forever. Measured on 2026-08-27: a pi manager given a
+        // goal open enough to be worth asking about sat at `session_started`
+        // for minutes with a live process and no output, which is
+        // indistinguishable from a hang because it **is** one.
+        //
+        // The same call `29 harness protocol` made for ACP's unattended mode
+        // and `30 codex app server` made for the sandbox, and the third time
+        // this family has bitten - `06 cell transport` hit it first, as a
+        // Claude Code tool missing from `--allowedTools`.
+        "--exclude-tools".to_string(),
+        UNATTENDED_EXCLUDED_TOOLS.to_string(),
+    ];
     if let Some(model) = model {
         args.push("--model".to_string());
         args.push(model.to_string());
@@ -106,6 +123,14 @@ pub fn build_args(model: Option<&str>, effort: Option<&str>) -> Vec<String> {
     }
     args
 }
+
+/// Tools farseer refuses to let an unattended run reach.
+///
+/// One entry, and it is not a capability: `ask_question` blocks the turn on a
+/// human who is not there. Everything pi can actually *do* stays available -
+/// `12 autonomy and deny list` bounds reach with the worktree and the deny
+/// list, not by taking tools away.
+pub const UNATTENDED_EXCLUDED_TOOLS: &str = "ask_question";
 
 /// What pi said about itself, from a `get_state` reply.
 fn session_from_state(data: &Value) -> SessionInfo {
@@ -160,6 +185,34 @@ pub fn parse_line(line: &str) -> Result<Vec<RunnerSignal>, ParseError> {
             .and_then(Value::as_str)
             .filter(|delta| !delta.is_empty())
             .map(|delta| RunnerSignal::OutputChunk(delta.to_string())),
+        // What the runner actually did, as opposed to what it said it did.
+        //
+        // `02 record scope` named these kinds and pi is the first runner here
+        // whose stream fills them. The distinction matters more than it looks:
+        // before this, a thread showed only the agent's own prose - "Ran: echo
+        // hello" was the **agent's claim**, and `31 manager delegation reach`
+        // is the record of what happens when a claim like that is believed.
+        // A tool call farseer saw is a fact; a tool call the agent describes is
+        // a sentence.
+        "tool_execution_start" => Some(RunnerSignal::Progress {
+            kind: EventKind::new(EventKind::TOOL_CALL_STARTED),
+            payload: json!({
+                "tool_name": v.get("toolName"),
+                "tool_call_id": v.get("toolCallId"),
+                "args": v.get("args"),
+            }),
+        }),
+        // The partial results in between are `05 run state model`'s activity -
+        // they keep the watchdog awake and belong nowhere in the record.
+        "tool_execution_end" => Some(RunnerSignal::Progress {
+            kind: EventKind::new(EventKind::TOOL_RESULT),
+            payload: json!({
+                "tool_name": v.get("toolName"),
+                "tool_call_id": v.get("toolCallId"),
+                "is_error": v.get("isError"),
+                "text": tool_text(v.get("result")),
+            }),
+        }),
         // `02 record scope`: farseer records **that** a compaction happened and
         // **when**, never what was dropped.
         "compaction_end" => Some(RunnerSignal::Progress {
@@ -173,6 +226,35 @@ pub fn parse_line(line: &str) -> Result<Vec<RunnerSignal>, ParseError> {
         _ => None,
     };
     Ok(signal.into_iter().collect())
+}
+
+/// A tool result's text, flattened out of pi's content-block array.
+///
+/// Clipped, because a tool result is unbounded - a `read` of a large file lands
+/// here whole - and `02 record scope` wants the record to say what happened
+/// rather than to become a second copy of the workspace. The agent still sees
+/// all of it; only the record is clipped, and it says so by ending in an
+/// ellipsis rather than by trimming silently.
+fn tool_text(result: Option<&Value>) -> Option<String> {
+    const LIMIT: usize = 2_000;
+    let joined: String = result?
+        .get("content")?
+        .as_array()?
+        .iter()
+        .filter_map(|block| block.get("text").and_then(Value::as_str))
+        .collect::<Vec<_>>()
+        .join("
+");
+    if joined.is_empty() {
+        return None;
+    }
+    if joined.chars().count() <= LIMIT {
+        return Some(joined);
+    }
+    Some(format!(
+        "{}...",
+        joined.chars().take(LIMIT).collect::<String>()
+    ))
 }
 
 /// The outcome and the totals, summed across the assistant messages of this
@@ -273,6 +355,46 @@ mod tests {
         );
     }
 
+    /// The record gets what the runner **did**, separately from what it said it
+    /// did. `31 manager delegation reach` exists because those two came apart.
+    #[test]
+    fn a_tool_call_reaches_the_record_as_a_fact_rather_than_as_a_claim() {
+        let start = r#"{"type":"tool_execution_start","toolCallId":"call_pfF","toolName":"bash","args":{"command":"echo hello"}}"#;
+        let signals = parse_line(start).unwrap();
+        let [RunnerSignal::Progress { kind, payload }] = &signals[..] else {
+            panic!("one progress signal, got {signals:?}")
+        };
+        assert_eq!(kind.as_str(), EventKind::TOOL_CALL_STARTED);
+        assert_eq!(payload["tool_name"], "bash");
+        assert_eq!(payload["args"]["command"], "echo hello");
+
+        let end = r#"{"type":"tool_execution_end","toolCallId":"call_pfF","toolName":"bash","result":{"content":[{"type":"text","text":"hello"}]},"isError":false}"#;
+        let signals = parse_line(end).unwrap();
+        let [RunnerSignal::Progress { kind, payload }] = &signals[..] else {
+            panic!("one progress signal, got {signals:?}")
+        };
+        assert_eq!(kind.as_str(), EventKind::TOOL_RESULT);
+        assert_eq!(payload["text"], "hello");
+        assert_eq!(payload["is_error"], false);
+    }
+
+    /// A `read` of a large file is a tool result too. The record says what
+    /// happened; it does not become a second copy of the workspace.
+    #[test]
+    fn a_huge_tool_result_is_clipped_and_says_so() {
+        let big = "x".repeat(5_000);
+        let line = format!(
+            r#"{{"type":"tool_execution_end","toolName":"read","result":{{"content":[{{"type":"text","text":"{big}"}}]}}}}"#
+        );
+        let signals = parse_line(&line).unwrap();
+        let [RunnerSignal::Progress { payload, .. }] = &signals[..] else {
+            panic!("one signal")
+        };
+        let text = payload["text"].as_str().unwrap();
+        assert!(text.ends_with("..."), "clipped results say so");
+        assert!(text.chars().count() < 2_100, "{}", text.len());
+    }
+
     #[test]
     fn an_abort_is_cancelled_because_a_person_chose_to_stop() {
         let line = r#"{"type":"agent_end","messages":[{"role":"assistant","usage":{"totalTokens":12,"cost":{"total":0}},"stopReason":"aborted"}],"willRetry":false}"#;
@@ -318,12 +440,35 @@ mod tests {
         assert_eq!(parse_line(line).unwrap(), vec![]);
     }
 
+    /// The tool that waits for a person is never on the argv of an unattended
+    /// run, whatever else is. Asserted separately from the model pinning
+    /// because it is not an option - it is the thing that stops a run hanging.
+    #[test]
+    fn an_unattended_run_can_never_reach_the_tool_that_waits_for_a_human() {
+        for args in [build_args(None, None), build_args(Some("m"), Some("low"))] {
+            let flat = args.join(" ");
+            assert!(flat.contains("--exclude-tools ask_question"), "{flat}");
+        }
+    }
+
     #[test]
     fn the_operator_pins_the_model_and_an_unpinned_one_stays_pis_own() {
-        assert_eq!(build_args(None, None), ["--mode", "rpc"]);
+        assert_eq!(
+            build_args(None, None),
+            ["--mode", "rpc", "--exclude-tools", "ask_question"]
+        );
         assert_eq!(
             build_args(Some("gpt-5.6-luna"), Some("low")),
-            ["--mode", "rpc", "--model", "gpt-5.6-luna", "--thinking", "low"]
+            [
+                "--mode",
+                "rpc",
+                "--exclude-tools",
+                "ask_question",
+                "--model",
+                "gpt-5.6-luna",
+                "--thinking",
+                "low"
+            ]
         );
     }
 }

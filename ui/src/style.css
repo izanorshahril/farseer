@@ -495,3 +495,56 @@ code {
 .runners-tree .caveat {
   margin-left: 18px;
 }
+
+/* One runner's thread, flipped in over the list. */
+.thread-view > .row:first-child {
+  padding-bottom: 8px;
+  margin-bottom: 8px;
+  border-bottom: 1px solid var(--line, #2a2a2a);
+}
+.thread > li + li {
+  margin-top: 10px;
+}
+.thread-text {
+  margin: 2px 0 0 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.thread-payload {
+  margin: 2px 0 0 0;
+  padding: 6px 8px;
+  max-height: 180px;
+  overflow: auto;
+  font-size: 11px;
+  line-height: 1.4;
+  border-radius: 4px;
+  background: var(--sunken, rgba(127, 127, 127, 0.09));
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+/* A row that opens something, styled as text rather than as a control. */
+.linkish {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+  text-align: left;
+}
+.linkish:hover {
+  text-decoration: underline;
+}
+
+/* A run's derived name. Truncated in the row rather than in the data: the API
+   already clipped it to one line, and a narrow column should not re-decide. */
+.run-title,
+.task-title {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+.run-title {
+  flex: 1 1 auto;
+}

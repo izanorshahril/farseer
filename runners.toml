@@ -48,3 +48,19 @@ account = "chatgpt"
 account = "chatgpt"
 model = "openai-codex/gpt-5.6-luna"
 effort = "low"
+
+# omp speaks pi's protocol verbatim and shares its adapter, but it is a separate
+# runner because it bundles **task agents** - the subagent capability pi does not
+# have, and the thing worth comparing them on.
+[omp]
+account = "chatgpt"
+model = "openai-codex/gpt-5.6-luna"
+effort = "low"
+
+# Google, not ChatGPT, so its own account. agy bakes the effort into the model
+# id - `agy models` lists `-low`, `-medium` and `-high` as separate entries - so
+# there is deliberately no `effort` line here: two places to say one thing is two
+# places that can disagree.
+[agy]
+account = "google"
+model = "gemini-3.7-flash-low"

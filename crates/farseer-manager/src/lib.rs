@@ -979,13 +979,23 @@ pub fn control_of(runner: &str) -> Control {
             context: true,
             compaction: true,
         },
+        // `29 harness protocol`: agy is one-shot and says so at both ends -
+        // `-p` runs a prompt and exits, and `--continue` starts a new process
+        // the way Codex and cursor-agent do. It names its model and its tokens
+        // and nothing else, which is the honest floor rather than a gap.
+        "agy" => Control {
+            steer: false,
+            quota: false,
+            context: false,
+            compaction: false,
+        },
         // `29 harness protocol`: pi steers natively, prices its own messages,
         // and brackets a compaction. No quota: pi calls whichever provider the
         // operator configured, and a subscription window is the provider's fact
         // rather than pi's. No context window either - `get_state` knows the
         // denominator but the event stream never sends it, and half an answer is
         // the thing `10 runner inventory`'s rule exists to refuse.
-        "pi" => Control {
+        runner if PI_RUNNERS.iter().any(|(name, _)| *name == runner) => Control {
             steer: true,
             quota: false,
             context: false,
@@ -1024,6 +1034,18 @@ pub const CODEX_SANDBOX: &str = "read-only";
 /// short on purpose: an entry here is a claim that farseer has **seen this
 /// agent's output**, which is `10 runner inventory`'s rule, not a claim that
 /// ACP agents in general work.
+/// The runners speaking pi's RPC mode, as `name -> executable`.
+///
+/// `omp` is a superset of `pi` that speaks the **same protocol verbatim** - the
+/// 2026-08-27 probe drove it with pi's own frames and got pi's own events back,
+/// plus a `ready` handshake and `extension_ui_request` widget calls that farseer
+/// ignores. So it shares [`farseer_runner::pi`] rather than getting a copy.
+///
+/// They are still two runners, for `29 harness protocol`'s reason: omp bundles
+/// **task agents**, which is the subagent capability pi does not have, and a
+/// single name would hide the difference the operator is choosing between.
+pub const PI_RUNNERS: [(&str, &str); 2] = [("pi", "pi"), ("omp", "omp")];
+
 pub const ACP_RUNNERS: [(&str, &str, &str); 2] = [
     ("goose-acp", "goose", "acp"),
     ("opencode-acp", "opencode", "acp"),
@@ -1135,8 +1157,27 @@ pub fn start_worker(
         // The only runner farseer launches with a model on the argv, because it
         // is the only one whose model the operator can pin in `runners.toml`
         // and have farseer pass without overriding a value they set elsewhere.
-        "pi" => {
-            let exe = resolve("pi").ok_or_else(|| ManagerError::ExecutableNotFound("pi".into()))?;
+        // agy, per `29 harness protocol`. One-shot, so the goal goes on the
+        // argv and stdin closes at spawn - the same shape as `codex exec`.
+        "agy" => {
+            let exe =
+                resolve("agy").ok_or_else(|| ManagerError::ExecutableNotFound("agy".into()))?;
+            StartedWorker::spawn(
+                &exe,
+                &farseer_runner::agy::build_args(&contract.goal, options.model.as_deref()),
+                cwd,
+                thresholds,
+                farseer_runner::agy::parse_line,
+                Channel::OneShot,
+            )
+        }
+        // pi and omp, per `29 harness protocol` and [`farseer_runner::pi`].
+        // The only runners farseer launches with a model on the argv, because
+        // they are the only ones whose model the operator can pin without
+        // overriding a value they set elsewhere.
+        other if PI_RUNNERS.iter().any(|(name, _)| *name == other) => {
+            let exe =
+                resolve(other).ok_or_else(|| ManagerError::ExecutableNotFound(other.into()))?;
             StartedWorker::spawn(
                 &exe,
                 &farseer_runner::pi::build_args(
@@ -2110,6 +2151,90 @@ mod tests {
             session.payload.get("provider").and_then(|v| v.as_str()),
             Some("openai-codex")
         );
+    }
+
+    /// Live: `omp` reached through pi's adapter, which is the claim
+    /// `PI_RUNNERS` makes - one protocol, two binaries.
+    ///
+    /// Run with: `cargo test -p farseer-manager an_omp_run -- --ignored --nocapture`
+    #[test]
+    #[ignore = "spawns a real `omp --mode rpc` and spends a subscription"]
+    fn an_omp_run_reaches_the_record_through_pis_adapter() {
+        let report = one_pi_run("omp", Some("gpt-5.6-luna"), Some("low"));
+        assert!(report.cost_usd_micros.is_some_and(|micros| micros > 0));
+    }
+
+    /// Live: `agy` on Google's own CLI, the sixth event vocabulary.
+    ///
+    /// Run with: `cargo test -p farseer-manager an_agy_run -- --ignored --nocapture`
+    #[test]
+    #[ignore = "spawns a real `agy -p` and spends a subscription"]
+    fn an_agy_run_reaches_the_record_with_tokens_and_no_money() {
+        let report = one_pi_run("agy", Some("gemini-3.7-flash-low"), None);
+        // `10 runner inventory`'s floor: tokens, no currency. Asserted rather
+        // than assumed, because a runner that started reporting cost would be
+        // a fact this test should notice.
+        assert!(report.tokens.is_some_and(|tokens| tokens > 0), "{report:?}");
+        assert_eq!(report.cost_usd_micros, None, "{report:?}");
+    }
+
+    fn one_pi_run(runner: &str, model: Option<&str>, effort: Option<&str>) -> RunReport {
+        let store = Store::open_in_memory().unwrap();
+        let spec = WorkerContractSpec {
+            run_id: RunId::new(),
+            task_id: TaskId::new(),
+            cell_id: CellId::new("zero"),
+            goal: format!("Reply with exactly: {runner} online."),
+            workspace: WorkspaceStrategy::Worktree,
+            runner: runner.into(),
+            tool_grants: vec![],
+            autonomy_ceiling: Irreversibility::Reversible,
+            budget: Budget::default(),
+            definition_of_done: String::new(),
+        };
+        let run_id = spec.run_id;
+        let contract = WorkerContract::seal(spec);
+
+        let mut tick = 100i64;
+        let report = run_worker(
+            &store,
+            &contract,
+            &std::env::current_dir().unwrap(),
+            LivenessThresholds::default(),
+            &RunOptions {
+                model: model.map(str::to_string),
+                effort: effort.map(str::to_string),
+                ..RunOptions::default()
+            },
+            || {
+                tick += 1;
+                tick
+            },
+            |_, _, _| {},
+        )
+        .expect("the run completes rather than waiting for an EOF that never comes");
+
+        assert_eq!(report.outcome, Outcome::Ok, "{report:?}");
+        let events = store
+            .scan(0, 200, &farseer_store::ScanFilter::run(run_id))
+            .unwrap();
+        let kinds: Vec<&str> = events.iter().map(|event| event.kind.as_str()).collect();
+        assert!(kinds.contains(&EventKind::MANAGER_ANSWERED), "{kinds:?}");
+        let session = events
+            .iter()
+            .find(|event| event.kind.as_str() == EventKind::SESSION_STARTED)
+            .expect("every runner here names the session it opened");
+        eprintln!("{runner} session_started: {}", session.payload);
+        if let Some(model) = model {
+            // The model actually used, which is what `10 runner inventory`
+            // asks for - not the flag farseer sent.
+            let reported = session.payload.get("model").and_then(|v| v.as_str());
+            assert!(
+                reported.is_some_and(|m| model.ends_with(m) || m == model),
+                "pinned {model}, ran {reported:?}"
+            );
+        }
+        report
     }
 
     fn one_acp_run(runner: &str) -> RunReport {

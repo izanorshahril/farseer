@@ -26,6 +26,7 @@
 //! cursor-agent) and this crate's own goose probe.
 
 pub mod acp;
+pub mod agy;
 pub mod claude_code;
 pub mod codex;
 pub mod codex_app_server;

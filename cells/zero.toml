@@ -31,7 +31,7 @@ runner = "pi"
 [[roster]]
 kind = "worker"
 name = "reviewer"
-runner = "cursor-agent"
+runner = "pi"
 
 [[roster]]
 kind = "tool"
