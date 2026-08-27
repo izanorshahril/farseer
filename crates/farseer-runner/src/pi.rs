@@ -49,6 +49,8 @@
 //! same rule from `05 run state model`: **token streams are activity, not
 //! progress**. See [`RunnerSignal::OutputChunk`].
 
+use std::ops::Not;
+
 use serde_json::{Value, json};
 
 use farseer_core::{EventKind, Outcome};
@@ -215,14 +217,60 @@ pub fn parse_line(line: &str) -> Result<Vec<RunnerSignal>, ParseError> {
         }),
         // `02 record scope`: farseer records **that** a compaction happened and
         // **when**, never what was dropped.
-        "compaction_end" => Some(RunnerSignal::Progress {
-            kind: EventKind::new(EventKind::CONTEXT_COMPACTED),
-            payload: json!({}),
-        }),
+        //
+        // Only when it actually happened. `compaction_end` fires whether or not
+        // the compaction succeeded - the 2026-08-27 probe got one carrying
+        // `"errorMessage": "Nothing to compact (session too small)"` - and
+        // recording that as a compaction would put a false fact in the record
+        // about the one thing `02` cares most about, since a result produced
+        // after a compaction is a result produced from a summary.
+        "compaction_end" => v
+            .get("aborted")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+            .not()
+            .then(|| v.get("errorMessage").filter(|e| !e.is_null()).is_none())
+            .filter(|succeeded| *succeeded)
+            .map(|_| RunnerSignal::Progress {
+                kind: EventKind::new(EventKind::CONTEXT_COMPACTED),
+                // `manual` when farseer or the operator asked, `auto` when pi
+                // decided the context was full. A different fact about the run
+                // in each case, so the record keeps which.
+                payload: json!({ "reason": v.get("reason") }),
+            }),
         // The agent loop settled, which is one or many turns later than the
         // first `turn_end`: a turn is one round-trip, and a tool call starts
         // another. Ending a worker at `turn_end` would cut the loop mid-tool.
-        "agent_end" => Some(RunnerSignal::Finished(finished(&v))),
+        //
+        // `isTerminal` is the second half of that, and omp is what taught it.
+        // omp runs a subagent as a **named background job**: the foreground
+        // loop calls `task`, then `hub {op: "wait"}`, then ends with
+        // `"isTerminal": false` while the subagent is still going. A second
+        // loop starts when the job's result arrives as an `async-result`
+        // message, and *that* one is terminal. Treating the first as the end
+        // would have ended a worker before its own subagent answered - the
+        // same family of bug as ending at `turn_end`, one level further out.
+        //
+        // Absent means terminal: pi sends no such field and has no background
+        // jobs to be waiting on.
+        "agent_end" => Some(
+            if v.get("isTerminal").and_then(Value::as_bool) == Some(false) {
+                // Not the end, but real spending. Recorded now rather than
+                // dropped, because the terminal `agent_end` carries only its
+                // own leg's messages and this leg's tokens are not in it.
+                let spent = finished(&v);
+                RunnerSignal::Progress {
+                    kind: EventKind::new(EventKind::TOOL_RESULT),
+                    payload: json!({
+                        "tool_name": "background job",
+                        "tokens": spent.tokens,
+                        "cost_usd_micros": spent.cost_usd_micros,
+                    }),
+                }
+            } else {
+                RunnerSignal::Finished(finished(&v))
+            },
+        ),
         _ => None,
     };
     Ok(signal.into_iter().collect())
@@ -393,6 +441,61 @@ mod tests {
         let text = payload["text"].as_str().unwrap();
         assert!(text.ends_with("..."), "clipped results say so");
         assert!(text.chars().count() < 2_100, "{}", text.len());
+    }
+
+    /// `compaction_end` fires whether or not the compaction happened, and the
+    /// one thing `02 record scope` most wants to be true is whether a result
+    /// came out of a summary.
+    #[test]
+    fn a_compaction_that_did_not_happen_is_not_recorded_as_one() {
+        let failed = r#"{"type":"compaction_end","reason":"manual","aborted":false,"willRetry":false,"errorMessage":"Compaction failed: Nothing to compact (session too small)"}"#;
+        assert_eq!(parse_line(failed).unwrap(), vec![]);
+
+        let aborted = r#"{"type":"compaction_end","reason":"auto","aborted":true,"willRetry":false}"#;
+        assert_eq!(parse_line(aborted).unwrap(), vec![]);
+
+        let real = r#"{"type":"compaction_end","reason":"auto","aborted":false,"willRetry":false}"#;
+        let signals = parse_line(real).unwrap();
+        let [RunnerSignal::Progress { kind, payload }] = &signals[..] else {
+            panic!("one progress signal, got {signals:?}")
+        };
+        assert_eq!(kind.as_str(), EventKind::CONTEXT_COMPACTED);
+        // Which kind of compaction it was: pi deciding the context was full is
+        // a different fact about the run than farseer asking.
+        assert_eq!(payload["reason"], "auto");
+    }
+
+    /// omp runs a subagent as a background job and ends the foreground loop
+    /// while it is still running. Ending the worker there would cut the run off
+    /// before its own subagent answered.
+    #[test]
+    fn a_loop_that_says_it_is_not_terminal_does_not_end_the_run() {
+        let waiting = r#"{"type":"agent_end","isTerminal":false,"messages":[{"role":"assistant","usage":{"totalTokens":900,"cost":{"total":0.004}},"stopReason":"toolUse"}]}"#;
+        let signals = parse_line(waiting).unwrap();
+        let [RunnerSignal::Progress { payload, .. }] = &signals[..] else {
+            panic!("spending, not an ending: {signals:?}")
+        };
+        // The leg still spent money, and the terminal `agent_end` will carry
+        // only its own messages - so this is the record's only sight of it.
+        assert_eq!(payload["tokens"], 900);
+        assert_eq!(payload["cost_usd_micros"], 4000);
+
+        let done = r#"{"type":"agent_end","isTerminal":true,"messages":[{"role":"assistant","usage":{"totalTokens":100,"cost":{"total":0.001}},"stopReason":"stop"}]}"#;
+        assert!(matches!(
+            parse_line(done).unwrap().as_slice(),
+            [RunnerSignal::Finished(_)]
+        ));
+    }
+
+    /// pi sends no `isTerminal` and has no background jobs to be waiting on, so
+    /// absent must not be read as "not finished" - that would hang every pi run.
+    #[test]
+    fn a_runner_that_never_mentions_terminality_still_finishes() {
+        let line = r#"{"type":"agent_end","messages":[{"role":"assistant","usage":{"totalTokens":10,"cost":{"total":0}},"stopReason":"stop"}]}"#;
+        assert!(matches!(
+            parse_line(line).unwrap().as_slice(),
+            [RunnerSignal::Finished(_)]
+        ));
     }
 
     #[test]
