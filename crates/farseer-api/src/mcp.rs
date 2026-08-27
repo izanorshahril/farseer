@@ -528,6 +528,12 @@ impl FarseerMcp {
                 claude_mcp_config: None,
                 claude_append_system_prompt: None,
                 account: Some(self.state.runner_config().account_for(&contract.runner)),
+                // What the operator pinned, or nothing at all. `30 codex app
+                // server`: farseer passes a model or an effort only when a
+                // person wrote one down, so an unpinned runner keeps whatever
+                // its own config says.
+                model: self.state.runner_config().launch_of(&contract.runner).0.map(str::to_string),
+                effort: self.state.runner_config().launch_of(&contract.runner).1.map(str::to_string),
             },
             Some(cancel_requested),
         );

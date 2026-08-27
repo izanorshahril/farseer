@@ -480,3 +480,18 @@ code {
   font-weight: 600;
   color: var(--warn, #b78100);
 }
+
+/* What is spawned right now. A tree rather than a list: runs sharing a task are
+   one manager and whatever it delegated to, and the indent is the only place
+   that relationship is visible. */
+.runners-live > li + li {
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px solid var(--line, #2a2a2a);
+}
+.runners-tree > li + li {
+  margin-top: 4px;
+}
+.runners-tree .caveat {
+  margin-left: 18px;
+}

@@ -198,6 +198,15 @@ pub struct RunOptions {
     /// business reading config. Absent means the caller did not say, and a
     /// window observed without one is dropped rather than filed under a guess.
     pub account: Option<String>,
+    /// The model the operator pinned for this runner in `runners.toml`, or
+    /// `None` to leave the runner on its own configuration.
+    ///
+    /// Passed in for the same reason as [`Self::account`]: this crate reads no
+    /// config, and `30 codex app server` settled that farseer never invents a
+    /// value the operator did not write down.
+    pub model: Option<String>,
+    /// The effort the operator pinned, in the runner's own vocabulary.
+    pub effort: Option<String>,
 }
 
 impl Default for RunOptions {
@@ -209,6 +218,8 @@ impl Default for RunOptions {
             claude_mcp_config: None,
             claude_append_system_prompt: None,
             account: None,
+            model: None,
+            effort: None,
         }
     }
 }
@@ -264,13 +275,25 @@ pub enum Channel {
     /// `initialize`, then an `initialized` **notification** the server will not
     /// proceed without, then `thread/start`, then the goal as `turn/start`.
     CodexAppServer { manager: bool },
+    /// pi's headless RPC mode, per [`farseer_runner::pi`].
+    ///
+    /// Conversational like the two above and ended by the same rule, but with
+    /// **no handshake at all**: pi's first line is the goal. The one line
+    /// farseer writes before it is `get_state`, which is a question rather than
+    /// a negotiation - farseer would run identically without it, and asks only
+    /// so `10 runner inventory`'s observed-never-advertised rule has something
+    /// to observe.
+    PiRpc { manager: bool },
 }
 
 impl Channel {
     fn stdin_mode(self) -> StdinMode {
         match self {
             // A goal or a handshake has to reach it.
-            Self::Steered(_) | Self::Acp { .. } | Self::CodexAppServer { .. } => StdinMode::Live,
+            Self::Steered(_)
+            | Self::Acp { .. }
+            | Self::CodexAppServer { .. }
+            | Self::PiRpc { .. } => StdinMode::Live,
             Self::OneShot => StdinMode::Closed,
         }
     }
@@ -280,7 +303,9 @@ impl Channel {
     fn ends_at_terminal(self) -> bool {
         matches!(
             self,
-            Self::Acp { manager: false } | Self::CodexAppServer { manager: false }
+            Self::Acp { manager: false }
+                | Self::CodexAppServer { manager: false }
+                | Self::PiRpc { manager: false }
         )
     }
 }
@@ -313,6 +338,11 @@ pub struct StartedWorker {
     /// The Codex app-server thread this run is talking to, once started, and
     /// what that runner is configured to bring to it.
     codex_thread: Option<farseer_runner::codex_app_server::ThreadOpened>,
+    /// What the operator pinned in `runners.toml`, for the protocols that carry
+    /// it in a frame rather than on the argv. `None` leaves the runner on its
+    /// own configuration, per `30 codex app server`.
+    pinned_model: Option<String>,
+    pinned_effort: Option<String>,
 }
 
 /// A cloneable handle that writes a steer message into a run's live process,
@@ -404,6 +434,8 @@ impl StartedWorker {
             acp_opened: None,
             acp_next_id: Arc::new(AtomicI64::new(1)),
             codex_thread: None,
+            pinned_model: None,
+            pinned_effort: None,
         })
     }
 
@@ -424,6 +456,15 @@ impl StartedWorker {
                 stdin,
                 wire: SteerWire::Native(frame),
             }),
+            // pi addresses a steer to nothing - it lands in whatever turn is
+            // running - so the native wire carries it with no session id and no
+            // handshake to wait for. `steer` rather than `follow_up`, because
+            // `20 worker control channel` is about reaching a run **in flight**
+            // and pi queues a follow-up until the turn ends.
+            Channel::PiRpc { manager: true } => Some(SteerHandle {
+                stdin,
+                wire: SteerWire::Native(farseer_runner::pi::steer_frame),
+            }),
             // Only after the handshake: the session id is what a steer is
             // addressed to, and `start_worker` bootstraps before any caller can
             // reach this. A worker gets nothing - `20 worker control channel`
@@ -440,9 +481,10 @@ impl StartedWorker {
             // is a **correction to `20 worker control channel`**, whose
             // turn-boundary finding this would be the first evidence against.
             // That is a decision, not a wiring detail.
-            Channel::CodexAppServer { .. } | Channel::Acp { manager: false } | Channel::OneShot => {
-                None
-            }
+            Channel::CodexAppServer { .. }
+            | Channel::Acp { manager: false }
+            | Channel::PiRpc { manager: false }
+            | Channel::OneShot => None,
         }
     }
 
@@ -504,6 +546,18 @@ impl StartedWorker {
                 )?;
                 self.acp_opened = Some(opened);
             }
+            Channel::PiRpc { .. } => {
+                // No handshake: the goal is the first thing pi needs. The
+                // `get_state` ahead of it is a question whose answer becomes a
+                // `Session` signal in the read loop - asked rather than assumed,
+                // so the model and effort on the operator's surface are pi's
+                // claim about itself rather than farseer's launch flags read
+                // back as if they were an observation.
+                self.proc
+                    .write_line(&farseer_runner::pi::get_state_frame())?;
+                self.proc
+                    .write_line(&farseer_runner::pi::prompt_frame(goal))?;
+            }
             Channel::CodexAppServer { .. } => {
                 let mut ids = farseer_runner::jsonrpc::Ids::starting_at(
                     self.acp_next_id.load(Ordering::Relaxed) - 1,
@@ -527,13 +581,14 @@ impl StartedWorker {
                         goal_id,
                         &opened.thread_id,
                         goal,
-                        // Read, never written. The operator's own config says
-                        // `xhigh` on this machine, and a farseer that sent its
-                        // own value would silently downgrade every run they
-                        // configured up. The default is surfaced as a hint on
-                        // `session_started` instead.
-                        None,
-                        None,
+                        // Only what the operator pinned in `runners.toml`.
+                        // `30 codex app server` decided farseer never sends a
+                        // value of its own - a farseer that did would silently
+                        // downgrade every run they had configured up - and two
+                        // `None`s here still mean exactly that. What changed is
+                        // that the operator now has somewhere to say otherwise.
+                        self.pinned_model.as_deref(),
+                        self.pinned_effort.as_deref(),
                     ))?;
                 self.codex_thread = Some(opened);
             }
@@ -554,6 +609,9 @@ impl StartedWorker {
         progress_actor: Actor,
         mut now_ms: impl FnMut() -> i64,
         account: Option<&str>,
+        // When the row this run already wrote says it started, so an update
+        // mid-run does not move it.
+        started_ts: i64,
     ) -> Result<RunReport, ManagerError> {
         let mut report = None;
         let mut output = None;
@@ -777,6 +835,30 @@ impl StartedWorker {
                             cancel_on_store_failure.cancel();
                             return;
                         }
+                        // The row too, not only the event. `finished_row` fills
+                        // the model from this same session at the end of the
+                        // run, which is the third time that shape has been
+                        // wrong for the same reason: **a manager never ends**,
+                        // so a fact recorded only at the end is a fact the
+                        // operator never sees while it matters. Same correction
+                        // `28 operator surface` made for the context window and
+                        // `27 quota accounting` made for the window itself.
+                        if let Some(model) = info.model.clone() {
+                            let row = row(
+                                contract,
+                                None,
+                                0,
+                                0,
+                                started_ts,
+                                None,
+                                model,
+                            );
+                            if let Err(e) = sink.upsert_run(&row) {
+                                store_err = Some(e);
+                                cancel_on_store_failure.cancel();
+                                return;
+                            }
+                        }
                         session = Some(info);
                     }
                 }
@@ -895,6 +977,18 @@ pub fn control_of(runner: &str) -> Control {
             steer: false,
             quota: true,
             context: true,
+            compaction: true,
+        },
+        // `29 harness protocol`: pi steers natively, prices its own messages,
+        // and brackets a compaction. No quota: pi calls whichever provider the
+        // operator configured, and a subscription window is the provider's fact
+        // rather than pi's. No context window either - `get_state` knows the
+        // denominator but the event stream never sends it, and half an answer is
+        // the thing `10 runner inventory`'s rule exists to refuse.
+        "pi" => Control {
+            steer: true,
+            quota: false,
+            context: false,
             compaction: true,
         },
         // `29 harness protocol`: an ACP agent names a context window and steers
@@ -1037,6 +1131,26 @@ pub fn start_worker(
                 },
             )
         }
+        // pi's RPC mode, per `29 harness protocol` and [`farseer_runner::pi`].
+        // The only runner farseer launches with a model on the argv, because it
+        // is the only one whose model the operator can pin in `runners.toml`
+        // and have farseer pass without overriding a value they set elsewhere.
+        "pi" => {
+            let exe = resolve("pi").ok_or_else(|| ManagerError::ExecutableNotFound("pi".into()))?;
+            StartedWorker::spawn(
+                &exe,
+                &farseer_runner::pi::build_args(
+                    options.model.as_deref(),
+                    options.effort.as_deref(),
+                ),
+                cwd,
+                thresholds,
+                farseer_runner::pi::parse_line,
+                Channel::PiRpc {
+                    manager: options.role == RunRole::Manager,
+                },
+            )
+        }
         // The ACP runners, per `29 harness protocol`. A runner name here means
         // **an executable and a subcommand**, which is a shape `10 runner
         // inventory` never had to carry: `goose` and `goose-acp` are the same
@@ -1061,6 +1175,12 @@ pub fn start_worker(
         },
     }?;
     let mut started = started;
+    // Set before the handshake rather than passed through it: a protocol that
+    // carries the model in a frame (the Codex app-server) and one that carries
+    // it on the argv (pi) need the same value at different moments, and the
+    // operator declared it once.
+    started.pinned_model = options.model.clone();
+    started.pinned_effort = options.effort.clone();
     started.bootstrap(&contract.goal, cwd)?;
     Ok(started)
 }
@@ -1129,6 +1249,7 @@ pub fn run_worker(
             progress_actor,
             &mut now_ms,
             options.account.as_deref(),
+            started_ts,
         )
     });
 
@@ -1322,7 +1443,7 @@ mod tests {
         ]);
 
         let report = started
-            .run_to_completion(&store, &contract, Actor::Worker, || 1, None)
+            .run_to_completion(&store, &contract, Actor::Worker, || 1, None, 1)
             .unwrap();
 
         assert_eq!(report.outcome, Outcome::Ok);
@@ -1351,7 +1472,7 @@ mod tests {
         ]);
 
         let report = started
-            .run_to_completion(&store, &contract, Actor::Worker, || 1, None)
+            .run_to_completion(&store, &contract, Actor::Worker, || 1, None, 1)
             .unwrap();
         assert_eq!(report.outcome, Outcome::Ok);
         assert!(
@@ -1585,7 +1706,7 @@ mod tests {
             token.cancel();
         });
 
-        let result = started.run_to_completion(&store, &contract, Actor::Worker, || 1, None);
+        let result = started.run_to_completion(&store, &contract, Actor::Worker, || 1, None, 1);
         let Err(ManagerError::Cancelled(report)) = result else {
             panic!("expected cancellation with the completed turn report, got {result:?}");
         };
@@ -1624,7 +1745,7 @@ mod tests {
         // `05 run state model`: cancelled is never failed. Without the result line a crash
         // and a deliberate cancel look identical on the wire; `Cancelled`
         // proves the distinction survived rather than collapsing to `NoResult`.
-        let result = started.run_to_completion(&store, &contract, Actor::Worker, || 1, None);
+        let result = started.run_to_completion(&store, &contract, Actor::Worker, || 1, None, 1);
         let Err(ManagerError::Cancelled(report)) = result else {
             panic!("expected cancellation with an unknown report, got {result:?}");
         };
@@ -1755,7 +1876,7 @@ mod tests {
         let handle = started.liveness_handle();
 
         started
-            .run_to_completion(&store, &contract, Actor::Worker, || 1, None)
+            .run_to_completion(&store, &contract, Actor::Worker, || 1, None, 1)
             .unwrap();
 
         assert_eq!(
@@ -1897,6 +2018,98 @@ mod tests {
         );
         // Left blank on purpose: `27 quota accounting` declares the account.
         assert!(report.windows.iter().all(|w| w.account.is_empty()));
+    }
+
+    /// Live: the fifth protocol, and the second runner able to report money.
+    ///
+    /// Not `one_acp_run`, because pi answers a different set of questions: it
+    /// reports **cost** where the conversational runners report a context
+    /// window, and reports no window at all. Reusing the shared helper would
+    /// have meant loosening the assertion that makes the helper worth having -
+    /// `29 harness protocol`'s point is that runners differ, and a test that
+    /// hides the difference proves nothing.
+    ///
+    /// Run with: `cargo test -p farseer-manager a_pi_run -- --ignored --nocapture`
+    #[test]
+    #[ignore = "spawns a real `pi --mode rpc` and spends a subscription"]
+    fn a_pi_run_reaches_the_record_with_what_it_cost() {
+        let store = Store::open_in_memory().unwrap();
+        let spec = WorkerContractSpec {
+            run_id: RunId::new(),
+            task_id: TaskId::new(),
+            cell_id: CellId::new("zero"),
+            goal: "Reply with exactly: pi online.".into(),
+            workspace: WorkspaceStrategy::Worktree,
+            runner: "pi".into(),
+            tool_grants: vec![],
+            autonomy_ceiling: Irreversibility::Reversible,
+            budget: Budget::default(),
+            definition_of_done: String::new(),
+        };
+        let run_id = spec.run_id;
+        let contract = WorkerContract::seal(spec);
+
+        let mut tick = 100i64;
+        let report = run_worker(
+            &store,
+            &contract,
+            &std::env::current_dir().unwrap(),
+            LivenessThresholds::default(),
+            // What the operator pinned in `runners.toml`, passed the way the API
+            // passes it. Cheap and shallow on purpose: this test proves the
+            // wiring, not the model.
+            &RunOptions {
+                model: Some("openai-codex/gpt-5.6-luna".into()),
+                effort: Some("low".into()),
+                ..RunOptions::default()
+            },
+            || {
+                tick += 1;
+                tick
+            },
+            |_, _, _| {},
+        )
+        .expect("the run completes rather than waiting for an EOF that never comes");
+
+        assert_eq!(report.outcome, Outcome::Ok);
+        // The claim `10 runner inventory` made about only one runner. pi prices
+        // every message itself, so this is the second.
+        assert!(
+            report.cost_usd_micros.is_some_and(|micros| micros > 0),
+            "pi reports what it spent: {report:?}"
+        );
+        assert!(report.tokens.is_some_and(|tokens| tokens > 0), "{report:?}");
+        // No quota and no denominator, and that is the honest answer rather
+        // than an omission - see `control_of("pi")`.
+        assert!(report.windows.is_empty(), "{:?}", report.windows);
+
+        let events = store
+            .scan(0, 200, &farseer_store::ScanFilter::run(run_id))
+            .unwrap();
+        let kinds: Vec<&str> = events.iter().map(|event| event.kind.as_str()).collect();
+        assert!(kinds.contains(&EventKind::MANAGER_ANSWERED), "{kinds:?}");
+
+        // `get_state` is asked rather than assumed: this is pi describing
+        // itself, which is why the effort on the operator's surface is an
+        // observation and not farseer reading its own launch flags back.
+        let session = events
+            .iter()
+            .find(|event| event.kind.as_str() == EventKind::SESSION_STARTED)
+            .expect("pi answers `get_state` before the goal goes in");
+        eprintln!("session_started: {}", session.payload);
+        assert_eq!(
+            session.payload.get("configured_effort").and_then(|v| v.as_str()),
+            Some("low"),
+            "the effort the operator pinned, as pi reports it back"
+        );
+        assert_eq!(
+            session.payload.get("model").and_then(|v| v.as_str()),
+            Some("gpt-5.6-luna")
+        );
+        assert_eq!(
+            session.payload.get("provider").and_then(|v| v.as_str()),
+            Some("openai-codex")
+        );
     }
 
     fn one_acp_run(runner: &str) -> RunReport {

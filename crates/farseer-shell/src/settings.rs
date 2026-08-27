@@ -77,7 +77,7 @@ fn cannot(runner: &str) -> Vec<&'static str> {
 /// The runner and its executable are **not the same string** - `claude-code` is
 /// driven by a binary called `claude` - and resolving the runner name instead of
 /// the executable reports a runner as missing while farseer launches it happily.
-const KNOWN: [(&str, &str, &str); 5] = [
+const KNOWN: [(&str, &str, &str); 6] = [
     (
         "claude-code",
         "claude",
@@ -102,6 +102,11 @@ const KNOWN: [(&str, &str, &str); 5] = [
         "goose",
         "goose",
         "one-shot; terminal line carries no failure field",
+    ),
+    (
+        "pi",
+        "pi",
+        "steers mid-run, prices its own answers, takes a pinned model and effort",
     ),
 ];
 

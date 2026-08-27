@@ -660,6 +660,12 @@ fn manager_run_options(
         // and passed down rather than derived: the manager crate reads no
         // config, and an undeclared runner is its own account.
         account: Some(state.runner_config().account_for(&contract.runner)),
+                // What the operator pinned, or nothing at all. `30 codex app
+                // server`: farseer passes a model or an effort only when a
+                // person wrote one down, so an unpinned runner keeps whatever
+                // its own config says.
+                model: state.runner_config().launch_of(&contract.runner).0.map(str::to_string),
+                effort: state.runner_config().launch_of(&contract.runner).1.map(str::to_string),
     };
     if contract.runner != "claude-code" {
         return Ok(options);
@@ -784,6 +790,12 @@ pub(crate) fn spawn_run(
             claude_mcp_config: None,
             claude_append_system_prompt: None,
             account: Some(state.runner_config().account_for(&contract.runner)),
+                // What the operator pinned, or nothing at all. `30 codex app
+                // server`: farseer passes a model or an effort only when a
+                // person wrote one down, so an unpinned runner keeps whatever
+                // its own config says.
+                model: state.runner_config().launch_of(&contract.runner).0.map(str::to_string),
+                effort: state.runner_config().launch_of(&contract.runner).1.map(str::to_string),
         })
     };
     let options = match options {

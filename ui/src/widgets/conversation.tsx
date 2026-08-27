@@ -148,6 +148,17 @@ export function ConversationWidget({ bridge }: { bridge: Bridge }) {
           effortFrom: str("configured_from"),
           session_id: str("session_id"),
           cell: event.cell_id,
+          // Cleared, not carried. A new session has spent nothing yet, and a
+          // runner that reports no context window must not inherit the last
+          // one's - `pi` reporting neither was showing a `codex-app-server`
+          // context reading under a pi session id, which is precisely the
+          // absent-because-unreportable / absent-because-nothing-happened
+          // confusion `10 runner inventory`'s rule exists to prevent.
+          used: undefined,
+          size: undefined,
+          tokens: undefined,
+          cost: undefined,
+          outcome: undefined,
         }));
         return;
       }
