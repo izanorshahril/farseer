@@ -243,3 +243,31 @@ The run id resolved to a live manager; the token did not match. The token is a 6
 **The fix is unchanged and now has evidence: derive manager identity from the bearer the guard already validated, and make both arguments optional.** The guard scans `AppState::managers` for the presented token already, so the identity is resolved a few frames earlier and thrown away. That removes the credential from every MCP prompt - Claude Code's included - and makes this transport work without asking a model to be a courier for a secret.
 
 Not built here. It is one change that touches all three MCP transports and deserves its own pass.
+
+---
+
+## The credential left the prompt, 2026-08-28
+
+`CARDAMOM`, relayed by a `goose-acp` manager from a real `pi` worker - `01a04917-35d3`, ok, 1535 micros, 7641 tokens. Same instruction that failed an hour earlier on a mistyped token.
+
+### The fix this ticket kept deferring
+
+Identity now comes from **the bearer the request already carried**, and `manager_run_id` / `manager_token` are optional arguments kept for a client that prefers to state them.
+
+The guard was already resolving this and throwing it away: it scans `AppState::managers` for the presented token to let a manager-scoped request through at all. `manager_by_token` returns the context instead of a bool, and rmcp hands a tool body the HTTP `Parts` through `ctx.extensions`, which is how the bearer reaches `authorize_manager`.
+
+**No manager on any transport is told its own token any more** - Claude Code and Codex included, which were carrying one for no reason other than that Claude Code's route was built first. A test asserts it across all three MCP reaches, so the next transport inherits the property instead of the habit.
+
+### Three ways a prompt-borne credential fails, and the third was the surprise
+
+This ticket argued a credential in a prompt is one a model can **quote** or **leak**. goose found the third: it can **mistype** it. A 64-character hex string copied from a prompt into a tool argument, one character out, failing as `manager_token does not authorize this manager run` - which reads like an authorization bug and is a transcription error.
+
+Codex copied the same string correctly an hour earlier. **It had been working by luck of the model**, and nothing in the design said so.
+
+### A test whose premise the fix expired
+
+`delegating_to_a_worker_not_in_the_roster_is_refused` asserted that an active manager UUID with a wrong `manager_token` is refused. Its client presents the manager's real bearer, so it is now authorized and the wrong argument is ignored - which is the intended behaviour, not a regression.
+
+It asserts the new rule instead: **the transport proved this manager, and a mistyped argument beside it must not undo that.** A caller with no bearer never reaches a tool body at all; the guard tests already cover that.
+
+That is the second time this map has found a test that would have passed on a premise that had quietly expired, after `31`'s own `a_manager_that_cannot_delegate...` asserted against pi once pi could delegate.

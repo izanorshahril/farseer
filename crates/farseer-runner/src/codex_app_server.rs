@@ -189,7 +189,13 @@ where
     let id = ids.next();
     let answer = request(
         process,
-        &thread_start_frame(id, &cwd.to_string_lossy(), sandbox, developer_instructions, mcp),
+        &thread_start_frame(
+            id,
+            &cwd.to_string_lossy(),
+            sandbox,
+            developer_instructions,
+            mcp,
+        ),
         id,
         "thread/start",
         parse_line,

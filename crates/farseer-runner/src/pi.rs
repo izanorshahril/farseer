@@ -428,8 +428,10 @@ fn tool_text(result: Option<&Value>) -> Option<String> {
         .iter()
         .filter_map(|block| block.get("text").and_then(Value::as_str))
         .collect::<Vec<_>>()
-        .join("
-");
+        .join(
+            "
+",
+        );
     if joined.is_empty() {
         return None;
     }
@@ -588,7 +590,8 @@ mod tests {
         let failed = r#"{"type":"compaction_end","reason":"manual","aborted":false,"willRetry":false,"errorMessage":"Compaction failed: Nothing to compact (session too small)"}"#;
         assert_eq!(parse_line(failed).unwrap(), vec![]);
 
-        let aborted = r#"{"type":"compaction_end","reason":"auto","aborted":true,"willRetry":false}"#;
+        let aborted =
+            r#"{"type":"compaction_end","reason":"auto","aborted":true,"willRetry":false}"#;
         assert_eq!(parse_line(aborted).unwrap(), vec![]);
 
         let real = r#"{"type":"compaction_end","reason":"auto","aborted":false,"willRetry":false}"#;
@@ -607,7 +610,10 @@ mod tests {
     #[test]
     fn a_tool_level_reaches_the_argv_and_shell_asks_for_nothing() {
         let read = build_args("pi", ToolLevel::Read, None, None, &[], &[], None);
-        let i = read.iter().position(|a| a == "--tools").expect("an allowlist");
+        let i = read
+            .iter()
+            .position(|a| a == "--tools")
+            .expect("an allowlist");
         assert_eq!(read[i + 1], "read,ls,find,grep");
         assert!(!read[i + 1].contains("bash"), "read may not reach a shell");
         assert!(!read[i + 1].contains("write"), "read may not write");
@@ -615,7 +621,10 @@ mod tests {
         // `12 autonomy and deny list`'s boundary: writing inside a worktree is
         // fully reversible, and a shell is the first thing that is not.
         let edit = build_args("pi", ToolLevel::Edit, None, None, &[], &[], None);
-        let i = edit.iter().position(|a| a == "--tools").expect("an allowlist");
+        let i = edit
+            .iter()
+            .position(|a| a == "--tools")
+            .expect("an allowlist");
         assert!(edit[i + 1].contains("write"), "{}", edit[i + 1]);
         assert!(!edit[i + 1].contains("bash"), "{}", edit[i + 1]);
 
@@ -739,15 +748,32 @@ mod tests {
     /// so improvises. The prompt is how it finds out.
     #[test]
     fn a_manager_is_told_who_it_is_when_the_caller_says_so() {
-        assert!(!build_args("pi", ToolLevel::Shell, None, None, &[], &[], None).contains(&"--append-system-prompt".to_string()));
+        assert!(
+            !build_args("pi", ToolLevel::Shell, None, None, &[], &[], None)
+                .contains(&"--append-system-prompt".to_string())
+        );
 
-        let args = build_args("pi", ToolLevel::Shell, None, None, &[], &[], Some("You are the manager for cell zero."));
-        let at = args.iter().position(|a| a == "--append-system-prompt").expect("passed");
+        let args = build_args(
+            "pi",
+            ToolLevel::Shell,
+            None,
+            None,
+            &[],
+            &[],
+            Some("You are the manager for cell zero."),
+        );
+        let at = args
+            .iter()
+            .position(|a| a == "--append-system-prompt")
+            .expect("passed");
         assert_eq!(args[at + 1], "You are the manager for cell zero.");
 
         // Whitespace is not an identity. An empty prompt sends no flag rather
         // than an empty one, which pi would take literally.
-        assert!(!build_args("pi", ToolLevel::Shell, None, None, &[], &[], Some("  ")).contains(&"--append-system-prompt".to_string()));
+        assert!(
+            !build_args("pi", ToolLevel::Shell, None, None, &[], &[], Some("  "))
+                .contains(&"--append-system-prompt".to_string())
+        );
     }
 
     /// A cell gets the skills it declared and nothing the machine happens to
@@ -758,7 +784,15 @@ mod tests {
         assert!(bare.contains(&"--no-skills".to_string()));
         assert!(!bare.contains(&"--skill".to_string()));
 
-        let declared = build_args("pi", ToolLevel::Shell, None, None, &[std::path::PathBuf::from("/repo/skills/echo")], &[], None);
+        let declared = build_args(
+            "pi",
+            ToolLevel::Shell,
+            None,
+            None,
+            &[std::path::PathBuf::from("/repo/skills/echo")],
+            &[],
+            None,
+        );
         let flat = declared.join(" ");
         assert!(flat.contains("--no-skills"), "{flat}");
         assert!(flat.contains("--skill /repo/skills/echo"), "{flat}");
@@ -771,7 +805,15 @@ mod tests {
     fn an_unattended_run_can_never_reach_the_tool_that_waits_for_a_human() {
         for args in [
             build_args("pi", ToolLevel::Shell, None, None, &[], &[], None),
-            build_args("pi", ToolLevel::Shell, Some("m"), Some("low"), &[], &[], None),
+            build_args(
+                "pi",
+                ToolLevel::Shell,
+                Some("m"),
+                Some("low"),
+                &[],
+                &[],
+                None,
+            ),
         ] {
             let flat = args.join(" ");
             assert!(flat.contains("--exclude-tools ask_question"), "{flat}");
@@ -782,10 +824,25 @@ mod tests {
     fn the_operator_pins_the_model_and_an_unpinned_one_stays_pis_own() {
         assert_eq!(
             build_args("pi", ToolLevel::Shell, None, None, &[], &[], None),
-            ["--mode", "rpc", "--exclude-tools", "ask_question", "--no-skills", "--no-extensions"]
+            [
+                "--mode",
+                "rpc",
+                "--exclude-tools",
+                "ask_question",
+                "--no-skills",
+                "--no-extensions"
+            ]
         );
         assert_eq!(
-            build_args("pi", ToolLevel::Shell, Some("gpt-5.6-luna"), Some("low"), &[], &[], None),
+            build_args(
+                "pi",
+                ToolLevel::Shell,
+                Some("gpt-5.6-luna"),
+                Some("low"),
+                &[],
+                &[],
+                None
+            ),
             [
                 "--mode",
                 "rpc",
@@ -824,7 +881,13 @@ mod tests {
     #[test]
     fn a_skill_path_is_only_ever_passed_to_the_runner_that_takes_one() {
         let skill = [std::path::PathBuf::from("/repo/skills/farseer-echo")];
-        assert!(build_args("pi", ToolLevel::Shell, None, None, &skill, &[], None).contains(&"--skill".to_string()));
-        assert!(!build_args("omp", ToolLevel::Shell, None, None, &skill, &[], None).contains(&"--skill".to_string()));
+        assert!(
+            build_args("pi", ToolLevel::Shell, None, None, &skill, &[], None)
+                .contains(&"--skill".to_string())
+        );
+        assert!(
+            !build_args("omp", ToolLevel::Shell, None, None, &skill, &[], None)
+                .contains(&"--skill".to_string())
+        );
     }
 }

@@ -984,15 +984,7 @@ impl StartedWorker {
                         // `28 operator surface` made for the context window and
                         // `27 quota accounting` made for the window itself.
                         if let Some(model) = info.model.clone() {
-                            let row = row(
-                                contract,
-                                None,
-                                0,
-                                0,
-                                started_ts,
-                                None,
-                                model,
-                            );
+                            let row = row(contract, None, 0, 0, started_ts, None, model);
                             if let Err(e) = sink.upsert_run(&row) {
                                 store_err = Some(e);
                                 cancel_on_store_failure.cancel();
@@ -1798,15 +1790,18 @@ mod tests {
         // `16 local api surface` promised the answer arrives on the stream, and
         // for an operator-instructed manager nothing put it there: the terminal
         // text only travelled back to a delegating manager over MCP.
-        let payload = finished_payload(&Ok(RunReport {
-            outcome: Outcome::Ok,
-            cost_usd_micros: Some(12_000),
-            tokens: Some(340),
-            result: Some("the changelog is posted".into()),
-            window: None,
-            windows: Vec::new(),
-            session: None,
-        }), None);
+        let payload = finished_payload(
+            &Ok(RunReport {
+                outcome: Outcome::Ok,
+                cost_usd_micros: Some(12_000),
+                tokens: Some(340),
+                result: Some("the changelog is posted".into()),
+                window: None,
+                windows: Vec::new(),
+                session: None,
+            }),
+            None,
+        );
 
         assert_eq!(payload["outcome"], "ok");
         assert_eq!(payload["text"], "the changelog is posted");
@@ -1815,15 +1810,18 @@ mod tests {
 
     #[test]
     fn a_cancelled_run_still_reports_what_it_managed_to_say() {
-        let payload = finished_payload(&Err(ManagerError::Cancelled(RunReport {
-            outcome: Outcome::Cancelled,
-            cost_usd_micros: None,
-            tokens: None,
-            result: Some("halfway through".into()),
-            window: None,
-            windows: Vec::new(),
-            session: None,
-        })), None);
+        let payload = finished_payload(
+            &Err(ManagerError::Cancelled(RunReport {
+                outcome: Outcome::Cancelled,
+                cost_usd_micros: None,
+                tokens: None,
+                result: Some("halfway through".into()),
+                window: None,
+                windows: Vec::new(),
+                session: None,
+            })),
+            None,
+        );
 
         assert_eq!(payload["outcome"], "cancelled");
         assert_eq!(payload["text"], "halfway through");
@@ -2459,7 +2457,10 @@ mod tests {
             .expect("pi answers `get_state` before the goal goes in");
         eprintln!("session_started: {}", session.payload);
         assert_eq!(
-            session.payload.get("configured_effort").and_then(|v| v.as_str()),
+            session
+                .payload
+                .get("configured_effort")
+                .and_then(|v| v.as_str()),
             Some("low"),
             "the effort the operator pinned, as pi reports it back"
         );

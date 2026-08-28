@@ -189,6 +189,18 @@ impl AppState {
         self.managers().get(&run_id).cloned()
     }
 
+    /// The manager this bearer belongs to, if it belongs to one.
+    ///
+    /// The guard already scans for exactly this to let a manager-scoped request
+    /// through; `31 manager delegation reach` found the identity was resolved
+    /// here and thrown away, leaving the model to re-state it from its prompt.
+    fn manager_by_token(&self, presented: &str) -> Option<ManagerContext> {
+        self.managers()
+            .values()
+            .find(|manager| manager.manager_token.matches(presented))
+            .cloned()
+    }
+
     fn manager_token_matches(&self, presented: &str) -> bool {
         self.managers()
             .values()
@@ -590,26 +602,33 @@ pub struct InstructResponse {
 /// so the roster resolution, the worker cap, the budget draw-down and the
 /// cancellation link are one implementation rather than two that drift.
 ///
-/// Authorization is the manager's own token, presented as the bearer *and* in
-/// the body: the bearer is what [`is_manager_scoped`] lets past the guard, and
-/// the body is what binds the call to a specific live manager run. A manager
-/// bearer opens this route and no operator route.
+/// Authorization is the manager's own token, presented as the bearer. The body
+/// may repeat it and does not have to: `31 manager delegation reach` moved
+/// identity onto the credential the transport already proved, after a model
+/// mistyped the one it was asked to copy. A manager bearer opens this route and
+/// no operator route.
 async fn delegate_to_worker(
     State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
     Json(body): Json<mcp::DelegateToWorkerArgs>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    tokio::task::block_in_place(|| mcp::FarseerMcp::new(state).delegate_to_worker_json(body))
-        .map(Json)
-        .map_err(mcp_error)
+    let bearer = presented_token(&headers).map(str::to_string);
+    tokio::task::block_in_place(|| {
+        mcp::FarseerMcp::new(state).delegate_to_worker_json(body, bearer.as_deref())
+    })
+    .map(Json)
+    .map_err(mcp_error)
 }
 
 /// The fire-and-forget half. See [`delegate_to_worker`].
 async fn delegate_to_cell(
     State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
     Json(body): Json<mcp::DelegateToCellArgs>,
 ) -> ApiResult<Json<serde_json::Value>> {
+    let bearer = presented_token(&headers).map(str::to_string);
     mcp::FarseerMcp::new(state)
-        .delegate_to_cell_json(body)
+        .delegate_to_cell_json(body, bearer.as_deref())
         .map(Json)
         .map_err(mcp_error)
 }
@@ -780,14 +799,22 @@ fn manager_run_options(
         // config, and an undeclared runner is its own account.
         account: Some(state.runner_config().account_for(&contract.runner)),
         usd_micros_per_mtok: state.runner_config().price_for(&contract.runner),
-                // The manager's own declared skills, resolved to directories.
-                skills: skill_paths(state, &contract.runner, &cell.manager.skills)?,
-                // What the operator pinned, or nothing at all. `30 codex app
-                // server`: farseer passes a model or an effort only when a
-                // person wrote one down, so an unpinned runner keeps whatever
-                // its own config says.
-                model: state.runner_config().launch_of(&contract.runner).0.map(str::to_string),
-                effort: state.runner_config().launch_of(&contract.runner).1.map(str::to_string),
+        // The manager's own declared skills, resolved to directories.
+        skills: skill_paths(state, &contract.runner, &cell.manager.skills)?,
+        // What the operator pinned, or nothing at all. `30 codex app
+        // server`: farseer passes a model or an effort only when a
+        // person wrote one down, so an unpinned runner keeps whatever
+        // its own config says.
+        model: state
+            .runner_config()
+            .launch_of(&contract.runner)
+            .0
+            .map(str::to_string),
+        effort: state
+            .runner_config()
+            .launch_of(&contract.runner)
+            .1
+            .map(str::to_string),
     };
     // `22 cell addressing` section 3: the roster is the grant, so the prompt
     // names exactly what is callable. A manager that has to guess will guess.
@@ -857,21 +884,15 @@ fn manager_run_options(
         // Found by running it. The first version of this reused pi's wording and
         // the manager answered `Unable to delegate: manager authorization token
         // unavailable.` - it could see the tools and had nothing to present.
+        // No credentials, on any transport. `31 manager delegation reach` moved
+        // identity onto the bearer the request already carries, after a
+        // `goose-acp` manager reached the tool and **mistyped** the
+        // 64-character token it had been asked to copy - failing as an
+        // authorization error when it was a transcription error. A model never
+        // given a secret cannot quote it, leak it, or get it wrong.
         Reach::Mcp | Reach::CodexAppServer | Reach::Acp => format!(
-            "You are the manager for farseer cell `{}`. Your manager_run_id is `{}` and your \
-             manager_token is `{}`. The roster workers available to delegate to are: {}. \
-             The cells you may call are: {}. \
-             Pass both credentials to every farseer MCP tool call. When you delegate, name a \
-             roster worker and give it a precise sub-goal, then relay the returned result. \
-             Calling a cell is different: delegate_to_cell is fire-and-forget, it returns a \
-             call_id rather than an answer, and the callee owns its own workspace, runner and \
-             tools. Anything not named above is not callable, and asking again will not make \
-             it callable. The task remains yours to own.",
-            cell.cell_id,
-            contract.run_id,
-            manager_token.as_str(),
-            workers,
-            callable_cells,
+            "You are the manager for farseer cell `{}`. The roster workers available to              delegate to are: {}. The cells you may call are: {}.              Use the `delegate_to_worker` tool: name a roster worker, give it a precise              sub-goal, and relay the returned result. The worker sees nothing of              this conversation, so the sub-goal must stand alone.              Calling a cell is different: delegate_to_cell is fire-and-forget, it returns a              call_id rather than an answer, and the callee owns its own workspace, runner              and tools. Anything not named above is not callable, and asking again will not              make it callable. The task remains yours to own.",
+            cell.cell_id, workers, callable_cells,
         ),
         // No credentials in this one. The extension holds them and injects them
         // itself, so the model states a worker and a goal and never sees the
@@ -973,13 +994,17 @@ fn manager_run_options(
         // scrubs what reaches the log.
         Reach::Acp => {
             options.mcp = Some(farseer_manager::McpReach::BearerInline {
-                url: state.mcp_endpoint().expect("reach implies a bound listener"),
+                url: state
+                    .mcp_endpoint()
+                    .expect("reach implies a bound listener"),
                 bearer: manager_token.as_str().to_string(),
             });
         }
         Reach::CodexAppServer => {
             options.mcp = Some(farseer_manager::McpReach::BearerFromEnv {
-                url: state.mcp_endpoint().expect("reach implies a bound listener"),
+                url: state
+                    .mcp_endpoint()
+                    .expect("reach implies a bound listener"),
                 var: "FARSEER_MANAGER_TOKEN".to_string(),
             });
             options.runner_env = vec![(
@@ -1083,21 +1108,29 @@ pub(crate) fn spawn_run(
             manager_cell: Some(pinned_cell),
             claude_mcp_config: None,
             append_system_prompt: None,
-        runner_env: Vec::new(),
-        mcp: None,
-        extensions: Vec::new(),
+            runner_env: Vec::new(),
+            mcp: None,
+            extensions: Vec::new(),
             account: Some(state.runner_config().account_for(&contract.runner)),
-        usd_micros_per_mtok: state.runner_config().price_for(&contract.runner),
-                // A run reached without a manager context - a rerun, or a
-                // direct worker - carries no declared skills rather than
-                // inheriting the cell manager's.
-                skills: Vec::new(),
-                // What the operator pinned, or nothing at all. `30 codex app
-                // server`: farseer passes a model or an effort only when a
-                // person wrote one down, so an unpinned runner keeps whatever
-                // its own config says.
-                model: state.runner_config().launch_of(&contract.runner).0.map(str::to_string),
-                effort: state.runner_config().launch_of(&contract.runner).1.map(str::to_string),
+            usd_micros_per_mtok: state.runner_config().price_for(&contract.runner),
+            // A run reached without a manager context - a rerun, or a
+            // direct worker - carries no declared skills rather than
+            // inheriting the cell manager's.
+            skills: Vec::new(),
+            // What the operator pinned, or nothing at all. `30 codex app
+            // server`: farseer passes a model or an effort only when a
+            // person wrote one down, so an unpinned runner keeps whatever
+            // its own config says.
+            model: state
+                .runner_config()
+                .launch_of(&contract.runner)
+                .0
+                .map(str::to_string),
+            effort: state
+                .runner_config()
+                .launch_of(&contract.runner)
+                .1
+                .map(str::to_string),
         })
     };
     let options = match options {
@@ -1778,7 +1811,8 @@ fn first_available_runner(state: &AppState, candidates: &[String]) -> Option<Str
 ///
 /// `ToolLevel::Shell` never refuses, because it asks for nothing to be imposed.
 fn check_tool_level(runner: &str, level: farseer_core::ToolLevel) -> ApiResult<()> {
-    if level != farseer_core::ToolLevel::Shell && !farseer_runner::pi::takes_tool_allowlist(runner) {
+    if level != farseer_core::ToolLevel::Shell && !farseer_runner::pi::takes_tool_allowlist(runner)
+    {
         return Err(ApiError::Policy(format!(
             "runner `{runner}` cannot be held to a tool allowlist, and this cell asks for `{}`",
             level.as_str()
@@ -1849,11 +1883,14 @@ mod title_tests {
     #[test]
     fn a_multi_line_goal_is_named_by_its_first_real_line() {
         assert_eq!(
-            title_of("
+            title_of(
+                "
 
   Add a quota widget  
 and make it live.
-").as_deref(),
+"
+            )
+            .as_deref(),
             Some("Add a quota widget")
         );
     }
@@ -1873,9 +1910,14 @@ and make it live.
     /// inventory`'s rule, that an absent answer stays absent.
     #[test]
     fn a_goal_with_nothing_in_it_has_no_title() {
-        assert_eq!(title_of("   
+        assert_eq!(
+            title_of(
+                "   
   
-"), None);
+"
+            ),
+            None
+        );
     }
 }
 
@@ -3541,7 +3583,15 @@ grants_shell = true
         .await
         .unwrap();
 
-        let unauthorized = client
+        // `31 manager delegation reach`, after a model mistyped its own token:
+        // **the bearer is the credential, and a wrong argument beside it is
+        // ignored rather than fatal.** This client presents the manager's real
+        // bearer, so the call gets as far as the roster - which is the refusal
+        // this test is actually about. A caller with no bearer is refused by the
+        // guard before any tool body runs, which
+        // `a_rebound_host_is_refused_before_the_token_is_even_checked` and
+        // `an_operator_token_is_refused_on_a_manager_route` already cover.
+        let mistyped = client
             .call_tool(
                 CallToolRequestParams::new("delegate_to_worker").with_arguments(
                     json!({ "manager_run_id": manager_run_id.to_string(), "manager_token": "wrong", "worker": "nope", "goal": "anything" })
@@ -3552,8 +3602,8 @@ grants_shell = true
             )
             .await;
         assert!(
-            format!("{unauthorized:?}").contains("manager_token"),
-            "an active manager UUID is not sufficient without its capability: {unauthorized:?}"
+            format!("{mistyped:?}").contains("pinned roster"),
+            "the transport proved this manager; a mistyped argument must not undo that: {mistyped:?}"
         );
 
         let attempt = client
@@ -4230,7 +4280,6 @@ account = "anthropic-max"
         assert_eq!(capped.as_array().unwrap().len(), 1);
     }
 
-
     fn cell_with(runner: &str) -> CellDefinition {
         farseer_core::CellDefinition::load(&format!(
             r#"
@@ -4276,7 +4325,9 @@ runner = "{runner}"
             &RuntimeToken::generate(),
         )
         .expect("options build");
-        options.append_system_prompt.expect("every manager is told who it is")
+        options
+            .append_system_prompt
+            .expect("every manager is told who it is")
     }
 
     /// `31 manager delegation reach`: this used to return early for every
@@ -4305,7 +4356,11 @@ runner = "{runner}"
         // not load.
         let extension = h.state.repo_root().join("extensions").join("pi");
         std::fs::create_dir_all(&extension).unwrap();
-        std::fs::write(extension.join("farseer-delegate.ts"), "export default () => {};").unwrap();
+        std::fs::write(
+            extension.join("farseer-delegate.ts"),
+            "export default () => {};",
+        )
+        .unwrap();
         let cell = cell_with("pi");
         let contract = WorkerContract::seal(WorkerContractSpec {
             run_id: RunId::new(),
@@ -4324,7 +4379,9 @@ runner = "{runner}"
         let options =
             manager_run_options(&h.state, &contract, &cell, &token).expect("options build");
 
-        let prompt = options.append_system_prompt.expect("a manager is told who it is");
+        let prompt = options
+            .append_system_prompt
+            .expect("a manager is told who it is");
         assert!(prompt.contains("delegate_to_worker"), "{prompt}");
         assert!(!prompt.contains("CANNOT reach"), "{prompt}");
         assert!(!prompt.contains(token.as_str()), "{prompt}");
@@ -4410,6 +4467,50 @@ runner = "{runner}"
         assert_eq!(names(&many), ["pi", "omp"]);
     }
 
+    /// The credential is gone from every prompt, not just pi's.
+    ///
+    /// `31 manager delegation reach` moved identity onto the bearer after a
+    /// `goose-acp` manager mistyped the 64-character token it had been told to
+    /// copy. The failure looked like authorization and was transcription, and
+    /// the only durable fix is not asking a model to carry a secret at all.
+    #[test]
+    fn no_manager_is_ever_told_its_own_token() {
+        let h = harness();
+        h.state.set_mcp_endpoint(8787);
+        // The three MCP transports. pi has its own test above, and its
+        // extension only exists on disk in that fixture.
+        for runner in ["claude-code", "codex-app-server", "goose-acp"] {
+            let cell = cell_with(runner);
+            let contract = WorkerContract::seal(WorkerContractSpec {
+                run_id: RunId::new(),
+                task_id: farseer_core::TaskId::new(),
+                cell_id: CellId::new("zero"),
+                goal: "g".into(),
+                workspace: farseer_core::WorkspaceStrategy::Worktree,
+                runner: runner.into(),
+                tool_grants: vec![],
+                tool_level: Default::default(),
+                autonomy_ceiling: farseer_core::Irreversibility::Reversible,
+                budget: farseer_core::Budget::default(),
+                definition_of_done: String::new(),
+            });
+            let token = RuntimeToken::generate();
+            let options =
+                manager_run_options(&h.state, &contract, &cell, &token).expect("options build");
+            let prompt = options
+                .append_system_prompt
+                .expect("a manager is told who it is");
+            assert!(
+                !prompt.contains(token.as_str()),
+                "{runner} was handed its own token: {prompt}"
+            );
+            assert!(
+                prompt.contains("delegate_to_worker"),
+                "{runner} should be able to delegate: {prompt}"
+            );
+        }
+    }
+
     /// The sentence that exists because a manager fabricated a delegation.
     /// A roster it cannot reach must be named **and** disclaimed, or the model
     /// does the nearest available thing and calls it compliance.
@@ -4420,7 +4521,10 @@ runner = "{runner}"
         // nothing. ACP is the last runner with no channel for the verbs.
         let prompt = prompt_for("goose-acp");
         assert!(prompt.contains("CANNOT reach"), "{prompt}");
-        assert!(prompt.contains("Never state or imply that you delegated"), "{prompt}");
+        assert!(
+            prompt.contains("Never state or imply that you delegated"),
+            "{prompt}"
+        );
         // And it is not handed credentials for a face it cannot call.
         assert!(!prompt.contains("manager_token"), "{prompt}");
     }

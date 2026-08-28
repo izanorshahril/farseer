@@ -89,7 +89,10 @@ fn clipped(text: Option<&str>) -> Option<String> {
     if text.chars().count() <= LIMIT {
         return Some(text.to_string());
     }
-    Some(format!("{}...", text.chars().take(LIMIT).collect::<String>()))
+    Some(format!(
+        "{}...",
+        text.chars().take(LIMIT).collect::<String>()
+    ))
 }
 
 pub fn parse_line(line: &str) -> Result<Vec<RunnerSignal>, ParseError> {
@@ -295,9 +298,9 @@ mod tests {
                 "--dangerously-skip-permissions"
             ]
         );
-        assert!(build_args("say hi", Some("gemini-3.7-flash-low")).ends_with(&[
-            "--model".to_string(),
-            "gemini-3.7-flash-low".to_string()
-        ]));
+        assert!(
+            build_args("say hi", Some("gemini-3.7-flash-low"))
+                .ends_with(&["--model".to_string(), "gemini-3.7-flash-low".to_string()])
+        );
     }
 }

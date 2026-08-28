@@ -67,11 +67,38 @@ impl FarseerMcp {
         }
     }
 
+    /// Who is calling, preferring the credential the **transport** already
+    /// proved over one the model was asked to copy.
+    ///
+    /// `31 manager delegation reach` argued that a credential in a prompt is one
+    /// a model can quote, spend or leak. On 2026-08-28 a `goose-acp` manager
+    /// found a third way to get it wrong: it reached the tool and **mistyped the
+    /// 64-character token**, failing with `manager_token does not authorize this
+    /// manager run` - which reads like an authorization bug and was a
+    /// transcription error. Codex copied the same string correctly an hour
+    /// earlier, which is the point: it worked by luck of the model.
+    ///
+    /// So the bearer wins. Every transport that reaches this face already
+    /// presents one - the guard scans [`crate::AppState::manager_token_matches`]
+    /// to let the request through at all, resolving this identity a few frames
+    /// earlier and throwing it away. The arguments stay accepted and optional,
+    /// because they cost nothing and a runner that only knows how to pass them
+    /// is a runner this still serves.
     fn authorize_manager(
         &self,
-        manager_run_id: &str,
-        manager_token: &str,
+        manager_run_id: Option<&str>,
+        manager_token: Option<&str>,
+        bearer: Option<&str>,
     ) -> Result<crate::ManagerContext, McpError> {
+        if let Some(manager) = bearer.and_then(|token| self.state.manager_by_token(token)) {
+            return Ok(manager);
+        }
+        let (Some(manager_run_id), Some(manager_token)) = (manager_run_id, manager_token) else {
+            return Err(McpError::invalid_params(
+                "this call carried no manager credential: farseer takes the identity from the                  request's bearer token, and neither that nor manager_run_id/manager_token                  named an active manager run",
+                None,
+            ));
+        };
         let run_id = manager_run_id
             .parse::<RunId>()
             .map_err(|_| McpError::invalid_params("manager_run_id must be a UUID", None))?;
@@ -89,22 +116,42 @@ impl FarseerMcp {
         }
         Ok(manager)
     }
+
+    /// The bearer this MCP call arrived with, if any.
+    ///
+    /// rmcp injects the HTTP `Parts` into the request's extensions, which is the
+    /// only route from the transport to a tool body - see rmcp 3.1.4's own
+    /// documentation on `ctx.extensions`.
+    fn bearer_of(ctx: &rmcp::service::RequestContext<rmcp::RoleServer>) -> Option<String> {
+        ctx.extensions
+            .get::<axum::http::request::Parts>()?
+            .headers
+            .get(axum::http::header::AUTHORIZATION)?
+            .to_str()
+            .ok()?
+            .strip_prefix("Bearer ")
+            .map(str::to_string)
+    }
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 struct ReadMemoryArgs {
-    /// The active manager identity injected into this manager's system prompt.
-    manager_run_id: String,
-    /// The per-manager capability injected beside `manager_run_id`.
-    manager_token: String,
+    /// Optional. farseer takes the calling manager's identity from the
+    /// request's bearer token; this is accepted for a client that prefers to
+    /// state it. See `FarseerMcp::authorize_manager`.
+    manager_run_id: Option<String>,
+    /// Optional, and paired with `manager_run_id`.
+    manager_token: Option<String>,
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 struct WriteMemoryArgs {
-    /// The active manager identity injected into this manager's system prompt.
-    manager_run_id: String,
-    /// The per-manager capability injected beside `manager_run_id`.
-    manager_token: String,
+    /// Optional. farseer takes the calling manager's identity from the
+    /// request's bearer token; this is accepted for a client that prefers to
+    /// state it. See `FarseerMcp::authorize_manager`.
+    manager_run_id: Option<String>,
+    /// Optional, and paired with `manager_run_id`.
+    manager_token: Option<String>,
     body: String,
     /// `cell_local` (the default, per `25 memory lifecycle`) or `run_local`. `global` is
     /// refused here - `25 memory lifecycle` gates it on the operator, a promotion this face
@@ -120,8 +167,13 @@ impl FarseerMcp {
     fn read_memory(
         &self,
         Parameters(args): Parameters<ReadMemoryArgs>,
+        ctx: rmcp::service::RequestContext<rmcp::RoleServer>,
     ) -> Result<CallToolResult, McpError> {
-        let manager = self.authorize_manager(&args.manager_run_id, &args.manager_token)?;
+        let manager = self.authorize_manager(
+            args.manager_run_id.as_deref(),
+            args.manager_token.as_deref(),
+            Self::bearer_of(&ctx).as_deref(),
+        )?;
         // `02 record scope`: identity comes from the active manager's pinned
         // definition, never from a caller-supplied cell id that could impersonate
         // another reader and silently gain its `also_read` grants.
@@ -159,8 +211,13 @@ impl FarseerMcp {
     fn write_memory(
         &self,
         Parameters(args): Parameters<WriteMemoryArgs>,
+        ctx: rmcp::service::RequestContext<rmcp::RoleServer>,
     ) -> Result<CallToolResult, McpError> {
-        let manager = self.authorize_manager(&args.manager_run_id, &args.manager_token)?;
+        let manager = self.authorize_manager(
+            args.manager_run_id.as_deref(),
+            args.manager_token.as_deref(),
+            Self::bearer_of(&ctx).as_deref(),
+        )?;
         let tier = match args.tier.as_deref() {
             None | Some("cell_local") => MemoryTier::CellLocal,
             Some("run_local") => MemoryTier::RunLocal,
@@ -200,9 +257,12 @@ impl FarseerMcp {
     fn delegate_to_worker(
         &self,
         Parameters(args): Parameters<DelegateToWorkerArgs>,
+        ctx: rmcp::service::RequestContext<rmcp::RoleServer>,
     ) -> Result<CallToolResult, McpError> {
+        let bearer = Self::bearer_of(&ctx);
         Ok(CallToolResult::success(vec![ContentBlock::text(
-            self.delegate_to_worker_json(args)?.to_string(),
+            self.delegate_to_worker_json(args, bearer.as_deref())?
+                .to_string(),
         )]))
     }
 
@@ -212,9 +272,12 @@ impl FarseerMcp {
     fn delegate_to_cell(
         &self,
         Parameters(args): Parameters<DelegateToCellArgs>,
+        ctx: rmcp::service::RequestContext<rmcp::RoleServer>,
     ) -> Result<CallToolResult, McpError> {
+        let bearer = Self::bearer_of(&ctx);
         Ok(CallToolResult::success(vec![ContentBlock::text(
-            self.delegate_to_cell_json(args)?.to_string(),
+            self.delegate_to_cell_json(args, bearer.as_deref())?
+                .to_string(),
         )]))
     }
 
@@ -243,9 +306,9 @@ impl FarseerMcp {
                 manager_cell: Some(pinned_cell.clone()),
                 claude_mcp_config: None,
                 append_system_prompt: None,
-        runner_env: Vec::new(),
-        mcp: None,
-        extensions: Vec::new(),
+                runner_env: Vec::new(),
+                mcp: None,
+                extensions: Vec::new(),
                 account: Some(self.state.runner_config().account_for(&contract.runner)),
                 usd_micros_per_mtok: self.state.runner_config().price_for(&contract.runner),
                 skills: skill_dirs.to_vec(),
@@ -253,8 +316,18 @@ impl FarseerMcp {
                 // server`: farseer passes a model or an effort only when a
                 // person wrote one down, so an unpinned runner keeps whatever
                 // its own config says.
-                model: self.state.runner_config().launch_of(&contract.runner).0.map(str::to_string),
-                effort: self.state.runner_config().launch_of(&contract.runner).1.map(str::to_string),
+                model: self
+                    .state
+                    .runner_config()
+                    .launch_of(&contract.runner)
+                    .0
+                    .map(str::to_string),
+                effort: self
+                    .state
+                    .runner_config()
+                    .launch_of(&contract.runner)
+                    .1
+                    .map(str::to_string),
             },
             Some(cancel_requested),
         );
@@ -283,8 +356,13 @@ impl FarseerMcp {
     pub(crate) fn delegate_to_worker_json(
         &self,
         args: DelegateToWorkerArgs,
+        bearer: Option<&str>,
     ) -> Result<serde_json::Value, McpError> {
-        let manager = self.authorize_manager(&args.manager_run_id, &args.manager_token)?;
+        let manager = self.authorize_manager(
+            args.manager_run_id.as_deref(),
+            args.manager_token.as_deref(),
+            bearer,
+        )?;
         if manager
             .cancel_requested
             .load(std::sync::atomic::Ordering::Acquire)
@@ -421,7 +499,10 @@ impl FarseerMcp {
             .iter()
             .map(|name| crate::skill_dir(self.state.repo_root(), name))
             .collect::<Vec<_>>();
-        if let Some(missing) = skill_dirs.iter().find(|dir| !dir.join("SKILL.md").is_file()) {
+        if let Some(missing) = skill_dirs
+            .iter()
+            .find(|dir| !dir.join("SKILL.md").is_file())
+        {
             return Err(McpError::invalid_params(
                 format!("skill `{}` is not in this repository", missing.display()),
                 None,
@@ -546,8 +627,13 @@ impl FarseerMcp {
     pub(crate) fn delegate_to_cell_json(
         &self,
         args: DelegateToCellArgs,
+        bearer: Option<&str>,
     ) -> Result<serde_json::Value, McpError> {
-        let manager = self.authorize_manager(&args.manager_run_id, &args.manager_token)?;
+        let manager = self.authorize_manager(
+            args.manager_run_id.as_deref(),
+            args.manager_token.as_deref(),
+            bearer,
+        )?;
         if manager
             .cancel_requested
             .load(std::sync::atomic::Ordering::Acquire)
@@ -725,10 +811,12 @@ fn api_error(e: crate::ApiError) -> McpError {
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 pub(crate) struct DelegateToWorkerArgs {
-    /// The active manager identity injected into this manager's system prompt.
-    manager_run_id: String,
-    /// The per-manager capability injected beside `manager_run_id`.
-    manager_token: String,
+    /// Optional. farseer takes the calling manager's identity from the
+    /// request's bearer token; this is accepted for a client that prefers to
+    /// state it. See `FarseerMcp::authorize_manager`.
+    manager_run_id: Option<String>,
+    /// Optional, and paired with `manager_run_id`.
+    manager_token: Option<String>,
     /// Must name a `kind = "worker"` entry in the manager's pinned roster.
     worker: String,
     goal: String,
@@ -756,10 +844,12 @@ impl From<DelegationBudgetArgs> for Budget {
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 pub(crate) struct DelegateToCellArgs {
-    /// The active manager identity injected into this manager's system prompt.
-    manager_run_id: String,
-    /// The per-manager capability injected beside `manager_run_id`.
-    manager_token: String,
+    /// Optional. farseer takes the calling manager's identity from the
+    /// request's bearer token; this is accepted for a client that prefers to
+    /// state it. See `FarseerMcp::authorize_manager`.
+    manager_run_id: Option<String>,
+    /// Optional, and paired with `manager_run_id`.
+    manager_token: Option<String>,
     /// Must name a `kind = "cell"` entry in the manager's pinned roster.
     cell: String,
     goal: String,
