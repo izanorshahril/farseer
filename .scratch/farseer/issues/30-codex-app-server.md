@@ -105,7 +105,7 @@ The order to build it in, cheapest first:
 
 ### Not decided here
 
-- Whether `codex exec` stays at all once the app-server runner exists. It is simpler and farseer already has it, but two adapters for one binary is the cost.
+- ~~Whether `codex exec` stays at all once the app-server runner exists.~~ **Answered 2026-08-29: it stays.** See below.
 - What to do about the **inherited environment**. The hooks and MCP servers are the operator's, and farseer now has events for them - `12 autonomy and deny list` should probably have an opinion about a runner farseer spawns loading hooks farseer did not grant.
 - Whether the app-server's long-lived process changes `19 rust toolchain`'s one-process-per-run assumption. It is a *server*: `thread/start` is cheap, and the same process could hold many threads. That is a different lifecycle from anything on this map.
 
@@ -308,3 +308,23 @@ Two things that made this safe rather than a duplicate path:
 ### Still true and worth seeing in the surface
 
 `account` reads `codex-app-server` because nothing is declared in `runners.toml`. That is `27`'s deliberate default - an undeclared runner is its own account - and it is also the moment to declare one, since this machine's goose delegates through the same ChatGPT login: `goose-acp`, `codex` and `codex-app-server` are one subscription being counted as three.
+
+---
+
+## `codex exec` stays, 2026-08-29
+
+This ticket left "whether `codex exec` stays at all" open, and later summaries carried it as though the app-server's arrival put pressure on it. It does not, and the framing was wrong in a way worth correcting: **there is no dependency argument here.** Both faces are the same `codex` binary already resolved on this machine, so keeping `exec` costs no download, no toolchain, and nothing at install time.
+
+The real cost this ticket named is narrower and stands: **two adapters for one binary.** `codex.rs` is 184 lines against `codex_app_server.rs`'s 729 - two parsers, two dispatch arms, and two sets of fixtures to keep honest when Codex changes its output.
+
+### Why it stays anyway
+
+`29 harness protocol`'s rule is **use the richest face a harness offers**, and that argument is about **managers**: steering, a live session, quota, a context denominator. A one-shot worker needs none of it - goal in, answer out, process exits - and that is exactly `exec`'s shape.
+
+The app-server is a **server**, and this ticket's own open item says so: its long-lived process does not fit `19 rust toolchain`'s one-process-per-run assumption, and that is still unresolved. Making it the only Codex face would force that question before anything needs it answered.
+
+So the split already in the code is the right one, and it is the same precedent `29` set for goose: **app-server for managers, `exec` as the cheap one-shot face for workers.** `goose` and `goose-acp` coexist for exactly this reason.
+
+`exec` also still carries policy weight: it is one of four runners `ensure_runner_authority` refuses when a cell grants no shell-capable tool, per `12 autonomy and deny list`.
+
+**Do not re-open this as "should we delete exec".** Re-open it only if `19`'s one-process-per-run question is settled in the app-server's favour, or if the two adapters actually start drifting.
