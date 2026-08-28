@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use std::ops::Deref;
 
 use crate::ids::{CellId, RunId, TaskId};
-use crate::policy::{Budget, Irreversibility};
+use crate::policy::{Budget, Irreversibility, ToolLevel};
 
 /// Owned by the runtime.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -186,8 +186,17 @@ pub struct WorkerContractSpec {
     /// Which runner from the inventory executes this. `10 runner inventory` made the inventory a
     /// menu an author picks from.
     pub runner: String,
-    /// The allowlist. `12 autonomy and deny list`: the only real isolation v1 has.
+    /// The cell-level capabilities this run may use - `post`, `cargo-test`,
+    /// `shell`. `12 autonomy and deny list`: the only real isolation v1 has.
+    ///
+    /// **Not runner tool names**, and `36 tool grant enforcement` found that
+    /// conflating the two is what kept the enforcement gap open for so long.
+    /// What the runner actually hands the model is [`Self::tool_level`].
     pub tool_grants: Vec<String>,
+    /// How much of the runner's own tool set this run gets, enforced on the
+    /// launch argv. See `36 tool grant enforcement`.
+    #[serde(default)]
+    pub tool_level: ToolLevel,
     pub autonomy_ceiling: Irreversibility,
     pub budget: Budget,
     /// `05 run state model` put the gate here; `12 autonomy and deny list` made satisfying it a tool grant rather than
@@ -325,6 +334,7 @@ mod tests {
             workspace: WorkspaceStrategy::Worktree,
             runner: "claude-code".into(),
             tool_grants: vec!["shell".into()],
+            tool_level: Default::default(),
             autonomy_ceiling: Irreversibility::Reversible,
             budget: Budget::default(),
             definition_of_done: "cargo test passes".into(),

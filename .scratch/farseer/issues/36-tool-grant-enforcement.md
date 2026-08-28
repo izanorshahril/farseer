@@ -1,6 +1,6 @@
 # 36 tool grant enforcement
 
-**Status:** open.
+**Status:** resolved and built 2026-08-28, proven live.
 **Found:** 2026-08-28, while looking at `32 harness capability floor`'s open item about omp's `hub`. The hub question turned out to be a special case of this one.
 
 ## The finding
@@ -68,3 +68,72 @@ Under this ticket that stops being a separate question.
 The deny list.
 `12` settled that it prevents mistakes rather than attacks, and nothing found here changes that.
 This ticket is about the control `12` named as primary, and only that.
+
+## Resolution
+
+### The two vocabularies were never the same axis, and that was the whole blocker
+
+This ticket asked whether cells should name runner tools or capabilities.
+Neither, as it turns out - the question contained a false premise.
+
+A roster's `kind = "tool"` entry names a **cell-level** capability: `post`, `draft-file`, `cargo-test`.
+`social.toml` grants `post`; there is no runner on earth with a `post` tool, and there never will be.
+These entries were never runner tools and were not failing to be mapped to them.
+
+What was missing is a **second field on a second axis**: how much of the runner's own tool set the run gets.
+`ToolLevel` - `read`, `edit`, `shell` - declared on `[manager]` and on each `kind = "worker"` roster entry.
+
+Three levels because `12 autonomy and deny list` already fixed the shape: grant lists beat deny lists, and **if shell is granted, everything is granted**.
+`Shell` is named for what it is rather than called `All`, because a level containing `bash` cannot honestly claim to exclude anything.
+
+### Absent means everything, and now says so
+
+The default is `Shell`, which is exactly what farseer has always done.
+A stricter default would be safer and would also silently change what every existing cell may do - this ticket's own complaint, pointed the other way.
+A cell opts down on purpose.
+`zero.toml` and `social.toml` are untouched and behave identically.
+
+### The table is probed, and `Shell` is an absence rather than a list
+
+Tool names came from loading an extension that calls `getAllTools` on a live session, not from a help page:
+
+- **pi** has eight: `bash`, `edit`, `find`, `grep`, `ls`, `powershell`, `read`, `write`.
+- **omp** has twenty-three, including `task` and `hub`.
+
+`Shell` passes **no `--tools` flag at all** rather than enumerating everything, so a tool a runner adds in a later version is not silently denied by a list frozen today.
+
+### A finding that changed the design: pi accepts a bogus tool name in silence
+
+`pi --tools nosuchtool -p "hi"` runs, answers, and grants nothing.
+No error, no warning.
+So the allowlist is built from farseer's own table and **never from a string in a cell file** - a typo would otherwise produce a worker holding nothing, for a reason nobody could see.
+
+### `32`'s open `hub` question, answered as a level
+
+`task` and `hub` are omp's subagent tools. They are present at `shell` and absent below it.
+Whether an omp manager may run its own background jobs beside farseer's workers is now a decision somebody makes, not a capability nobody chose.
+
+### The refusal, third application of one rule
+
+A runner that cannot take an allowlist refuses at instruct and at delegate time when a cell asks for anything below `shell`:
+
+```
+runner `goose-acp` cannot be held to a tool allowlist, and this cell asks for `read`
+```
+
+`31` refuses a delegation a manager cannot make; `32` refuses a skill a runner cannot load; this refuses a grant a runner cannot honour.
+
+### Proven
+
+A throwaway `readonly` cell at `tools = "read"`, told to write a file:
+
+```
+manager_answered {'text': 'NO WRITE TOOL'}
+```
+
+argv: `--tools read,ls,find,grep`. No `write`, no `bash`, no `powershell`.
+
+### Still open
+
+- **`tool_grants` remains recorded and unenforced**, which is where this ticket started. It is now correctly *scoped*: it is the cell-capability axis, and enforcing `post` means a tool farseer serves, not a flag it passes. That is a different ticket.
+- **Only pi and omp are in the table.** Every other runner refuses below `shell` rather than guessing, per `10 runner inventory`.

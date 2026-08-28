@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 
 use crate::ids::CellId;
-use crate::policy::{Budget, Irreversibility, Policy};
+use crate::policy::{Budget, Irreversibility, Policy, ToolLevel};
 use crate::run::WorkspaceStrategy;
 
 /// The mandatory manager. `01 cell primitive`: every cell has one, and only a manager may
@@ -38,6 +38,14 @@ pub struct Manager {
     /// inheriting those silently is the opposite of deciding autonomy up front.
     #[serde(default)]
     pub skills: Vec<String>,
+    /// How much of the runner's own tool set this manager gets.
+    ///
+    /// Absent is [`ToolLevel::Shell`], which is what farseer has always done -
+    /// see `36 tool grant enforcement`. Opting down is a decision an author
+    /// makes here, and a runner that cannot take an allowlist refuses the run
+    /// rather than ignoring the field.
+    #[serde(default)]
+    pub tools: ToolLevel,
 }
 
 /// What a cell may use.
@@ -60,6 +68,10 @@ pub enum RosterEntry {
         /// coder should not get the same instructions by accident.
         #[serde(default)]
         skills: Vec<String>,
+        /// Same rule as [`Manager::tools`], per worker: a reviewer has no
+        /// business holding a shell that a coder needs.
+        #[serde(default)]
+        tools: ToolLevel,
     },
     /// A call that returns or errors. Declares its own irreversibility level,
     /// which policy then gates on, per `12 autonomy and deny list`.

@@ -144,6 +144,21 @@ Operator routes require the process-wide bearer; `/v1/mcp` and `/v1/manager/` ad
 A generated manager config contains only the per-run bearer and never discloses the operator token.
 A cross-site `Origin` is refused before the token is even looked at, because [16 local API surface](.scratch/farseer/issues/16-local-api-surface.md) found that a token alone does not stop DNS rebinding - the browser attaches it for the attacker.
 
+### Tool levels
+
+A cell says how much of its runner's own tool set a run gets, on `[manager]` and on each `kind = "worker"` roster entry:
+
+```toml
+[manager]
+runner = "pi"
+tools = "read"   # read | edit | shell (default)
+```
+
+`read` is looking, `edit` adds writing inside the workspace, `shell` is everything - named for what it is, because [12 autonomy and deny list](.scratch/farseer/issues/12-autonomy-and-deny-list.md) found that granting a shell grants everything.
+Absent is `shell`, which is what farseer has always done, now said out loud rather than happening because nothing was passed.
+The names farseer passes are its own probed table, never a string from a cell file, and a runner that cannot take an allowlist refuses the run instead of ignoring the field.
+See [36 tool grant enforcement](.scratch/farseer/issues/36-tool-grant-enforcement.md).
+
 ### Notifications
 
 Set `FARSEER_NOTIFY_URL` and farseer POSTs to it when a root run answers, finishes, or goes `likely-hung`.

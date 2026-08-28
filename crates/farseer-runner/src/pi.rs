@@ -53,7 +53,7 @@ use std::ops::Not;
 
 use serde_json::{Value, json};
 
-use farseer_core::{EventKind, Outcome};
+use farseer_core::{EventKind, Outcome, ToolLevel};
 
 use crate::claude_code::{Configured, FinishedSignal, ParseError, RunnerSignal, SessionInfo};
 
@@ -90,6 +90,50 @@ pub fn abort_frame() -> String {
     json!({ "type": "abort" }).to_string()
 }
 
+/// The runner's own tool names, at each level `36 tool grant enforcement` defines.
+///
+/// **Probed, not read.** 2026-08-28, by loading an extension that calls
+/// `getAllTools` on a live session, because `10 runner inventory`'s rule holds here as
+/// everywhere - a help page is an advertisement.
+///
+/// pi has eight: `bash`, `edit`, `find`, `grep`, `ls`, `powershell`, `read`,
+/// `write`. omp has twenty-three, including `task` and `hub`, which is how it
+/// spawns subagents - so `32 harness capability floor`'s open question about
+/// whether an omp manager may run its own background jobs beside farseer's
+/// workers is answered here, as a level, rather than as a special case.
+///
+/// [`ToolLevel::Shell`] returns `None` rather than a list of everything: it
+/// means "pass no allowlist", so a runner that gains a tool in a later version
+/// gains it here too. Enumerating it would freeze today's set and call it a
+/// grant.
+pub fn tool_allowlist(runner: &str, level: ToolLevel) -> Option<Vec<&'static str>> {
+    if level == ToolLevel::Shell {
+        return None;
+    }
+    let (read, edit): (&[&str], &[&str]) = match runner {
+        "pi" => (&["read", "ls", "find", "grep"], &["edit", "write"]),
+        "omp" => (
+            &["read", "glob", "grep", "lsp", "todo"],
+            &["edit", "write", "ast_edit"],
+        ),
+        _ => return Some(Vec::new()),
+    };
+    let mut names = read.to_vec();
+    if level == ToolLevel::Edit {
+        names.extend_from_slice(edit);
+    }
+    Some(names)
+}
+
+/// Whether farseer can hold this runner to a tool level at all.
+///
+/// Both take `--tools` as an allowlist, which is the shape `12 autonomy and deny list` asked
+/// for: without a sandbox, grant lists beat deny lists. Stated as a list rather
+/// than a negation so a new runner is silent until somebody probes it.
+pub fn takes_tool_allowlist(runner: &str) -> bool {
+    matches!(runner, "pi" | "omp")
+}
+
 /// Whether this runner can be handed a skill directory on the argv.
 ///
 /// pi takes `--skill <path>`, repeatable. omp takes `--skills <globs>`, which
@@ -115,6 +159,7 @@ pub fn build_args(
     // Which of the two. They speak one protocol and not one command line -
     // see [`loads_skills_by_path`] and [`UNATTENDED_EXCLUDED_TOOLS`].
     runner: &str,
+    tool_level: ToolLevel,
     model: Option<&str>,
     effort: Option<&str>,
     skills: &[std::path::PathBuf],
@@ -157,6 +202,20 @@ pub fn build_args(
     // machine - instructions farseer never chose loading into a run
     // `12 autonomy and deny list` is bounding. A cell gets what it declared and
     // nothing else, and a cell that declared nothing runs bare.
+    // `36 tool grant enforcement`: the contract said what this run may do, and
+    // until now said it only to the record. An allowlist rather than a denylist,
+    // because `12 autonomy and deny list` found a denylist is routed around by
+    // the first shell command.
+    //
+    // Names are farseer's, not the operator's: a bogus name in `--tools` is
+    // **accepted in silence** by pi and yields a run holding nothing, so the
+    // list comes from [`tool_allowlist`] and never from a cell file.
+    if let Some(names) = tool_allowlist(runner, tool_level)
+        && !names.is_empty()
+    {
+        args.push("--tools".to_string());
+        args.push(names.join(","));
+    }
     args.push("--no-skills".to_string());
     // ...and only pi can then be handed one back by path. omp's `--skills`
     // is a **glob filter over what it discovered**, which is the opposite
@@ -543,6 +602,51 @@ mod tests {
         assert_eq!(payload["reason"], "auto");
     }
 
+    /// `36 tool grant enforcement`. The contract said what a run may do and said
+    /// it only to the record; this is the sentence that reaches the process.
+    #[test]
+    fn a_tool_level_reaches_the_argv_and_shell_asks_for_nothing() {
+        let read = build_args("pi", ToolLevel::Read, None, None, &[], &[], None);
+        let i = read.iter().position(|a| a == "--tools").expect("an allowlist");
+        assert_eq!(read[i + 1], "read,ls,find,grep");
+        assert!(!read[i + 1].contains("bash"), "read may not reach a shell");
+        assert!(!read[i + 1].contains("write"), "read may not write");
+
+        // `12 autonomy and deny list`'s boundary: writing inside a worktree is
+        // fully reversible, and a shell is the first thing that is not.
+        let edit = build_args("pi", ToolLevel::Edit, None, None, &[], &[], None);
+        let i = edit.iter().position(|a| a == "--tools").expect("an allowlist");
+        assert!(edit[i + 1].contains("write"), "{}", edit[i + 1]);
+        assert!(!edit[i + 1].contains("bash"), "{}", edit[i + 1]);
+
+        // Not an enumeration of everything: passing no flag is what keeps a
+        // tool the runner adds in a later version from being silently denied.
+        let shell = build_args("pi", ToolLevel::Shell, None, None, &[], &[], None);
+        assert!(!shell.contains(&"--tools".to_string()), "{shell:?}");
+    }
+
+    /// omp's `task` and `hub` are how it spawns subagents, which `32 harness
+    /// capability floor` left open as its own question. It is not one: they are
+    /// tools, so the answer is a level somebody chose.
+    #[test]
+    fn omps_subagent_tools_are_absent_below_shell_and_present_at_it() {
+        for level in [ToolLevel::Read, ToolLevel::Edit] {
+            let names = tool_allowlist("omp", level).expect("a list below shell");
+            assert!(!names.contains(&"task"), "{level:?}: {names:?}");
+            assert!(!names.contains(&"hub"), "{level:?}: {names:?}");
+        }
+        assert_eq!(tool_allowlist("omp", ToolLevel::Shell), None);
+    }
+
+    /// A runner farseer has not probed gets an empty list rather than a guess,
+    /// and the layer above refuses before it ever gets that far.
+    #[test]
+    fn an_unprobed_runner_is_not_given_a_made_up_tool_list() {
+        assert_eq!(tool_allowlist("goose-acp", ToolLevel::Read), Some(vec![]));
+        assert!(!takes_tool_allowlist("goose-acp"));
+        assert!(takes_tool_allowlist("pi") && takes_tool_allowlist("omp"));
+    }
+
     /// omp runs a subagent as a background job and ends the foreground loop
     /// while it is still running. Ending the worker there would cut the run off
     /// before its own subagent answered.
@@ -635,26 +739,26 @@ mod tests {
     /// so improvises. The prompt is how it finds out.
     #[test]
     fn a_manager_is_told_who_it_is_when_the_caller_says_so() {
-        assert!(!build_args("pi", None, None, &[], &[], None).contains(&"--append-system-prompt".to_string()));
+        assert!(!build_args("pi", ToolLevel::Shell, None, None, &[], &[], None).contains(&"--append-system-prompt".to_string()));
 
-        let args = build_args("pi", None, None, &[], &[], Some("You are the manager for cell zero."));
+        let args = build_args("pi", ToolLevel::Shell, None, None, &[], &[], Some("You are the manager for cell zero."));
         let at = args.iter().position(|a| a == "--append-system-prompt").expect("passed");
         assert_eq!(args[at + 1], "You are the manager for cell zero.");
 
         // Whitespace is not an identity. An empty prompt sends no flag rather
         // than an empty one, which pi would take literally.
-        assert!(!build_args("pi", None, None, &[], &[], Some("  ")).contains(&"--append-system-prompt".to_string()));
+        assert!(!build_args("pi", ToolLevel::Shell, None, None, &[], &[], Some("  ")).contains(&"--append-system-prompt".to_string()));
     }
 
     /// A cell gets the skills it declared and nothing the machine happens to
     /// have installed - the denial is what makes the declaration mean anything.
     #[test]
     fn a_cell_gets_its_own_skills_and_never_the_machines() {
-        let bare = build_args("pi", None, None, &[], &[], None);
+        let bare = build_args("pi", ToolLevel::Shell, None, None, &[], &[], None);
         assert!(bare.contains(&"--no-skills".to_string()));
         assert!(!bare.contains(&"--skill".to_string()));
 
-        let declared = build_args("pi", None, None, &[std::path::PathBuf::from("/repo/skills/echo")], &[], None);
+        let declared = build_args("pi", ToolLevel::Shell, None, None, &[std::path::PathBuf::from("/repo/skills/echo")], &[], None);
         let flat = declared.join(" ");
         assert!(flat.contains("--no-skills"), "{flat}");
         assert!(flat.contains("--skill /repo/skills/echo"), "{flat}");
@@ -666,8 +770,8 @@ mod tests {
     #[test]
     fn an_unattended_run_can_never_reach_the_tool_that_waits_for_a_human() {
         for args in [
-            build_args("pi", None, None, &[], &[], None),
-            build_args("pi", Some("m"), Some("low"), &[], &[], None),
+            build_args("pi", ToolLevel::Shell, None, None, &[], &[], None),
+            build_args("pi", ToolLevel::Shell, Some("m"), Some("low"), &[], &[], None),
         ] {
             let flat = args.join(" ");
             assert!(flat.contains("--exclude-tools ask_question"), "{flat}");
@@ -677,11 +781,11 @@ mod tests {
     #[test]
     fn the_operator_pins_the_model_and_an_unpinned_one_stays_pis_own() {
         assert_eq!(
-            build_args("pi", None, None, &[], &[], None),
+            build_args("pi", ToolLevel::Shell, None, None, &[], &[], None),
             ["--mode", "rpc", "--exclude-tools", "ask_question", "--no-skills", "--no-extensions"]
         );
         assert_eq!(
-            build_args("pi", Some("gpt-5.6-luna"), Some("low"), &[], &[], None),
+            build_args("pi", ToolLevel::Shell, Some("gpt-5.6-luna"), Some("low"), &[], &[], None),
             [
                 "--mode",
                 "rpc",
@@ -705,12 +809,12 @@ mod tests {
     /// verbatim is what made it look safe to share the launch too.
     #[test]
     fn omp_is_not_launched_with_pis_flags() {
-        let omp = build_args("omp", None, None, &[], &[], None).join(" ");
+        let omp = build_args("omp", ToolLevel::Shell, None, None, &[], &[], None).join(" ");
         assert!(!omp.contains("--exclude-tools"), "{omp}");
         assert!(omp.contains("--mode rpc"), "{omp}");
         assert!(omp.contains("--no-skills"), "{omp}");
 
-        let pi = build_args("pi", None, None, &[], &[], None).join(" ");
+        let pi = build_args("pi", ToolLevel::Shell, None, None, &[], &[], None).join(" ");
         assert!(pi.contains("--exclude-tools ask_question"), "{pi}");
     }
 
@@ -720,7 +824,7 @@ mod tests {
     #[test]
     fn a_skill_path_is_only_ever_passed_to_the_runner_that_takes_one() {
         let skill = [std::path::PathBuf::from("/repo/skills/farseer-echo")];
-        assert!(build_args("pi", None, None, &skill, &[], None).contains(&"--skill".to_string()));
-        assert!(!build_args("omp", None, None, &skill, &[], None).contains(&"--skill".to_string()));
+        assert!(build_args("pi", ToolLevel::Shell, None, None, &skill, &[], None).contains(&"--skill".to_string()));
+        assert!(!build_args("omp", ToolLevel::Shell, None, None, &skill, &[], None).contains(&"--skill".to_string()));
     }
 }

@@ -295,7 +295,7 @@ impl FarseerMcp {
         if args.goal.trim().is_empty() {
             return Err(McpError::invalid_params("goal must not be empty", None));
         }
-        let (runner, roster_budget, skill_names) = manager
+        let (runner, roster_budget, skill_names, tool_level) = manager
             .cell
             .roster
             .iter()
@@ -305,12 +305,12 @@ impl FarseerMcp {
                     runner,
                     max_budget,
                     skills,
+                    tools,
                 } if *name == args.worker => {
-                    // The roster entry's own skills, not the manager's:
-                    // `22 cell addressing` made the roster the grant, and a
-                    // reviewer and a coder should not get the same instructions
-                    // by accident.
-                    Some((runner.clone(), *max_budget, skills.clone()))
+                    // The roster entry's own skills and tool level, not the
+                    // manager's: `22 cell addressing` made the roster the grant,
+                    // and a reviewer has no business holding what a coder needs.
+                    Some((runner.clone(), *max_budget, skills.clone(), *tools))
                 }
                 _ => None,
             })
@@ -326,6 +326,18 @@ impl FarseerMcp {
         // Resolved here, where the roster entry is in hand: a worker that names
         // a skill farseer cannot find is a refusal at delegation time rather
         // than a worse answer later for a reason nobody can see.
+        if tool_level != farseer_core::ToolLevel::Shell
+            && !farseer_runner::pi::takes_tool_allowlist(&runner)
+        {
+            return Err(McpError::invalid_params(
+                format!(
+                    "worker `{}` runs on `{runner}`, which farseer cannot hold to a tool                      allowlist, and its roster entry asks for `{}`",
+                    args.worker,
+                    tool_level.as_str()
+                ),
+                None,
+            ));
+        }
         if !skill_names.is_empty() && !crate::runner_loads_skills(&runner) {
             return Err(McpError::invalid_params(
                 format!(
@@ -407,6 +419,7 @@ impl FarseerMcp {
             workspace: manager.cell.workspace_strategy,
             runner,
             tool_grants: manager.contract.tool_grants.clone(),
+            tool_level,
             autonomy_ceiling: manager.contract.autonomy_ceiling,
             budget: effective_budget,
             definition_of_done: args.definition_of_done.unwrap_or_default(),
@@ -716,6 +729,9 @@ fn cell_call_contract(
         workspace: callee.workspace_strategy,
         runner: callee.manager.runner.clone(),
         tool_grants: callee.tool_grants(),
+        // The callee's own, like the runner and the grants beside it: a caller
+        // does not get to widen what the cell it is calling may touch.
+        tool_level: callee.manager.tools,
         autonomy_ceiling: call.autonomy_ceiling,
         budget: call.budget,
         definition_of_done: call.definition_of_done.clone(),

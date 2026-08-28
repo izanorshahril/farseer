@@ -632,6 +632,7 @@ async fn instruct_cell(
         .get(&CellId::new(cell_id))
         .cloned()
         .ok_or(ApiError::NotFound("cell"))?;
+    check_tool_level(&cell.manager.runner, cell.manager.tools)?;
     let contract = WorkerContract::seal(WorkerContractSpec {
         run_id: RunId::new(),
         task_id: TaskId::new(),
@@ -640,6 +641,7 @@ async fn instruct_cell(
         workspace: cell.workspace_strategy,
         runner: cell.manager.runner.clone(),
         tool_grants: cell.tool_grants(),
+        tool_level: cell.manager.tools,
         autonomy_ceiling: cell.policy.autonomy_ceiling,
         // `23 prototype loose ends`: the task starts with the owning cell's
         // pool; every delegated worker narrows and draws down from this root.
@@ -1640,6 +1642,25 @@ fn skill_paths(state: &AppState, runner: &str, names: &[String]) -> ApiResult<Ve
         .collect()
 }
 
+/// Refuse a tool level farseer cannot actually impose on this runner.
+///
+/// The third application of one rule, and the one `36 tool grant enforcement`
+/// exists because of: a cell that opts down to `read` and gets a shell anyway
+/// has been told nothing, and the record would say it was allowed less than it
+/// was. `31` refuses a delegation a manager cannot make and `32` refuses a
+/// skill a runner cannot load; this refuses a grant a runner cannot honour.
+///
+/// `ToolLevel::Shell` never refuses, because it asks for nothing to be imposed.
+fn check_tool_level(runner: &str, level: farseer_core::ToolLevel) -> ApiResult<()> {
+    if level != farseer_core::ToolLevel::Shell && !farseer_runner::pi::takes_tool_allowlist(runner) {
+        return Err(ApiError::Policy(format!(
+            "runner `{runner}` cannot be held to a tool allowlist, and this cell asks for `{}`",
+            level.as_str()
+        )));
+    }
+    Ok(())
+}
+
 /// Whether farseer has a way to hand this runner a named skill.
 ///
 /// One arm today, and stated as a list rather than a negation so a new runner
@@ -2026,6 +2047,7 @@ grants_shell = true
             workspace: cell.workspace_strategy,
             runner: cell.manager.runner.clone(),
             tool_grants: cell.tool_grants(),
+            tool_level: Default::default(),
             autonomy_ceiling: cell.policy.autonomy_ceiling,
             budget: cell.budget,
             definition_of_done: String::new(),
@@ -2833,6 +2855,7 @@ grants_shell = true
             workspace: WorkspaceStrategy::Worktree,
             runner: "claude-code".into(),
             tool_grants: Vec::new(),
+            tool_level: Default::default(),
             autonomy_ceiling: farseer_core::policy::Irreversibility::Reversible,
             budget: Budget::default(),
             definition_of_done: String::new(),
@@ -2868,6 +2891,7 @@ grants_shell = true
             workspace: WorkspaceStrategy::Worktree,
             runner: "not-a-real-runner".into(),
             tool_grants: vec!["shell".into()],
+            tool_level: Default::default(),
             autonomy_ceiling: farseer_core::policy::Irreversibility::Reversible,
             budget: Budget::default(),
             definition_of_done: String::new(),
@@ -2925,6 +2949,7 @@ grants_shell = true
                 workspace: WorkspaceStrategy::Worktree,
                 runner: "not-a-real-runner".into(),
                 tool_grants: Vec::new(),
+                tool_level: Default::default(),
                 autonomy_ceiling: farseer_core::policy::Irreversibility::Reversible,
                 budget: Budget::default(),
                 definition_of_done: String::new(),
@@ -2975,6 +3000,7 @@ grants_shell = true
             workspace: WorkspaceStrategy::Worktree,
             runner: "not-a-real-runner".into(),
             tool_grants: vec!["shell".into()],
+            tool_level: Default::default(),
             autonomy_ceiling: farseer_core::policy::Irreversibility::Reversible,
             budget: Budget::default(),
             definition_of_done: String::new(),
@@ -4038,6 +4064,7 @@ runner = "{runner}"
             workspace: farseer_core::WorkspaceStrategy::Worktree,
             runner: runner.into(),
             tool_grants: vec![],
+            tool_level: Default::default(),
             autonomy_ceiling: farseer_core::Irreversibility::Reversible,
             budget: farseer_core::Budget::default(),
             definition_of_done: String::new(),
@@ -4089,6 +4116,7 @@ runner = "{runner}"
             workspace: farseer_core::WorkspaceStrategy::Worktree,
             runner: "pi".into(),
             tool_grants: vec![],
+            tool_level: Default::default(),
             autonomy_ceiling: farseer_core::Irreversibility::Reversible,
             budget: farseer_core::Budget::default(),
             definition_of_done: String::new(),

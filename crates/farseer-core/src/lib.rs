@@ -20,7 +20,7 @@ pub use cell::{
 };
 pub use event::{Actor, Event, EventKind, MemoryTier, NewEvent};
 pub use ids::{CallId, CellId, EventId, MemoryId, RunId, Seq, TaskId};
-pub use policy::{Budget, BudgetError, BudgetStack, Irreversibility, Policy, Spend};
+pub use policy::{Budget, BudgetError, BudgetStack, Irreversibility, Policy, Spend, ToolLevel};
 pub use quota::{Availability, WindowObservation};
 pub use run::{
     ActivityClock, Control, Lifecycle, Liveness, LivenessThresholds, ManagerVerb, Outcome, Pause,
