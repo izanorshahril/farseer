@@ -1,6 +1,6 @@
 # 32 harness capability floor
 
-**Status:** open. A measurement, and three things it changed.
+**Status:** open, narrowed. A measurement, three things it changed, and one consequence left - the record still cannot say a skill was used.
 **Measured:** 2026-08-27, live, against `pi 0.84.3`, `omp 18.0.4`, `agy 1.1.13`, `codex-cli 0.149.1`.
 
 pi is the benchmark, because the operator picked it as the fleet default and because it is the runner farseer drives most completely. The question is what a coding harness is *expected* to do, and which of those things farseer can **see** - `10 runner inventory`'s rule holds throughout: observed, never advertised. Every row below is a captured line, not a help page.
@@ -83,9 +83,12 @@ Stripped of the shared floor, three real differences:
 
 ## Open
 
-- Skills, per the three consequences above. The largest gap on this page.
-- omp's `hub` tool - background jobs are farseer's own concern (`05 run state model` has a whole vocabulary for a run in flight), and a runner having its own parallel one is worth a look before the two collide.
-- Whether `agent_end`'s under-counting is fixed in the adapter or in `RunReport`. It is the design review's "RunReport is becoming a bag" finding arriving with a concrete cost attached.
+Two of the four items below are discharged; struck through rather than deleted, because what closed them is the useful part.
+
+- **Skills consequence 1 - a cell cannot ask for a skill.** ~~Open.~~ **Closed 2026-08-28**: a cell declares `skills = [...]`, farseer passes them by path on the runners that take one, and refuses in front of a person on the ones that do not.
+- **Skills consequences 2 and 3 - the record does not say a skill was used, and the menu cannot show them.** **Still open, and now the only thing left on this page.** A run that invoked `skill:diagnosing-bugs` and one that did not still look identical.
+- ~~omp's `hub` tool.~~ **Moved to `36 tool grant enforcement` 2026-08-28**: `task` and `hub` are tools, so whether an omp manager spawns its own subagents is a tool level somebody chose rather than a capability nobody did.
+- ~~Whether `agent_end`'s under-counting is fixed in the adapter or in `RunReport`.~~ **Fixed in the adapter 2026-08-28**, as `RunnerSignal::LegSpend`: the record keeps the event for a person and a separate signal carries the arithmetic, because money that only exists in a payload string is money the report cannot add up.
 
 ---
 

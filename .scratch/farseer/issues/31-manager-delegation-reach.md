@@ -1,6 +1,6 @@
 # 31 manager delegation reach
 
-**Status:** open, blocking.
+**Status:** closed 2026-08-29. Four transports, every manager runner, none of them told its own token - see the notes at the foot of this ticket.
 **Found:** 2026-08-27, by reading the record of a run nobody thought was wrong.
 
 ## What happened
