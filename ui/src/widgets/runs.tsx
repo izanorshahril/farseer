@@ -27,16 +27,23 @@ type Run = {
   operator_touched: boolean;
   started_ts: number;
   liveness: "live" | "stalled" | "likely_hung" | null;
+  title: string | null;
+  role: string | null;
 };
 
 /** What `05 run state model` permits, given where the run actually is. */
-function verbsFor(run: Run): string[] {
+function verbsFor(run: Run, steerable: (runner: string) => boolean): string[] {
   if (run.lifecycle !== "running") return [];
   // Steer needs a live process listening on stdin. The runtime answers `400`
   // when the runner has no steering path, and finding that out by clicking is
   // exactly what this list exists to prevent - but the runner is on the row, so
   // the decision is honest rather than optimistic.
-  return run.runner === "claude-code" ? ["steer", "cancel"] : ["cancel"];
+  //
+  // Asked of the shell rather than named here: this used to read
+  // `runner === "claude-code"`, which was true when it was written and stopped
+  // being true the moment ACP and pi arrived, silently. One table, everything
+  // else derived.
+  return steerable(run.runner) ? ["steer", "cancel"] : ["cancel"];
 }
 
 const usd = (micros: number) => `$${(micros / 1_000_000).toFixed(2)}`;
@@ -50,6 +57,8 @@ const TONE: Record<string, string> = {
 
 export function RunsWidget({ bridge }: { bridge: Bridge }) {
   const [runs, setRuns] = useState<Run[] | null>(null);
+  /** Runner name to what farseer cannot do with it, from the settings surface. */
+  const [cannot, setCannot] = useState<Record<string, string[]>>({});
   const [busy, setBusy] = useState<string | null>(null);
   const [note, setNote] = useState<string | null>(null);
 
@@ -69,6 +78,20 @@ export function RunsWidget({ bridge }: { bridge: Bridge }) {
     const subscription = follow(() => void load());
     return subscription.close;
   }, [load]);
+
+  useEffect(() => {
+    fetch("/__settings/runners")
+      .then((r) => r.json() as Promise<{ name: string; cannot: string[] }[]>)
+      .then((list) => setCannot(Object.fromEntries(list.map((f) => [f.name, f.cannot]))))
+      // An unreachable settings surface offers no steer rather than a steer
+      // that fails: under-promising is the safe direction here.
+      .catch(() => setCannot({}));
+  }, []);
+
+  const steerable = (runner: string) =>
+    (cannot[runner] ?? ["cannot be steered once a run starts"]).every(
+      (warning) => !warning.includes("steered"),
+    );
 
   const act = async (run: Run, verb: string) => {
     setBusy(`${run.run_id}:${verb}`);
@@ -99,14 +122,16 @@ export function RunsWidget({ bridge }: { bridge: Bridge }) {
     <>
       <ul className="runs">
         {runs.map((run) => {
-          const verbs = verbsFor(run);
+          const verbs = verbsFor(run, steerable);
           return (
             <li key={run.run_id}>
               <span
                 className={`dot ${run.liveness ?? (run.lifecycle === "running" ? "live" : "done")}`}
                 title={run.liveness ?? run.lifecycle}
               />
-              <span className="mono faint">{run.run_id.slice(0, 8)}</span>
+              <span className="run-title" title={run.run_id}>
+                {run.title ?? run.run_id.slice(0, 8)}
+              </span>
               <span className="badge">{run.cell_id}</span>
               <span className="dim mono small">{run.runner}</span>
               <span className={`kind ${TONE[run.outcome ?? ""] ?? ""}`}>

@@ -26,11 +26,13 @@ use crate::{Result, Store};
 /// One account's window as it stands now, plus what farseer itself spent inside
 /// it.
 ///
-/// **There is no percentage here and there never will be.** `27 quota
-/// accounting` section 2: farseer's own consumption is a lower bound on window
-/// usage, because the same window is drained by sessions farseer cannot see, so
-/// a percentage would be wrong in a way the operator could not detect - and most
-/// wrong exactly near exhaustion.
+/// **Farseer never computes a percentage here, and `used_percent` is not one.**
+/// `27 quota accounting` section 2 refused a percentage derived from farseer's
+/// own spend, because the same window is drained by sessions farseer cannot see
+/// (wrong in a way the operator could not detect, and most wrong exactly near
+/// exhaustion). That refusal stands. `used_percent` is present only when the
+/// **provider states it**, which `30 codex app server` found `codex app-server`
+/// doing after every turn, and is absent for every runner that does not.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct WindowRow {
     pub account: String,
@@ -39,6 +41,17 @@ pub struct WindowRow {
     pub resets_at: Option<i64>,
     pub rate_limit_type: String,
     pub is_using_overage: bool,
+    /// The provider's own reading, never farseer's arithmetic.
+    ///
+    /// Skipped entirely when absent rather than serialized as `null`, so a
+    /// window nobody reported a percentage for carries **no percentage on the
+    /// wire at all** - which is what `27 quota accounting`'s own test greps for,
+    /// and what keeps its refusal literally true for every runner that states
+    /// nothing.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub used_percent: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub window_duration_mins: Option<i64>,
     /// When farseer **first saw** this window, which is what its own spend is
     /// counted from.
     ///
@@ -67,7 +80,7 @@ impl Store {
         observation: &WindowObservation,
         ts: i64,
     ) -> Result<bool> {
-        if let Some(previous) = self.latest_observation(&observation.account)?
+        if let Some(previous) = self.latest_observation(observation.window_key())?
             && !observation.differs_from(&previous)
         {
             return Ok(false);
@@ -83,14 +96,24 @@ impl Store {
         Ok(true)
     }
 
-    fn latest_observation(&self, account: &str) -> Result<Option<WindowObservation>> {
+    /// The last thing said about **this** window.
+    ///
+    /// Keyed by account *and* limit, per `30 codex app server`: one account can
+    /// be running several windows at once, and keying by account alone makes two
+    /// of them look like one flapping between two states - so every observation
+    /// would differ from the last and the on-change discipline would collapse
+    /// into recording everything.
+    fn latest_observation(&self, key: (&str, &str)) -> Result<Option<WindowObservation>> {
+        let (account, rate_limit_type) = key;
         let row: Option<String> = self
             .conn()
             .query_row(
                 "SELECT payload FROM events
-                 WHERE kind = ?1 AND json_extract(payload, '$.account') = ?2
+                 WHERE kind = ?1
+                   AND json_extract(payload, '$.account') = ?2
+                   AND COALESCE(json_extract(payload, '$.rate_limit_type'), '') = ?3
                  ORDER BY seq DESC LIMIT 1",
-                rusqlite::params![EventKind::RATE_LIMIT, account],
+                rusqlite::params![EventKind::RATE_LIMIT, account, rate_limit_type],
                 |r| r.get(0),
             )
             .optional()?;
@@ -98,7 +121,10 @@ impl Store {
             .transpose()
     }
 
-    /// Every account's current window, newest transition first.
+    /// Every window's current state, newest transition first.
+    ///
+    /// One row per **window**, not per account: `30 codex app server` found one
+    /// account can be running two at once.
     ///
     /// The spend figures are farseer's own runs on that account's runners since
     /// the transition, which is the number `27 quota accounting` found actually
@@ -108,7 +134,8 @@ impl Store {
         let mut stmt = self.conn().prepare(
             "SELECT payload, MAX(ts) FROM events
              WHERE kind = ?1
-             GROUP BY json_extract(payload, '$.account')
+             GROUP BY json_extract(payload, '$.account'),
+                      COALESCE(json_extract(payload, '$.rate_limit_type'), '')
              ORDER BY MAX(seq) DESC",
         )?;
         let latest = stmt
@@ -129,6 +156,8 @@ impl Store {
                     account: observation.account,
                     rate_limit_type: observation.rate_limit_type,
                     is_using_overage: observation.is_using_overage,
+                    used_percent: observation.used_percent,
+                    window_duration_mins: observation.window_duration_mins,
                     since_ts,
                     farseer_usd_micros: usd,
                     farseer_tokens: tokens,
@@ -177,6 +206,8 @@ mod tests {
             availability,
             rate_limit_type: "five_hour".into(),
             is_using_overage: false,
+            used_percent: None,
+            window_duration_mins: None,
         }
     }
 
@@ -184,6 +215,71 @@ mod tests {
         store
             .observe_window(&CellId::new("zero"), RunId::new(), observation, ts)
             .unwrap()
+    }
+
+    /// `30 codex app server`: Codex reports a five-hour and a weekly window in
+    /// the same notification, and they alternate in the log.
+    ///
+    /// Keyed by account alone, each would differ from the one before it forever,
+    /// and "append on change" would silently become "append everything" - the
+    /// exact noise `27 quota accounting` section 4 built this to avoid.
+    #[test]
+    fn two_windows_on_one_account_do_not_flap_against_each_other() {
+        let store = Store::open_in_memory().unwrap();
+        let five_hour = {
+            let mut o = observation(Availability::Allowed {
+                resets_at: Some(1787710593),
+            });
+            o.runner = "codex-app-server".into();
+            o.used_percent = Some(12);
+            o
+        };
+        let weekly = {
+            let mut o = five_hour.clone();
+            o.rate_limit_type = "weekly".into();
+            o.availability = Availability::Allowed {
+                resets_at: Some(1788273509),
+            };
+            o.used_percent = Some(3);
+            o
+        };
+
+        assert!(observe(&store, &five_hour, 100));
+        assert!(observe(&store, &weekly, 101));
+        // Both seen again, unchanged: neither is a transition.
+        assert!(!observe(&store, &five_hour, 102));
+        assert!(!observe(&store, &weekly, 103));
+
+        let rows = store.windows(|_| vec!["codex-app-server".into()]).unwrap();
+        assert_eq!(
+            rows.len(),
+            2,
+            "one row per window, not per account: {rows:?}"
+        );
+        let weekly_row = rows
+            .iter()
+            .find(|r| r.rate_limit_type == "weekly")
+            .expect("the weekly window has its own row");
+        assert_eq!(weekly_row.used_percent, Some(3));
+    }
+
+    #[test]
+    fn a_window_filling_up_is_a_transition_the_operator_can_see_coming() {
+        let store = Store::open_in_memory().unwrap();
+        let mut window = observation(Availability::Allowed { resets_at: Some(1) });
+        window.runner = "codex-app-server".into();
+        window.used_percent = Some(10);
+        assert!(observe(&store, &window, 100));
+        assert!(!observe(&store, &window, 101));
+
+        window.used_percent = Some(85);
+        assert!(
+            observe(&store, &window, 102),
+            "the status is still `allowed`, and that is the point"
+        );
+        let rows = store.windows(|_| vec![]).unwrap();
+        assert_eq!(rows[0].status, "allowed");
+        assert_eq!(rows[0].used_percent, Some(85));
     }
 
     #[test]
@@ -288,6 +384,50 @@ mod tests {
         assert_eq!(window.since_ts, 10);
     }
 
+    /// The other half of the one above, added by `30 codex app server`.
+    ///
+    /// The refusal was never "no number shaped like a percentage may exist" - it
+    /// was "farseer must not compute one from its own spend". A provider that
+    /// states its own is an observation, and `10 runner inventory`'s rule admits
+    /// it for the same reason it admits `resetsAt`.
+    #[test]
+    fn a_percentage_the_provider_stated_is_reported_as_it_was_stated() {
+        let store = Store::open_in_memory().unwrap();
+        let mut window = observation(Availability::Allowed {
+            resets_at: Some(1_787_710_593),
+        });
+        window.runner = "codex-app-server".into();
+        window.used_percent = Some(41);
+        window.window_duration_mins = Some(300);
+        observe(&store, &window, 10);
+
+        // Spend on this account exists and is deliberately unrelated to the
+        // number reported: nothing here turns one into the other.
+        store
+            .upsert_run(&RunRow {
+                run_id: RunId::new(),
+                task_id: TaskId::new(),
+                cell_id: CellId::new("zero"),
+                runner: "codex-app-server".into(),
+                model: String::new(),
+                outcome: None,
+                usd_micros: 999_000,
+                tokens: 5_000,
+                started_ts: 11,
+                finished_ts: None,
+                operator_touched: false,
+            })
+            .unwrap();
+
+        let windows = store.windows(|_| vec!["codex-app-server".into()]).unwrap();
+        assert_eq!(windows[0].used_percent, Some(41));
+        assert_eq!(windows[0].window_duration_mins, Some(300));
+        assert_eq!(
+            windows[0].farseer_usd_micros, 999_000,
+            "farseer's own spend is still reported as itself, beside the              provider's reading rather than instead of it"
+        );
+    }
+
     #[test]
     fn a_window_row_carries_no_percentage_of_the_providers_window() {
         let store = Store::open_in_memory().unwrap();
@@ -300,6 +440,8 @@ mod tests {
         );
         let windows = store.windows(|a| vec![a.to_string()]).unwrap();
         let wire = serde_json::to_string(&windows).unwrap();
+        // The fixture is a runner that states nothing, which is every runner but
+        // `codex-app-server`. Nothing may appear from farseer's own arithmetic.
         for absent in ["percent", "used_", "remaining", "quota_left"] {
             assert!(
                 !wire.contains(absent),

@@ -1,7 +1,21 @@
 # Working in this repository
 
 Twenty-eight decision tickets are closed, and the foundation is implemented against them: `farseer-core`, `farseer-store`, `farseer-api`, `farseer-runner`, `farseer-manager`, and the `farseer` binary.
+
+## Scope
+
+Farseer builds, tests and runs with **`cargo` and `bun` alone**.
+`cargo test`, `cargo clippy --all-targets`, `cargo fmt` and `bun run --cwd ui check` are the whole toolchain, and every live-runner test is `#[ignore]`d behind them.
+
+No push gate, review pipeline or daemon is part of this project. If one is installed on a machine it belongs to that machine, not to farseer, and farseer must keep working when it is absent.
+
+**`herdr`, `firstmate` and `buzz` appear in the decision record as prior art, never as dependencies.**
+`18 hang detection prior art` surveyed their Windows failures and `03 spike job objects` is the answer to them - Job Objects and explicit `.exe`/`.cmd` resolution exist *because* those tools' bugs traced to implementation choices rather than platform walls.
+Reading those names as integration points inverts the finding.
+
 `farseer-runner` resolves `claude`, `codex`, `cursor-agent`, or `goose`, builds each argv, supervises the process under a Job Object, maps verified stream-json shapes, and creates or tears down workspaces according to `04 spike workspace teardown`.
+It also speaks **ACP** ([`acp.rs`](crates/farseer-runner/src/acp.rs), [`acp_drive.rs`](crates/farseer-runner/src/acp_drive.rs)), which is one adapter rather than a fifth dialect: `goose-acp` and `opencode-acp` ship today and the same code path admits Gemini CLI, Amp, Droid, Copilot, Qwen, pi and Aider.
+An ACP runner name means an **executable and a subcommand**, because `goose` and `goose-acp` are one binary offering two faces and report different things - the ACP face names a **context window** and no native runner does, and it reports **no subscription window**, which is what `27 quota accounting` runs on.
 Codex maps the locally verified `item.completed` `agent_message` answer but leaves other `item.*` activity-only.
 Cursor-agent remains shallow past its verified terminal shape because no ticket captured a literal `tool_call` payload.
 Goose maps terminal `complete` to `Outcome::Ok` because its verified line carries no failure field.
@@ -143,6 +157,8 @@ Spikes exist to unblock decisions and are not the product. Treat them as evidenc
 
 Recorded in [10 runner inventory](.scratch/farseer/issues/10-runner-inventory.md), and each was measured rather than read from documentation:
 
+- **A conversational runner must not be read to end of stream.** Observed 2026-08-26: an ACP agent does not exit when a turn ends - the session stays open for the next prompt - so `drive`'s drain-until-EOF loop waits forever, and the first live ACP run hung until it was killed. This is `28`'s stdin bug seen from the other side, and both are the same missing distinction: **machinery correct for a one-shot runner is silently wrong for a conversational one, and both present as a live process producing nothing.** `Channel::{OneShot, Steered, Acp}` names whether a stdin exists, how the goal gets in, and what ends the read loop, in one place.
+- **An ACP agent streams its answer a fragment at a time**, so recording each fragment puts several `manager_answered` events in the record for one sentence - `goose acp` sends "Hello" then "!". `05 run state model` had already ruled that **token streams are activity, not progress**; `RunnerSignal::OutputChunk` accumulates and one `Output` is emitted per turn.
 - **A one-shot runner must be spawned with a *closed* stdin, not an open pipe nobody writes to.** Observed 2026-08-25: `codex exec` prints "Reading additional input from stdin..." and waits for EOF **before it starts work**, so a pipe held open for the process's lifetime means it never begins - a live process, zero output, and a run that sits at `running` forever with no events and no cost. `SupervisedProcess::spawn` now takes a `StdinMode`, and the **steer frame decides it**: a runner something will steer gets a pipe, and everything else gets EOF at spawn.
 - **A manager stalls on any built-in tool it was not granted, too.** Observed 2026-08-25: a manager told to write a widget read its contract, decided correctly, then sat on "Claude requested permissions to write to ...". `Write`, `Edit` and `Bash` are granted only to a manager whose cell grants a shell-capable tool, per `12 autonomy and deny list`.
 - **A run's workspace is a worktree of `HEAD`.** Anything a manager must read has to be **committed** - an uncommitted file is one it spends real tokens failing to find. A commit it makes is unreachable after teardown unless it leaves a **branch**.

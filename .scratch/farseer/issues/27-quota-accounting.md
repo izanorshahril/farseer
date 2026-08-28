@@ -200,3 +200,29 @@ The parser proves it independently - `resets_at` is a required field, so the obs
 **The reset time doubles as the window's identity.**
 Two observations naming the same reset are the same window, so a fresh five-hour window is a **transition** even while the status never leaves `allowed`.
 Without it, farseer could only see a window boundary by watching an account get refused.
+
+
+## Corrected by 30 (2026-08-26)
+
+**A percentage exists after all, and this ticket's refusal still holds.**
+
+This ticket recorded that farseer sees `status` and `resetsAt` but **not a gauge**, citing `10 runner inventory`'s finding that `used_percentage` appears only on a status line which provably does not fire headless.
+`GET /v1/quota` therefore never reports a percentage, and tests assert its absence.
+
+`codex app-server` pushes `account/rateLimits/updated` after every turn, headless, carrying `usedPercent` for **two** windows at once:
+
+```json
+{"primary":{"usedPercent":0,"windowDurationMins":300,"resetsAt":1787710593},
+ "secondary":{"usedPercent":0,"windowDurationMins":10080,"resetsAt":1788273509},
+ "planType":"plus","credits":{"hasCredits":false,"unlimited":false,"balance":"0"}}
+```
+
+**The rule this ticket wrote is not the rule it looks like.**
+What was refused is a percentage farseer would **derive from its own spend** - a lower bound on a window drained by sessions farseer cannot see, and most wrong exactly near exhaustion. That reasoning is untouched, and those tests should keep asserting the absence of a *derived* percentage.
+
+A provider-reported `usedPercent` is a different number reached a different way, and `10 runner inventory`'s observed-never-advertised rule admits it for the same reason it admits `resetsAt`.
+
+Two things this ticket's shape cannot hold yet, recorded rather than fixed:
+
+- **Two windows per account.** `WindowObservation` assumes one.
+- **A plan type and a credit balance**, which no other runner reports.

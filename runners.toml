@@ -1,0 +1,66 @@
+# Runner config: machine-wide facts about a runner, which are not a cell's
+# business. See `crates/farseer-core/src/runners.rs`.
+#
+# Two kinds of declaration live here, and they are different acts:
+#
+#   account  which subscription a runner spends, per `27 quota accounting`.
+#            Declared, never inferred - nothing farseer can observe tells it
+#            that two runners share a login, so it declines to guess and shows
+#            two windows until an operator says otherwise.
+#
+#   model    what farseer launches the runner with. Absent means farseer passes
+#   effort   nothing and the runner keeps its own configuration, which is
+#            `30 codex app server`'s rule. Present here is the operator saying
+#            so in farseer's own file, which is the one thing that was missing.
+#
+# Everything below is pinned to one cheap model at low effort **for testing**.
+# The point is a fleet whose runs cost about the same whatever picks them up, so
+# a difference in the record is farseer's doing rather than a difference in what
+# was spending. Take the model/effort lines out to hand each runner back to its
+# own config; the accounts should stay.
+
+# One ChatGPT subscription, three faces of it. Without these three lines the
+# quota widget shows three separate windows at 1% each, which is not wrong so
+# much as unreadable: it is one window being reported three times.
+[codex]
+account = "chatgpt"
+model = "gpt-5.6-luna"
+effort = "low"
+
+[codex-app-server]
+account = "chatgpt"
+model = "gpt-5.6-luna"
+effort = "low"
+
+# goose delegates through the same ChatGPT login on this machine. It reports no
+# quota of its own - ACP has no concept of one - so this declaration does not
+# add a window, it keeps goose's spending attributed to the window that exists.
+[goose-acp]
+account = "chatgpt"
+
+[goose]
+account = "chatgpt"
+
+# pi names its provider in the model string, so the pin is fully qualified: pi
+# offers `gpt-5.6-luna` from both `openai-codex` and `github-copilot`, and an
+# unqualified name would let it pick the one farseer is not accounting for.
+[pi]
+account = "chatgpt"
+model = "openai-codex/gpt-5.6-luna"
+effort = "low"
+
+# omp speaks pi's protocol verbatim and shares its adapter, but it is a separate
+# runner because it bundles **task agents** - the subagent capability pi does not
+# have, and the thing worth comparing them on.
+[omp]
+account = "chatgpt"
+model = "openai-codex/gpt-5.6-luna"
+effort = "low"
+
+# Google, not ChatGPT, so its own account. agy bakes the effort into the model
+# id - `agy models` lists `-low`, `-medium` and `-high` as separate entries - so
+# there is deliberately no `effort` line here: two places to say one thing is two
+# places that can disagree.
+[agy]
+account = "google"
+model = "gemini-3.7-flash-low"

@@ -4,6 +4,7 @@ import { QuotaWidget } from "./widgets/quota";
 import { FleetWidget } from "./widgets/fleet";
 import { ActivityWidget } from "./widgets/activity";
 import { RunsWidget } from "./widgets/runs";
+import { RunnersWidget } from "./widgets/runners";
 import { SettingsWidget } from "./widgets/settings";
 import { ConversationWidget } from "./widgets/conversation";
 import { SandboxWidget } from "./SandboxWidget";
@@ -40,6 +41,11 @@ const REGISTRY = {
   quota: { title: "Windows", subtitle: "by account", render: QuotaWidget },
   fleet: { title: "Cells", subtitle: "loaded definitions", render: FleetWidget },
   activity: { title: "Activity", subtitle: "the record, live", render: ActivityWidget },
+  runners: {
+    title: "Runners",
+    subtitle: "spawned right now",
+    render: RunnersWidget,
+  },
   runs: { title: "Runs", subtitle: "with 05's verbs", render: RunsWidget },
   settings: { title: "Settings", subtitle: "the harness in front", render: SettingsWidget },
 } as const;
@@ -57,7 +63,7 @@ type AgentWidget = { id: string; title: string; subtitle: string; cell?: string 
 type Layout = { mounted: WidgetId[]; wide: WidgetId[] };
 
 const DEFAULT_LAYOUT: Layout = {
-  mounted: ["conversation", "runs", "activity", "quota", "fleet"],
+  mounted: ["conversation", "runners", "runs", "activity", "quota", "fleet"],
   wide: ["conversation", "runs"],
 };
 

@@ -136,6 +136,19 @@ async fn run(
         .with_runner_config(runner_config),
     );
 
+    // Close what the last process left open, before anything reads the fleet.
+    //
+    // `17 cell lifecycle` chose no orphan survival, so a run this process did
+    // not start has no handle, no liveness and no cancel - but its row still
+    // said `running`, and every fleet surface believed it. Reaped once here
+    // rather than filtered at each surface: a row that is wrong is wrong once,
+    // and three widgets each working around it is three places to forget.
+    match state.reap_orphaned_runs() {
+        Ok(0) => {}
+        Ok(reaped) => println!("reaped:  {reaped} run(s) left open by a previous process"),
+        Err(error) => eprintln!("reaping runs left open by a previous process: {error}"),
+    }
+
     let report = state.reload();
     for error in &report.errors {
         eprintln!("broken   {}: {}", error.file, error.message);

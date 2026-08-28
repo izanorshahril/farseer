@@ -291,6 +291,42 @@ impl Store {
     /// Record a run for `11 analytics questions`'s four questions. Deleting a cell does not delete
     /// this: `02 record scope` section 7 keeps the record when the cell goes, because a
     /// definition is a file in git and its history is not reversible.
+    /// Close every run row still marked running, and say which they were.
+    ///
+    /// `17 cell lifecycle` chose **no orphan survival**: a run's process dies
+    /// with the runtime, and nothing reattaches. The row it left behind did
+    /// survive, though, and said `running` forever - so a restart accumulated
+    /// permanent live-looking runs that no verb could reach, because
+    /// `cancel` asks the in-memory handle and an orphan has none. Eight had
+    /// piled up by 2026-08-27 and every fleet surface was reading them as work
+    /// in flight.
+    ///
+    /// `Failed` rather than a new outcome: `05 run state model` defines it as
+    /// *something broke and nobody chose it*, which is exactly what a runtime
+    /// going away is. `Abandoned` would be wrong - it means a manager decided
+    /// the run was unnecessary **before it started**, and these had started.
+    /// The caller records the reason on the event so the record can tell a
+    /// reaped run from one that failed on its own.
+    ///
+    /// Safe because farseer is one instance per machine - one `runtime.json`,
+    /// one port. A second concurrent runtime would have its live runs reaped by
+    /// the newcomer, which is a consequence of that assumption rather than of
+    /// this sweep.
+    pub fn reap_orphaned_runs(&self, finished_ts: i64) -> Result<Vec<RunRow>> {
+        let orphans: Vec<RunRow> = self
+            .recent_runs(5_000)?
+            .into_iter()
+            .filter(|row| row.outcome.is_none())
+            .collect();
+        for row in &orphans {
+            self.conn.execute(
+                "UPDATE runs SET outcome = 'failed', finished_ts = ?2 WHERE run_id = ?1",
+                rusqlite::params![&row.run_id.as_bytes()[..], finished_ts],
+            )?;
+        }
+        Ok(orphans)
+    }
+
     pub fn upsert_run(&self, run: &RunRow) -> Result<()> {
         self.conn.execute(
             "INSERT INTO runs

@@ -4,11 +4,18 @@ import type { Bridge } from "../bridge";
 /**
  * `27 quota accounting`'s utilisation surface, as a widget.
  *
- * **There is no progress bar here, and that is the whole point.** Farseer's own
- * spend is a lower bound on a window drained by sessions it cannot see, so a bar
- * would be wrong in a way the operator could not detect - and most wrong exactly
- * near exhaustion, when they would trust it most. What it shows instead is what
- * is actually true: allowed or exhausted, a countdown, and what the fleet spent.
+ * **Farseer's own spend never becomes a progress bar, and that is the whole
+ * point.** It is a lower bound on a window drained by sessions farseer cannot
+ * see, so a bar would be wrong in a way the operator could not detect - and most
+ * wrong exactly near exhaustion, when they would trust it most.
+ *
+ * `30 codex app server` found a runner that states **its own** percentage, which
+ * is a different number reached a different way. That one is shown, labelled as
+ * the provider's, beside farseer's spend rather than instead of it - and a
+ * window whose runner says nothing still shows no percentage at all.
+ *
+ * One account can now have several windows: Codex reports a five-hour and a
+ * weekly, so the list is keyed by account **and** limit.
  */
 type Window = {
   account: string;
@@ -16,6 +23,9 @@ type Window = {
   resets_at: number | null;
   rate_limit_type: string;
   is_using_overage: boolean;
+  /** The provider's own reading. Absent for every runner that does not state one. */
+  used_percent?: number;
+  window_duration_mins?: number;
   since_ts: number;
   farseer_usd_micros: number;
   farseer_tokens: number;
@@ -69,11 +79,23 @@ export function QuotaWidget({ bridge }: { bridge: Bridge }) {
   return (
     <ul className="windows">
       {windows.map((window) => (
-        <li key={window.account}>
+        <li key={`${window.account}/${window.rate_limit_type}`}>
           <div className="row">
             <span className={`badge ${window.status}`}>{window.status.replace("_", " ")}</span>
             <b className="mono">{window.account}</b>
+            {window.rate_limit_type && (
+              <span className="dim small">{window.rate_limit_type.replace("_", " ")}</span>
+            )}
             {window.is_using_overage && <span className="badge overage">overage</span>}
+            <span className="grow" />
+            {/* Stated, never derived. The wording says whose number it is,
+                because the one farseer could calculate is the one `27 quota
+                accounting` refused. */}
+            {window.used_percent !== undefined && (
+              <span className="figure mono" title="reported by the provider">
+                {window.used_percent}% used
+              </span>
+            )}
           </div>
           <div className="row dim">
             <span>{window.runners.join(", ")}</span>

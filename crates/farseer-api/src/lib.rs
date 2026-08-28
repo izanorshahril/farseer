@@ -95,7 +95,7 @@ pub struct AppState {
     /// In-flight delegated workers per cell, enforcing the definition's cap.
     worker_counts: Mutex<HashMap<CellId, u32>>,
     /// Set exactly once after `serve` binds, including an OS-selected port.
-    mcp_endpoint: OnceLock<String>,
+    base_url: OnceLock<String>,
 }
 
 /// What `farseer_manager::run_worker`'s `on_started` callback hands back for
@@ -200,9 +200,20 @@ impl AppState {
     }
 
     fn set_mcp_endpoint(&self, port: u16) {
-        let _ = self
-            .mcp_endpoint
-            .set(format!("http://127.0.0.1:{port}/v1/mcp"));
+        let _ = self.base_url.set(format!("http://127.0.0.1:{port}"));
+    }
+
+    /// The runtime's own loopback origin, once the listener has bound.
+    ///
+    /// Stored as the base rather than as one endpoint because two manager faces
+    /// hang off it now - `/v1/mcp` and `/v1/manager` - and a second `OnceLock`
+    /// would be a second copy of one fact.
+    fn base_url(&self) -> Option<String> {
+        self.base_url.get().cloned()
+    }
+
+    fn mcp_endpoint(&self) -> Option<String> {
+        self.base_url.get().map(|base| format!("{base}/v1/mcp"))
     }
 
     pub fn new(
@@ -225,7 +236,7 @@ impl AppState {
             managers: Mutex::new(HashMap::new()),
             pending_cancellations: Mutex::new(HashMap::new()),
             worker_counts: Mutex::new(HashMap::new()),
-            mcp_endpoint: OnceLock::new(),
+            base_url: OnceLock::new(),
         }
     }
 
@@ -243,6 +254,41 @@ impl AppState {
     pub fn with_runner_config(mut self, config: RunnerConfig) -> Self {
         self.runner_config = config;
         self
+    }
+
+    /// Close every run row a previous process left marked running, recording
+    /// why. Returns how many.
+    ///
+    /// Called once at startup, before anything reads the fleet. See
+    /// [`farseer_store::Store::reap_orphaned_runs`] for why these cannot simply
+    /// be cancelled: `cancel` asks the in-memory handle, and an orphan has none,
+    /// so every attempt answers `404` while the row stays `running` forever.
+    pub fn reap_orphaned_runs(&self) -> Result<usize, StoreError> {
+        let now = now_ms();
+        let store = self.store();
+        let orphans = store.reap_orphaned_runs(now)?;
+        for row in &orphans {
+            // `02 record scope`: the record says **why**, so a reaped run is
+            // distinguishable from one that failed on its own. `05 run state
+            // model` gets no new outcome for this - it is `Failed` because
+            // something broke and nobody chose it.
+            store.append(&farseer_core::NewEvent::new(
+                row.cell_id.clone(),
+                row.run_id,
+                farseer_core::EventKind::new(farseer_core::EventKind::RUN_FINISHED),
+                farseer_core::Actor::Operator,
+                now,
+                serde_json::json!({
+                    "outcome": "failed",
+                    "reason": "the farseer process that started this run is gone",
+                }),
+            ))?;
+        }
+        Ok(orphans.len())
+    }
+
+    pub(crate) fn repo_root(&self) -> &std::path::Path {
+        &self.repo_root
     }
 
     pub fn runner_config(&self) -> &RunnerConfig {
@@ -304,6 +350,17 @@ impl RunSink for AppState {
     fn upsert_run(&self, row: &RunRow) -> Result<(), StoreError> {
         self.store().upsert_run(row)
     }
+
+    fn observe_window(
+        &self,
+        cell_id: &CellId,
+        run_id: RunId,
+        observation: &farseer_core::WindowObservation,
+        ts: i64,
+    ) -> Result<bool, StoreError> {
+        self.store()
+            .observe_window(cell_id, run_id, observation, ts)
+    }
 }
 
 #[derive(Debug, Default, Serialize)]
@@ -327,6 +384,8 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/v1/cells/{cell_id}", get(get_cell))
         .route("/v1/cells/reload", post(reload_cells))
         .route("/v1/cells/{cell_id}/instruct", post(instruct_cell))
+        .route("/v1/manager/delegate/worker", post(delegate_to_worker))
+        .route("/v1/manager/delegate/cell", post(delegate_to_cell))
         .route("/v1/events", get(read_events))
         .route("/v1/stream", get(stream_events))
         .route("/v1/runs", get(list_runs))
@@ -372,13 +431,25 @@ async fn guard(
     if !security::is_origin_allowed(host, origin) {
         return ApiError::Forbidden("request did not come from loopback").into_response();
     }
-    let is_manager_mcp_request = request.uri().path().starts_with("/v1/mcp");
+    let is_manager_request = is_manager_scoped(request.uri().path());
     if !presented_token(headers).is_some_and(|token| {
-        state.token.matches(token) || (is_manager_mcp_request && state.manager_token_matches(token))
+        state.token.matches(token) || (is_manager_request && state.manager_token_matches(token))
     }) {
         return ApiError::Unauthorized.into_response();
     }
     next.run(request).await
+}
+
+/// The routes a **manager's** bearer opens, as opposed to the operator's.
+///
+/// Two entries because a delegation can be asked for in two ways and they are
+/// the same grant: `/v1/mcp` is the MCP face a Claude Code manager reaches
+/// through its generated config, and `/v1/manager` is the plain-JSON face for
+/// the runners that have no MCP client at all. Everything else on the router
+/// stays the operator's, which is what
+/// `a_manager_bearer_cannot_call_operator_routes` pins.
+fn is_manager_scoped(path: &str) -> bool {
+    path.starts_with("/v1/mcp") || path.starts_with("/v1/manager/")
 }
 
 fn presented_token(headers: &HeaderMap) -> Option<&str> {
@@ -494,6 +565,46 @@ pub struct InstructBody {
 #[derive(Debug, Serialize)]
 pub struct InstructResponse {
     pub run_id: String,
+}
+
+/// Delegation for a runner that cannot speak MCP, on exactly the terms one that can gets.
+///
+/// `31 manager delegation reach` found the roster reachable from Claude Code and
+/// from nowhere else, and the fix could not be "give every runner an MCP client"
+/// because most of them do not have one and are not going to. The verbs are the
+/// same functions the MCP tools call, [`mcp::FarseerMcp::delegate_to_worker_json`],
+/// so the roster resolution, the worker cap, the budget draw-down and the
+/// cancellation link are one implementation rather than two that drift.
+///
+/// Authorization is the manager's own token, presented as the bearer *and* in
+/// the body: the bearer is what [`is_manager_scoped`] lets past the guard, and
+/// the body is what binds the call to a specific live manager run. A manager
+/// bearer opens this route and no operator route.
+async fn delegate_to_worker(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<mcp::DelegateToWorkerArgs>,
+) -> ApiResult<Json<serde_json::Value>> {
+    tokio::task::block_in_place(|| mcp::FarseerMcp::new(state).delegate_to_worker_json(body))
+        .map(Json)
+        .map_err(mcp_error)
+}
+
+/// The fire-and-forget half. See [`delegate_to_worker`].
+async fn delegate_to_cell(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<mcp::DelegateToCellArgs>,
+) -> ApiResult<Json<serde_json::Value>> {
+    mcp::FarseerMcp::new(state)
+        .delegate_to_cell_json(body)
+        .map(Json)
+        .map_err(mcp_error)
+}
+
+/// An MCP refusal is a policy refusal on this face: the caller asked for
+/// something the roster, the cap or the budget does not allow, which is a `400`
+/// and not a runtime fault.
+fn mcp_error(error: rmcp::ErrorData) -> ApiError {
+    ApiError::Policy(error.message.to_string())
 }
 
 /// [What is the local API surface?] makes an instruction fire-and-forget: this returns `202` with a `run_id`, and the record carries the run.
@@ -644,32 +755,24 @@ fn manager_run_options(
         role: RunRole::Manager,
         manager_cell: Some(cell.clone()),
         claude_mcp_config: None,
-        claude_append_system_prompt: None,
+        append_system_prompt: None,
+        runner_env: Vec::new(),
+        extensions: Vec::new(),
+        // Declared by the operator in runner config, per `27 quota accounting`,
+        // and passed down rather than derived: the manager crate reads no
+        // config, and an undeclared runner is its own account.
+        account: Some(state.runner_config().account_for(&contract.runner)),
+                // The manager's own declared skills, resolved to directories.
+                skills: skill_paths(state, &contract.runner, &cell.manager.skills)?,
+                // What the operator pinned, or nothing at all. `30 codex app
+                // server`: farseer passes a model or an effort only when a
+                // person wrote one down, so an unpinned runner keeps whatever
+                // its own config says.
+                model: state.runner_config().launch_of(&contract.runner).0.map(str::to_string),
+                effort: state.runner_config().launch_of(&contract.runner).1.map(str::to_string),
     };
-    if contract.runner != "claude-code" {
-        return Ok(options);
-    }
-    let Some(endpoint) = state.mcp_endpoint.get() else {
-        return Ok(options);
-    };
-
-    let config_path = security::manager_config_path(&contract.run_id.to_string());
-    let config = serde_json::json!({
-        "mcpServers": {
-            "farseer": {
-                "type": "http",
-                "url": endpoint,
-                "headers": {
-                    "Authorization": format!("Bearer {}", manager_token.as_str()),
-                },
-            },
-        },
-    });
-    let bytes = serde_json::to_vec_pretty(&config)
-        .map_err(|e| ApiError::Workspace(format!("serializing manager MCP config: {e}")))?;
-    security::write_user_only_file(&config_path, &bytes)
-        .map_err(|e| ApiError::Workspace(format!("writing manager MCP config: {e}")))?;
-
+    // `22 cell addressing` section 3: the roster is the grant, so the prompt
+    // names exactly what is callable. A manager that has to guess will guess.
     let workers = cell
         .roster
         .iter()
@@ -679,8 +782,6 @@ fn manager_run_options(
         })
         .collect::<Vec<_>>()
         .join(", ");
-    // `22 cell addressing` section 3: the roster is the grant, so the prompt
-    // names exactly what is callable. A manager that has to guess will guess.
     let callable_cells = cell
         .roster
         .iter()
@@ -690,33 +791,169 @@ fn manager_run_options(
         })
         .collect::<Vec<_>>()
         .join(", ");
-    let mut prompt = format!(
-        "You are the manager for farseer cell `{}`. Your manager_run_id is `{}` and your \
-         manager_token is `{}`. The roster workers available to delegate to are: {}. \
-         The cells you may call are: {}. \
-         Pass both credentials to every farseer MCP tool call. When you delegate, name a \
-         roster worker and give it a precise sub-goal, then relay the returned result. \
-         Calling a cell is different: delegate_to_cell is fire-and-forget, it returns a \
-         call_id rather than an answer, and the callee owns its own workspace, runner and \
-         tools. Anything not named above is not callable, and asking again will not make \
-         it callable. The task remains yours to own.",
-        cell.cell_id,
-        contract.run_id,
-        manager_token.as_str(),
-        if workers.is_empty() { "none" } else { &workers },
-        if callable_cells.is_empty() {
-            "none"
-        } else {
-            &callable_cells
-        },
-    );
+    let workers = if workers.is_empty() { "none" } else { &workers };
+    let callable_cells = if callable_cells.is_empty() {
+        "none"
+    } else {
+        &callable_cells
+    };
+
+    // Whether this run can actually reach the roster, as opposed to merely
+    // having one - and if so, over what.
+    //
+    // `31 manager delegation reach` opened on the first case and closes on the
+    // third: the roster was reachable from Claude Code and from nowhere else,
+    // because delegation had only ever been offered as an MCP endpoint and most
+    // runners have no MCP client. There is no one protocol to add. What
+    // generalises is the **verb**, so each runner reaches the same two
+    // functions over whatever it does speak.
+    let reach = if state.base_url().is_none() {
+        // Before the listener binds there is no endpoint to hand anyone.
+        Reach::None
+    } else if contract.runner == "claude-code" {
+        Reach::Mcp
+    } else if farseer_manager::PI_RUNNERS
+        .iter()
+        .any(|(name, _)| *name == contract.runner)
+        && delegate_extension(state).is_some()
+    {
+        Reach::PiExtension
+    } else {
+        Reach::None
+    };
+
+    let mut prompt = match reach {
+        Reach::Mcp => format!(
+            "You are the manager for farseer cell `{}`. Your manager_run_id is `{}` and your \
+             manager_token is `{}`. The roster workers available to delegate to are: {}. \
+             The cells you may call are: {}. \
+             Pass both credentials to every farseer MCP tool call. When you delegate, name a \
+             roster worker and give it a precise sub-goal, then relay the returned result. \
+             Calling a cell is different: delegate_to_cell is fire-and-forget, it returns a \
+             call_id rather than an answer, and the callee owns its own workspace, runner and \
+             tools. Anything not named above is not callable, and asking again will not make \
+             it callable. The task remains yours to own.",
+            cell.cell_id,
+            contract.run_id,
+            manager_token.as_str(),
+            workers,
+            callable_cells,
+        ),
+        // No credentials in this one. The extension holds them and injects them
+        // itself, so the model states a worker and a goal and never sees the
+        // token that authorizes the call - which is strictly better than the
+        // MCP shape above, where the manager has to carry its own bearer.
+        Reach::PiExtension => format!(
+            "You are the manager for farseer cell `{}`. The roster workers available to \
+             delegate to are: {}. The cells you may call are: {}. \
+             Use the `delegate_to_worker` tool: name a roster worker, give it a precise \
+             sub-goal, and relay the returned result. The worker sees nothing of this \
+             conversation, so the sub-goal must stand alone. \
+             `delegate_to_cell` is different: it is fire-and-forget, it returns a call_id \
+             rather than an answer, and the callee owns its own workspace, runner and tools. \
+             Anything not named above is not callable, and asking again will not make it \
+             callable. The task remains yours to own.",
+            cell.cell_id, workers, callable_cells,
+        ),
+        // The honest limit, stated in the one place the manager will read it.
+        //
+        // `31 manager delegation reach` records what the silence cost: a
+        // manager asked to spawn a sub-agent ran a command itself and reported
+        // the wait as a delegation, because an agent asked to delegate with no
+        // delegation tool will do the nearest available thing and describe it
+        // as compliance. The last sentence is the one that matters - it is
+        // cheaper to be told than to have the record hold a false claim about
+        // farseer's own execution.
+        Reach::None => format!(
+            "You are the manager for farseer cell `{}`, running on the `{}` runner. \
+             This cell's roster names these workers: {}. It names these callable cells: {}. \
+             You CANNOT reach any of them: farseer has no delegation channel for this runner, \
+             so there is no tool you can call to hand work to a worker or to another cell, and \
+             none will appear during this run. \
+             Do the work yourself, within this workspace. \
+             If a task genuinely requires a worker you cannot reach, say so plainly and stop. \
+             Never state or imply that you delegated, spawned, dispatched or handed off \
+             anything - you did not, and farseer records what actually ran.",
+            cell.cell_id, contract.runner, workers, callable_cells,
+        ),
+    };
     if !cell.manager.prompt.trim().is_empty() {
         prompt.push_str("\n\nCell manager instructions:\n");
         prompt.push_str(&cell.manager.prompt);
     }
-    options.claude_mcp_config = Some(config_path);
-    options.claude_append_system_prompt = Some(prompt);
+    options.append_system_prompt = Some(prompt);
+
+    match reach {
+        Reach::Mcp => {
+            let config_path = security::manager_config_path(&contract.run_id.to_string());
+            let config = serde_json::json!({
+                "mcpServers": {
+                    "farseer": {
+                        "type": "http",
+                        "url": state.mcp_endpoint().expect("reach implies a bound listener"),
+                        "headers": {
+                            "Authorization": format!("Bearer {}", manager_token.as_str()),
+                        },
+                    },
+                },
+            });
+            let bytes = serde_json::to_vec_pretty(&config)
+                .map_err(|e| ApiError::Workspace(format!("serializing manager MCP config: {e}")))?;
+            security::write_user_only_file(&config_path, &bytes)
+                .map_err(|e| ApiError::Workspace(format!("writing manager MCP config: {e}")))?;
+            options.claude_mcp_config = Some(config_path);
+        }
+        // The credential goes in the environment, which is why
+        // `RunOptions::runner_env` exists: not on the argv, where every process
+        // listing on this machine can read it, and not in the prompt, where the
+        // model itself would.
+        Reach::PiExtension => {
+            options.extensions = vec![delegate_extension(state).expect("reach implies the file")];
+            options.runner_env = vec![
+                (
+                    "FARSEER_ENDPOINT".to_string(),
+                    state.base_url().expect("reach implies a bound listener"),
+                ),
+                (
+                    "FARSEER_MANAGER_RUN_ID".to_string(),
+                    contract.run_id.to_string(),
+                ),
+                (
+                    "FARSEER_MANAGER_TOKEN".to_string(),
+                    manager_token.as_str().to_string(),
+                ),
+            ];
+        }
+        Reach::None => {}
+    }
     Ok(options)
+}
+
+/// How a manager on this runner asks for a delegation, if it can at all.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Reach {
+    /// farseer's MCP face, through a generated config. Claude Code.
+    Mcp,
+    /// farseer's plain-JSON manager face, through an extension registering the
+    /// two verbs as ordinary tools. pi and omp.
+    PiExtension,
+    /// Nothing. The manager is told so rather than left to improvise.
+    None,
+}
+
+/// The delegation extension farseer ships for pi and omp, if it is on disk.
+///
+/// Checked rather than assumed, per `10 runner inventory`'s observed-never-
+/// advertised rule: a manager promised a `delegate_to_worker` tool that failed
+/// to load would be back to the fabrication this ticket opened on, so a missing
+/// file downgrades the run to an honest [`Reach::None`] instead.
+fn delegate_extension(state: &AppState) -> Option<PathBuf> {
+    let path = state
+        .repo_root()
+        .join("extensions")
+        .join("pi")
+        .join("farseer-delegate.ts");
+    path.is_file().then_some(path)
 }
 
 /// Create a workspace synchronously, run on a blocking task, then tear down.
@@ -767,7 +1004,20 @@ pub(crate) fn spawn_run(
             role,
             manager_cell: Some(pinned_cell),
             claude_mcp_config: None,
-            claude_append_system_prompt: None,
+            append_system_prompt: None,
+        runner_env: Vec::new(),
+        extensions: Vec::new(),
+            account: Some(state.runner_config().account_for(&contract.runner)),
+                // A run reached without a manager context - a rerun, or a
+                // direct worker - carries no declared skills rather than
+                // inheriting the cell manager's.
+                skills: Vec::new(),
+                // What the operator pinned, or nothing at all. `30 codex app
+                // server`: farseer passes a model or an effort only when a
+                // person wrote one down, so an unpinned runner keeps whatever
+                // its own config says.
+                model: state.runner_config().launch_of(&contract.runner).0.map(str::to_string),
+                effort: state.runner_config().launch_of(&contract.runner).1.map(str::to_string),
         })
     };
     let options = match options {
@@ -839,27 +1089,51 @@ fn observe_window(
         Err(farseer_manager::ManagerError::Cancelled(report)) => Some(report),
         Err(_) => None,
     };
-    let Some(info) = report.and_then(|report| report.window.as_ref()) else {
+    let account = state.runner_config().account_for(&contract.runner);
+
+    // Claude Code's single window, in its own field names, and every window a
+    // runner reported wholesale - `30 codex app server` found one reporting two.
+    // Both paths converge here because this is the layer that knows the account:
+    // `27 quota accounting` declares it in runner config and never infers it,
+    // which is exactly why the adapters leave it blank.
+    let mut observations: Vec<farseer_core::WindowObservation> = Vec::new();
+    if let Some(info) = report.and_then(|report| report.window.as_ref()) {
+        observations.push(farseer_core::WindowObservation {
+            account: account.clone(),
+            runner: contract.runner.clone(),
+            availability: info.availability(),
+            rate_limit_type: info.rate_limit_type.clone(),
+            is_using_overage: info.is_using_overage,
+            // Claude Code states no percentage headless - `10 runner inventory`
+            // measured that - and farseer never computes one.
+            used_percent: None,
+            window_duration_mins: None,
+        });
+    }
+    observations.extend(report.into_iter().flat_map(|report| {
+        report.windows.iter().cloned().map(|mut observation| {
+            observation.account = account.clone();
+            observation.runner = contract.runner.clone();
+            observation
+        })
+    }));
+    if observations.is_empty() {
         return;
-    };
-    let observation = farseer_core::WindowObservation {
-        account: state.runner_config().account_for(&contract.runner),
-        runner: contract.runner.clone(),
-        availability: info.availability(),
-        rate_limit_type: info.rate_limit_type.clone(),
-        is_using_overage: info.is_using_overage,
-    };
+    }
+
     let store = state.store();
-    if let Err(error) =
-        store.observe_window(&contract.cell_id, contract.run_id, &observation, now_ms())
-    {
-        // The record is the product, but a window transition is an observation
-        // about the machine rather than about the run, so losing one must not
-        // fail a run that already succeeded.
-        eprintln!(
-            "window observation for run {} was not recorded: {error}",
-            contract.run_id
-        );
+    for observation in &observations {
+        if let Err(error) =
+            store.observe_window(&contract.cell_id, contract.run_id, observation, now_ms())
+        {
+            // The record is the product, but a window transition is an
+            // observation about the machine rather than about the run, so
+            // losing one must not fail a run that already succeeded.
+            eprintln!(
+                "window observation for run {} was not recorded: {error}",
+                contract.run_id
+            );
+        }
     }
 }
 
@@ -1203,6 +1477,22 @@ pub struct RunView {
     /// survival over run survival, so a restart losing this is the same
     /// trade already made everywhere else, not a new gap.
     pub liveness: Option<String>,
+    /// What this run is *for*, in one line, derived from the goal it was queued
+    /// with.
+    ///
+    /// Derived rather than stored, and read from the record rather than from a
+    /// column: `run_queued` already carries the whole sealed contract, so the
+    /// answer exists and asking the operator to also name a run would be asking
+    /// them to repeat themselves. `None` when the record has no `run_queued` -
+    /// which is a corrupt run rather than an untitled one, and says so by
+    /// staying absent.
+    pub title: Option<String>,
+    /// `manager` or `worker`, as recorded when the run was queued.
+    ///
+    /// The difference an operator most wants on a fleet view - a manager is a
+    /// conversation they can still steer, a worker is a job - and it was in the
+    /// record all along while no surface showed it.
+    pub role: Option<String>,
 }
 
 /// The fleet, newest first.
@@ -1249,8 +1539,118 @@ async fn get_run(
 /// Shared by the list and the single read so the two can never disagree about
 /// what a run is - and `05 run state model` keeps liveness **derived** here,
 /// asked of the live handle rather than read from the row.
+/// The one-line name of a run, from the goal it was sealed with.
+///
+/// First non-empty line, clipped on a word boundary. Clipped here rather than in
+/// each surface so two widgets cannot come to disagree about what a run is
+/// called - `14 vocabulary lock`'s argument, applied to a derived string.
+fn title_of(goal: &str) -> Option<String> {
+    let line = goal.lines().map(str::trim).find(|line| !line.is_empty())?;
+    const LIMIT: usize = 64;
+    if line.chars().count() <= LIMIT {
+        return Some(line.to_string());
+    }
+    let clipped: String = line.chars().take(LIMIT).collect();
+    let cut = clipped.rfind(char::is_whitespace).unwrap_or(clipped.len());
+    Some(format!("{}...", clipped[..cut].trim_end()))
+}
+
+/// The goal and role a run was queued with, read from its first recorded event.
+///
+/// One indexed row per run - `events_run(run_id, seq)` makes `LIMIT 1` cheap -
+/// rather than the full scan `original_run` does, because a list of fifty runs
+/// must not cost fifty full scans.
+fn queued_facts(state: &Arc<AppState>, run_id: RunId) -> (Option<String>, Option<String>) {
+    let store = state.store();
+    let Ok(events) = store.scan(0, 1, &ScanFilter::run(run_id)) else {
+        return (None, None);
+    };
+    let Some(queued) = events
+        .first()
+        .filter(|e| e.kind.as_str() == farseer_core::EventKind::RUN_QUEUED)
+    else {
+        return (None, None);
+    };
+    (
+        queued
+            .payload
+            .get("goal")
+            .and_then(serde_json::Value::as_str)
+            .and_then(title_of),
+        queued
+            .payload
+            .get(RUN_ROLE_FIELD)
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string),
+    )
+}
+
+/// Where a cell's skills live: `<repo>/skills/<name>/SKILL.md`.
+///
+/// One layout, not a search path. `32 harness capability floor` found every
+/// harness discovering skills from the operator's home directory, so a run got
+/// whatever happened to be installed there; a cell that names a skill should get
+/// **that** skill, from a place that is in the repository and reviewable.
+pub(crate) fn skill_dir(repo_root: &std::path::Path, name: &str) -> PathBuf {
+    repo_root.join("skills").join(name)
+}
+
+/// Resolve declared skill names to directories, refusing any that is not there.
+///
+/// Refused rather than skipped: a run that quietly drops a skill produces a
+/// worse answer for a reason nobody can see, and `13 harness build kit` is
+/// explicit that failing after the operator has committed is the bad direction.
+/// A name with a path separator in it is refused too - a skill is a name in the
+/// cell's own vocabulary, never a way to reach an arbitrary directory.
+/// Resolve declared skill names to directories, for a runner that can load them.
+///
+/// The runner is checked here rather than at launch because dropping a declared
+/// skill is invisible from the outside: the run works, the answer is worse, and
+/// nothing in the record says why. `32 harness capability floor` made a cell
+/// declare its skills so a run would stop inheriting whatever was installed on
+/// the machine; a runner that silently ignores the declaration puts the run
+/// straight back to not knowing what it loaded.
+///
+/// Same call `31 manager delegation reach` made about delegation, and the same
+/// call [`mcp::FarseerMcp::delegate_to_worker_json`] already makes about a skill
+/// that is not in the repository: refuse where a person can see it.
+fn skill_paths(state: &AppState, runner: &str, names: &[String]) -> ApiResult<Vec<PathBuf>> {
+    if !names.is_empty() && !runner_loads_skills(runner) {
+        return Err(ApiError::Policy(format!(
+            "runner `{runner}` cannot be given a skill by name, and this cell declares {names:?}"
+        )));
+    }
+    names
+        .iter()
+        .map(|name| {
+            if name.is_empty() || name.contains(['/', '\\']) || name.contains("..") {
+                return Err(ApiError::BadRequest("a skill is a name, not a path"));
+            }
+            let dir = skill_dir(&state.repo_root, name);
+            if dir.join("SKILL.md").is_file() {
+                Ok(dir)
+            } else {
+                Err(ApiError::NotFound("skill"))
+            }
+        })
+        .collect()
+}
+
+/// Whether farseer has a way to hand this runner a named skill.
+///
+/// One arm today, and stated as a list rather than a negation so a new runner
+/// is silent until somebody probes it - `10 runner inventory`'s observed-never-
+/// advertised rule. omp is the instructive absence: it speaks pi's protocol
+/// verbatim and shares pi's adapter, and its `--skills` is a glob filter over
+/// what it discovered rather than a loader, so with discovery denied there is
+/// no argv at all that gives it a directory.
+fn runner_loads_skills(runner: &str) -> bool {
+    farseer_runner::pi::loads_skills_by_path(runner)
+}
+
 fn run_view(state: &Arc<AppState>, row: RunRow) -> RunView {
     let run_id = row.run_id;
+    let (title, role) = queued_facts(state, run_id);
     #[allow(clippy::let_and_return)]
     let view = RunView {
         run_id: run_id.to_string(),
@@ -1275,8 +1675,57 @@ fn run_view(state: &Arc<AppState>, row: RunRow) -> RunView {
             .runs()
             .get(&run_id)
             .map(|h| liveness_str(h.liveness.liveness()).to_string()),
+        title,
+        role,
     };
     view
+}
+
+#[cfg(test)]
+mod title_tests {
+    use super::title_of;
+
+    #[test]
+    fn a_short_goal_is_its_own_title() {
+        assert_eq!(
+            title_of("Reply with exactly: pi online.").as_deref(),
+            Some("Reply with exactly: pi online.")
+        );
+    }
+
+    /// A manager prompt is a paragraph. The first line is what the operator
+    /// actually asked for; the rest is how.
+    #[test]
+    fn a_multi_line_goal_is_named_by_its_first_real_line() {
+        assert_eq!(
+            title_of("
+
+  Add a quota widget  
+and make it live.
+").as_deref(),
+            Some("Add a quota widget")
+        );
+    }
+
+    #[test]
+    fn a_long_line_is_clipped_on_a_word_rather_than_mid_word() {
+        let title = title_of(
+            "Investigate why the manager reported a delegation that never happened and fix it",
+        )
+        .unwrap();
+        assert!(title.ends_with("..."), "{title}");
+        assert!(title.chars().count() <= 67, "{title}");
+        assert!(!title.contains("happene."), "clipped mid-word: {title}");
+    }
+
+    /// An empty goal has no title rather than an empty one: `10 runner
+    /// inventory`'s rule, that an absent answer stays absent.
+    #[test]
+    fn a_goal_with_nothing_in_it_has_no_title() {
+        assert_eq!(title_of("   
+  
+"), None);
+    }
 }
 
 fn liveness_str(liveness: farseer_core::Liveness) -> &'static str {
@@ -1726,6 +2175,41 @@ grants_shell = true
         assert_eq!(h.send(request).await.0, StatusCode::UNAUTHORIZED);
     }
 
+    // Multi-threaded because the worker handler steps out of the async pool
+    // with `block_in_place` - a delegation blocks for a real worker lifetime.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_manager_bearer_reaches_the_delegation_face_it_was_issued_for() {
+        // The other half of `a_manager_bearer_cannot_call_operator_routes`.
+        // `31 manager delegation reach` added a second manager-scoped face for
+        // the runners with no MCP client, so the guard now has a prefix set
+        // rather than one path - and a set is the kind of thing that quietly
+        // grows. This pins that the new prefix is open to a manager and the
+        // operator's routes are not, in the same breath.
+        let h = harness();
+        let (manager_run_id, _, manager_token) = register_manager(&h);
+        let request = Request::builder()
+            .method("POST")
+            .uri("/v1/manager/delegate/worker")
+            .header(header::HOST, "127.0.0.1:9000")
+            .header(header::AUTHORIZATION, format!("Bearer {manager_token}"))
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(
+                json!({
+                    "manager_run_id": manager_run_id.to_string(),
+                    "manager_token": manager_token,
+                    "worker": "not-in-the-roster",
+                    "goal": "anything",
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        // A refusal by the roster, not by the guard: the call was authorized
+        // and then answered on its merits, which is the whole distinction.
+        let (status, body) = h.send(request).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        assert!(body.to_string().contains("pinned roster"), "{body}");
+    }
+
     #[tokio::test]
     async fn a_rebound_host_is_refused_before_the_token_is_even_checked() {
         // The CVE-2025-9074 shape: the browser would attach the token for the
@@ -2088,9 +2572,10 @@ grants_shell = true
                 std::path::Path::new(r"C:\Windows\System32\cmd.exe"),
                 &["/c".into(), "ping -n 30 127.0.0.1 >nul".into()],
                 &std::env::current_dir().unwrap(),
+                &[],
                 LivenessThresholds::default(),
                 farseer_runner::claude_code::parse_line,
-                None,
+                farseer_manager::Channel::OneShot,
             )
             .unwrap()
         };
@@ -3384,6 +3869,8 @@ account = "anthropic-max"
             availability,
             rate_limit_type: "five_hour".into(),
             is_using_overage: false,
+            used_percent: None,
+            window_duration_mins: None,
         };
         let observe = |observation: &WindowObservation, ts| {
             h.state
@@ -3512,5 +3999,132 @@ account = "anthropic-max"
 
         let (_, capped) = h.get("/v1/runs?limit=1").await;
         assert_eq!(capped.as_array().unwrap().len(), 1);
+    }
+
+
+    fn cell_with(runner: &str) -> CellDefinition {
+        farseer_core::CellDefinition::load(&format!(
+            r#"
+cell_id = "zero"
+name = "Zero"
+description = "d"
+version = "1"
+workspace_strategy = "worktree"
+
+[manager]
+runner = "{runner}"
+
+[[roster]]
+kind = "worker"
+name = "coder"
+runner = "{runner}"
+"#
+        ))
+        .expect("a valid cell")
+        .0
+    }
+
+    fn prompt_for(runner: &str) -> String {
+        let h = harness();
+        let spec = WorkerContractSpec {
+            run_id: RunId::new(),
+            task_id: farseer_core::TaskId::new(),
+            cell_id: CellId::new("zero"),
+            goal: "g".into(),
+            workspace: farseer_core::WorkspaceStrategy::Worktree,
+            runner: runner.into(),
+            tool_grants: vec![],
+            autonomy_ceiling: farseer_core::Irreversibility::Reversible,
+            budget: farseer_core::Budget::default(),
+            definition_of_done: String::new(),
+        };
+        let contract = WorkerContract::seal(spec);
+        let options = manager_run_options(
+            &h.state,
+            &contract,
+            &cell_with(runner),
+            &RuntimeToken::generate(),
+        )
+        .expect("options build");
+        options.append_system_prompt.expect("every manager is told who it is")
+    }
+
+    /// `31 manager delegation reach`: this used to return early for every
+    /// runner but Claude Code, so a pi manager never learned it had a roster.
+    #[test]
+    fn a_manager_on_any_runner_is_told_which_cell_it_manages() {
+        for runner in ["pi", "omp", "codex-app-server", "goose-acp"] {
+            let prompt = prompt_for(runner);
+            assert!(prompt.contains("cell `zero`"), "{runner}: {prompt}");
+            assert!(prompt.contains("coder"), "{runner}: {prompt}");
+        }
+    }
+
+    /// `31 manager delegation reach`'s fix, in the two things it has to get
+    /// right: the manager is pointed at a real tool, and it is **not** told the
+    /// token. A credential in a prompt is one the model can quote, spend or
+    /// leak into the record; the extension holds its own, so this prompt does
+    /// not carry one at all.
+    #[test]
+    fn a_pi_manager_is_pointed_at_the_tool_and_never_told_the_token() {
+        let h = harness();
+        h.state.set_mcp_endpoint(8787);
+        // The extension is checked on disk rather than assumed, so the test
+        // has to put it there - which is the point: a missing file downgrades
+        // the run to an honest no-reach instead of promising a tool that will
+        // not load.
+        let extension = h.state.repo_root().join("extensions").join("pi");
+        std::fs::create_dir_all(&extension).unwrap();
+        std::fs::write(extension.join("farseer-delegate.ts"), "export default () => {};").unwrap();
+        let cell = cell_with("pi");
+        let contract = WorkerContract::seal(WorkerContractSpec {
+            run_id: RunId::new(),
+            task_id: farseer_core::TaskId::new(),
+            cell_id: CellId::new("zero"),
+            goal: "g".into(),
+            workspace: farseer_core::WorkspaceStrategy::Worktree,
+            runner: "pi".into(),
+            tool_grants: vec![],
+            autonomy_ceiling: farseer_core::Irreversibility::Reversible,
+            budget: farseer_core::Budget::default(),
+            definition_of_done: String::new(),
+        });
+        let token = RuntimeToken::generate();
+        let options =
+            manager_run_options(&h.state, &contract, &cell, &token).expect("options build");
+
+        let prompt = options.append_system_prompt.expect("a manager is told who it is");
+        assert!(prompt.contains("delegate_to_worker"), "{prompt}");
+        assert!(!prompt.contains("CANNOT reach"), "{prompt}");
+        assert!(!prompt.contains(token.as_str()), "{prompt}");
+
+        // The reach itself: farseer's own extension on the argv, and the
+        // credentials in the environment, which is the one place neither a
+        // process listing nor the model can read them.
+        assert_eq!(options.extensions.len(), 1, "{:?}", options.extensions);
+        let env: std::collections::HashMap<_, _> = options.runner_env.into_iter().collect();
+        assert_eq!(
+            env.get("FARSEER_MANAGER_TOKEN").map(String::as_str),
+            Some(token.as_str())
+        );
+        assert_eq!(
+            env.get("FARSEER_ENDPOINT").map(String::as_str),
+            Some("http://127.0.0.1:8787")
+        );
+    }
+
+    /// The sentence that exists because a manager fabricated a delegation.
+    /// A roster it cannot reach must be named **and** disclaimed, or the model
+    /// does the nearest available thing and calls it compliance.
+    #[test]
+    fn a_manager_that_cannot_delegate_is_told_so_and_told_not_to_claim_it_did() {
+        // `goose-acp` rather than `pi`, which this test used to name: pi can
+        // delegate now, and a test whose premise has quietly expired asserts
+        // nothing. ACP is the last runner with no channel for the verbs.
+        let prompt = prompt_for("goose-acp");
+        assert!(prompt.contains("CANNOT reach"), "{prompt}");
+        assert!(prompt.contains("Never state or imply that you delegated"), "{prompt}");
+        // And it is not handed credentials for a face it cannot call.
+        assert!(!prompt.contains("manager_token"), "{prompt}");
     }
 }

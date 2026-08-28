@@ -45,6 +45,17 @@ pub enum RunnerSignal {
         payload: Value,
     },
     RateLimit(RateLimitInfo),
+    /// Every window the runner reported at once, already in the record's own
+    /// shape bar the two fields only the caller knows.
+    ///
+    /// `RateLimit` above carries **one** window in Claude Code's own field
+    /// names. `30 codex app server` found a runner reporting **two** - a
+    /// five-hour and a weekly, each with the provider's own percentage - so a
+    /// second signal exists rather than a second meaning being loaded onto the
+    /// first. `account` and `runner` are left empty here: the adapter does not
+    /// know which login it is on, and `27 quota accounting` says that is
+    /// declared by the operator rather than inferred.
+    Windows(Vec<farseer_core::WindowObservation>),
     /// What the runner says about the session it just opened.
     ///
     /// Every field is optional because **every field is a claim the runner
@@ -53,8 +64,29 @@ pub enum RunnerSignal {
     /// everywhere - observed, never advertised - so a runner that says nothing
     /// produces nothing rather than a default that looks like an answer.
     Session(SessionInfo),
+    /// Context-window usage, and the cumulative cost beside it.
+    ///
+    /// Only an ACP runner produces this: `29 harness protocol` found that
+    /// neither Claude Code nor Codex reports a window **size** at all, so
+    /// "how full is the context" was unanswerable until farseer spoke a
+    /// protocol whose authors had already decided it was the number that
+    /// matters. See [`crate::acp::UsageInfo`].
+    Usage(crate::acp::UsageInfo),
     /// User-visible terminal text which a supervising manager can relay.
+    ///
+    /// One per **turn**. A native runner emits its whole answer at once, which
+    /// is why this was the only text signal for a long time.
     Output(String),
+    /// A fragment of an answer still being written.
+    ///
+    /// `05 run state model` is explicit that **token streams are activity, not
+    /// progress**, and an ACP agent streams its answer a few characters at a
+    /// time - `goose acp` sent "Hello" and "!" as two notifications. Recording
+    /// each as an answer would put two events in the record where a person said
+    /// one thing, and `28 operator surface`'s thread would render the manager
+    /// stuttering. The caller accumulates these and emits one [`Self::Output`]
+    /// when the turn ends.
+    OutputChunk(String),
     Finished(FinishedSignal),
 }
 
@@ -66,11 +98,54 @@ pub struct SessionInfo {
     /// The runner's own id for the conversation, so an operator can find it in
     /// the runner's own tooling rather than only in farseer's record.
     pub session_id: Option<String>,
+    /// The account or backend the runner says it is using.
+    ///
+    /// `28 operator surface` wanted this and could only reach `runners.toml`,
+    /// which records what the **operator declared**. Only an ACP agent answers
+    /// it today, and only when it uses ACP's un-standardised `provider` key.
+    pub provider: Option<String>,
+    /// What the runner is **configured** to do, as opposed to what it did.
+    ///
+    /// A hint, and labelled one everywhere it surfaces. See [`Configured`].
+    pub configured: Option<Configured>,
+}
+
+/// The runner's own defaults, read from its own configuration.
+///
+/// This is deliberately **not** merged into the observed fields beside it.
+/// `10 runner inventory`'s rule is that farseer reports what it observed, and a
+/// configured default is a different claim: it says what the runner *will*
+/// reach for, not what this turn used. The two agree only while farseer sends
+/// no override - which it does not, and which is the point below.
+///
+/// Farseer reads these and **never sets them**. `codex app-server` takes a
+/// per-turn `model` and `effort`, and the operator's `config.toml` on this
+/// machine says `xhigh`; a farseer that passed its own value would quietly
+/// downgrade every run the operator had deliberately configured up. So the
+/// default is surfaced as a hint and left alone.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Configured {
+    pub model: Option<String>,
+    /// `low`, `medium`, `high`, `xhigh` on this machine - the runner states
+    /// which it supports, so farseer never has to know the list.
+    pub effort: Option<String>,
+    /// Which file said so. The app-server reports the origin of every setting,
+    /// which turns "why is this run slow" into a path rather than a guess.
+    pub from: Option<String>,
+}
+
+impl Configured {
+    pub fn is_empty(&self) -> bool {
+        self.model.is_none() && self.effort.is_none()
+    }
 }
 
 impl SessionInfo {
     pub fn is_empty(&self) -> bool {
-        self.model.is_none() && self.session_id.is_none()
+        self.model.is_none()
+            && self.session_id.is_none()
+            && self.provider.is_none()
+            && self.configured.is_none()
     }
 }
 
@@ -167,6 +242,10 @@ pub fn parse_line(line: &str) -> Result<Vec<RunnerSignal>, ParseError> {
             let info = SessionInfo {
                 model: text_field(&v, "model"),
                 session_id: text_field(&v, "session_id"),
+                // Claude Code names an account on `/status`, which does not
+                // fire headless. Absent rather than assumed.
+                provider: None,
+                configured: None,
             };
             (!info.is_empty()).then_some(RunnerSignal::Session(info))
         }
@@ -436,6 +515,9 @@ mod tests {
             [RunnerSignal::Session(SessionInfo {
                 model: Some("claude-opus-5".into()),
                 session_id: Some("abc".into()),
+                // Claude Code names no account headless.
+                provider: None,
+                configured: None,
             })]
         );
     }

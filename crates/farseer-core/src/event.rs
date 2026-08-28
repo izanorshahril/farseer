@@ -112,6 +112,31 @@ impl EventKind {
     /// what it observed rather than what was configured.
     pub const SESSION_STARTED: &'static str = "session_started";
 
+    /// A context-window reading, per `29 harness protocol`.
+    ///
+    /// `used` out of `size`, plus a cumulative cost when the runner gives one.
+    /// Only an ACP runner reports a **size** at all, which is the whole reason
+    /// `29` admitted one: "how full is the context" was unanswerable while
+    /// farseer only spoke dialects whose authors never sent the denominator.
+    /// Cumulative, so the latest event is the answer and summing them is wrong.
+    pub const USAGE_UPDATED: &'static str = "usage_updated";
+
+    /// An ACP agent asked for permission farseer cannot give, per `29 harness protocol`.
+    ///
+    /// Recorded rather than dropped. Farseer runs unattended, so an unanswered
+    /// `session/request_permission` is a live process producing nothing - the
+    /// same hang `28 operator surface` paid for once when a granted tool was
+    /// missing from `--allowedTools`. If this kind appears in a record, the
+    /// session was opened in a mode that asks, and that is the bug.
+    pub const PERMISSION_REQUESTED: &'static str = "permission_requested";
+
+    /// An ACP session changed operating mode, per `29 harness protocol`.
+    ///
+    /// ACP's modes are `12 autonomy and deny list`'s ceiling one level down, and
+    /// an agent may switch its own. A ceiling that moved without farseer asking
+    /// belongs in the record.
+    pub const MODE_CHANGED: &'static str = "mode_changed";
+
     /// A subscription window changed state, per `27 quota accounting`.
     ///
     /// Appended **on change only** and with `actor: system`: `10 runner inventory`
@@ -139,6 +164,9 @@ impl EventKind {
                 | Self::TOOL_RESULT
                 | Self::STATUS_CHANGED
                 | Self::CONTEXT_COMPACTED
+                | Self::USAGE_UPDATED
+                | Self::PERMISSION_REQUESTED
+                | Self::MODE_CHANGED
         )
     }
 }

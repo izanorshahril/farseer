@@ -1127,6 +1127,7 @@ dependencies = [
  "anyhow",
  "axum",
  "farseer-api",
+ "farseer-manager",
  "farseer-runner",
  "reqwest 0.12.28",
  "serde",

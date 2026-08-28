@@ -28,12 +28,33 @@ import { follow, type RecordEvent } from "../stream";
 type Meta = {
   runner?: string;
   model?: string;
+  /** The account the runner says it is using, which is not what was configured. */
+  provider?: string;
+  /** A **hint**: what the runner is configured to reach for, not what this turn used. */
+  effort?: string;
+  effortFrom?: string;
   session_id?: string;
   cell?: string;
   cost?: number;
   tokens?: number;
   outcome?: string;
+  /** Context tokens in use, and the window they are used out of. */
+  used?: number;
+  size?: number;
 };
+
+/**
+ * `used / size`, with the percentage that makes it actionable.
+ *
+ * Absent unless the runner said both. A `used` with no `size` is a token count
+ * without a denominator, which is what every non-ACP runner reports and is not
+ * a context reading.
+ */
+function context(meta: Meta): string | undefined {
+  if (meta.used === undefined || !meta.size) return undefined;
+  const pct = Math.round((meta.used / meta.size) * 100);
+  return `${meta.used.toLocaleString()} / ${meta.size.toLocaleString()} (${pct}%)`;
+}
 
 type Turn = {
   seq: number;
@@ -122,8 +143,35 @@ export function ConversationWidget({ bridge }: { bridge: Bridge }) {
           ...current,
           runner: str("runner") ?? current.runner,
           model: str("model"),
+          provider: str("provider"),
+          effort: str("configured_effort"),
+          effortFrom: str("configured_from"),
           session_id: str("session_id"),
           cell: event.cell_id,
+          // Cleared, not carried. A new session has spent nothing yet, and a
+          // runner that reports no context window must not inherit the last
+          // one's - `pi` reporting neither was showing a `codex-app-server`
+          // context reading under a pi session id, which is precisely the
+          // absent-because-unreportable / absent-because-nothing-happened
+          // confusion `10 runner inventory`'s rule exists to prevent.
+          used: undefined,
+          size: undefined,
+          tokens: undefined,
+          cost: undefined,
+          outcome: undefined,
+        }));
+        return;
+      }
+      // Cumulative, so the latest reading is the answer. Only an ACP runner
+      // sends a `size`; the rest never say how big the window is, so the field
+      // stays absent rather than showing a fraction with a made-up denominator.
+      if (event.kind === "usage_updated") {
+        setMeta((current) => ({
+          ...current,
+          cell: event.cell_id,
+          used: num("used") ?? current.used,
+          size: num("size") ?? current.size,
+          cost: num("cost_usd_micros") ?? current.cost,
         }));
         return;
       }
@@ -164,18 +212,41 @@ export function ConversationWidget({ bridge }: { bridge: Bridge }) {
     };
   }, [bridge]);
 
+  // 75-90% is worth noticing and above 95% the next prompt may not fit, which
+  // is the convention ACP's clients already settled on - farseer does not need
+  // a second one.
+  const pressure =
+    meta.used !== undefined && meta.size
+      ? meta.used / meta.size >= 0.95
+        ? "bad"
+        : meta.used / meta.size >= 0.75
+          ? "warn"
+          : ""
+      : "";
+
   const strip = (
     <div className="meta">
       {[
         ["cell", meta.cell],
         ["runner", meta.runner],
         ["model", meta.model],
+        ["provider", meta.provider],
+        // Labelled `configured` rather than `thinking`: the runner states what
+        // it will reach for, and farseer never sets it, so calling it the level
+        // this turn used would be a claim nobody made.
+        ["configured effort", meta.effort],
         ["session", meta.session_id?.slice(0, 8)],
+        ["context", context(meta)],
         ["tokens", meta.tokens?.toLocaleString()],
         ["cost", typeof meta.cost === "number" ? usd(meta.cost) : undefined],
         ["last run", meta.outcome],
       ].map(([label, value]) => (
-        <span key={label} className={value ? "" : "absent"}>
+        <span
+          key={label}
+          className={[value ? "" : "absent", label === "context" ? pressure : ""]
+            .filter(Boolean)
+            .join(" ")}
+        >
           <i>{label}</i>
           <b className="mono">{value ?? "not reported"}</b>
         </span>

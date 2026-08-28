@@ -159,3 +159,228 @@ Read 2026-08-26.
 - Crush omits the model from headless JSON: `github.com/charmbracelet/crush/issues/2412`
 - pi's RPC mode and ACP status: `github.com/earendil-works/pi/discussions/4444`
 - `acpx`: `acpx.sh`
+
+
+## Implementation note, 2026-08-26: the parser, and what a real transcript changed
+
+`goose acp` and `opencode acp` are **both already installed on this machine**, which settles section 1 empirically rather than from documentation.
+A probe drove `goose acp` 1.47.0 through `initialize`, `session/new` and `session/prompt` and captured eleven lines. Every mapping in `acp.rs` is backed by one of them.
+
+### The denominator exists
+
+```json
+{"sessionUpdate":"usage_update","used":4560,"size":1050000,"cost":{"amount":0.000918,"currency":"USD"}}
+```
+
+`size` is the field this map has never had a source for.
+`28 operator surface` asked for "context info" and got a token count with no denominator, because neither Claude Code nor Codex sends one.
+The first ACP agent farseer ever spoke to sent it **before the first turn**, unprompted, and again after.
+
+It lands in the record as `usage_updated` rather than on `RunReport`, which is a correction to how I first wired it: a reading that only survives to the end of the run cannot show a window filling up *while* it fills, and `28`'s meta strip reads the event stream.
+
+### And the breakdown was not rejected after all
+
+Section 3 said ACP "chose `used`/`size` **instead of** the per-turn breakdown". That is too strong, and the capture shows why:
+
+```json
+{"id":3,"result":{"stopReason":"end_turn","usage":{"totalTokens":4560,"inputTokens":4554,"outputTokens":6}}}
+```
+
+Both exist, at **different scopes**: `used`/`size` is streamed and cumulative, the split rides the terminal response and is per turn.
+So the real rule is not "one instead of the other" but **do not report cost from both**, since one denominator is a session and the other is a turn. `acp.rs` reads cost only from `usage_update`, with a test naming the reason.
+
+### Three more things the capture said
+
+- **The provider is advertised.** `session/new` returned `configOptions` including `{"id":"provider","currentValue":"chatgpt_codex"}` - the field `28` wanted and could only get from `runners.toml`. Not parsed yet.
+- **Goose reports cost over ACP**, cumulative and in USD. `10 runner inventory` scored cost per *runner*; it is per **face**.
+- **Declining `fs` and `terminal` was accepted without complaint**, and the turn ran. Section 4's requirement is not theoretical.
+
+### The hazard this build takes seriously
+
+ACP expects the client to answer `session/request_permission`, and farseer has nobody watching.
+An unanswered request is a live process producing nothing - the identical failure `28` already paid for when a granted tool was missing from `--allowedTools`.
+So `parse_line` **surfaces it as `permission_requested`** rather than dropping it, and `set_mode_frame` exists so a driver can open a session in a mode that does not ask.
+`goose acp` happens to default to `auto`. That is luck, and the driver must not rely on it.
+
+### Not built
+
+**The driver.** Every native runner here is one-shot - spawn, read lines, exit - and ACP is a conversation: initialize, wait, open a session, wait, prompt.
+`drive()` reads stdout and never writes, so ACP needs a stateful counterpart that owns request ids and the session id.
+`acp.rs` ships the frames and the parse it will need, proven against a real agent; nothing yet sends them in anger.
+
+Also unbuilt: `configOptions` parsing, and a `size` for the native runners, which have no source for one and should keep showing nothing.
+
+
+## Implementation note, 2026-08-26: the driver, and the bug it walked straight into
+
+`AcpSession` ([`acp_drive.rs`]) holds the conversation: spawn on a live stdin, `initialize`, `session/new`, `session/set_mode`, `session/prompt`.
+It takes **the same sink `drive` takes**, so a line arriving while farseer waits on a response it asked for is still activity - `goose acp` sends a `usage_update` before the first prompt, and it reaches the record through that path rather than being eaten by the handshake.
+
+### `drive()` cannot drive an ACP agent, and the first live run proved it by hanging
+
+`drive` drains stdout **until end of stream**, which is right for every runner farseer had: spawn, read, exit.
+An ACP agent **does not exit when a turn ends** - the session stays open for the next prompt, which is the entire point of a session.
+So waiting for EOF is waiting forever, and the first live test sat there until it was killed.
+
+This is the same family as the stdin bug on `28 operator surface`: **machinery that is correct for a one-shot runner and silently wrong for a conversational one**, presenting as a live process producing nothing.
+Farseer has now hit that shape twice from opposite directions - once writing, once reading - which is worth naming as a class rather than fixing twice.
+`drive_turn` returns at the terminal signal and leaves the session usable.
+
+### Proven live, against `goose acp`
+
+`cargo test -p farseer-runner acp_drive -- --ignored`, 2.2 seconds:
+
+- the handshake completed with `fs` and `terminal` **declined**,
+- the agent offered `auto`, `approve`, `smart_approve`, `chat`, and farseer asked for `auto` explicitly rather than trusting the default,
+- the turn answered as text,
+- and a `usage_update` named a window `size` greater than zero, which is the assertion the whole runner exists to satisfy.
+
+The test is `#[ignore]`d for the reason every live test here is: it spends a real subscription.
+Claude Code was not involved, per the operator's standing request.
+
+### Still not built
+
+Nothing **calls** `AcpSession` yet. `StartedWorker::spawn` chooses a native adapter by runner name and knows nothing about ACP, so wiring it is the next step and it needs a decision the map does not have: an ACP runner in `runners.toml` names an executable **and a subcommand** (`goose acp`, `opencode acp`), which is a shape `10 runner inventory`'s inventory has not carried before.
+
+
+## Implementation note, 2026-08-26: wired, and one field that was answering three questions
+
+`goose-acp` and `opencode-acp` are runners now. A live run through `run_worker` - the same path an HTTP request takes - finished in 2.65 seconds with `usage_updated` and `manager_answered` in the record and outcome `ok`.
+
+### The decision this ticket said the map did not have
+
+**An ACP runner name means an executable *and* a subcommand.** `10 runner inventory` only ever carried bare executables.
+
+`goose` and `goose-acp` are **the same binary offering two faces**, and they are two runners rather than one because *they report different things*: the ACP face names a context window and the native face does not.
+That is `10`'s own rule - observed, never advertised - applied one level finer than it was written. `ACP_RUNNERS` is a three-column table for that reason, and an entry in it is a claim farseer has **seen this agent's output**, not that ACP agents work in general.
+
+### `Option<fn(&str) -> String>` was answering three questions and could express two
+
+`StartedWorker`'s steer field had accumulated three jobs: whether a stdin exists, how the goal is delivered, and what ends the read loop.
+The first two it answered by accident and correctly. The third it answered by **omission**, and `29` is the second bug in that omission:
+
+- `28 operator surface`: a one-shot runner given a live stdin never starts.
+- `29 harness protocol`: a conversational runner read to end of stream never finishes.
+
+Both present identically - a live process producing nothing.
+`Channel::{OneShot, Steered, Acp}` now names all three answers in one place, which is why this is a rename of an existing concept rather than a new flag beside it.
+
+### What an ACP worker deliberately cannot do yet
+
+**Steer.** An ACP steer is another `session/prompt`, which needs the session id and a fresh request id, and neither fits a `fn(&str) -> String`.
+`20 worker control channel` made steering the exception rather than the rule, so `steer_handle()` returns `None` for `Channel::Acp` and the live test asserts it - a refusal farseer can see beats a handle that writes into nothing.
+A **manager** on ACP needs this, so it is the gate on that work rather than a loose end.
+
+Also: the mode is hardcoded to `auto`, which is `goose`'s id for "do not ask".
+ACP does not standardise mode names, so an agent using another word for the same thing opens in its own default.
+Guessing at a synonym would be inventing a grant `12 autonomy and deny list` did not give, so `ACP_UNATTENDED_MODE` is one constant with the reasoning attached rather than a table of guesses.
+
+Signals arriving **during** the handshake are dropped rather than recorded, because `bootstrap` has no store. In practice that is one `usage_update` the agent sends again after the turn.
+
+
+## Implementation note, 2026-08-26: the ACP manager, and a weak test hiding a real bug
+
+A manager on `goose-acp` now answers, is steered, and answers again on the same session:
+
+```
+turns: ["Hello!", "Goodbye!"]
+```
+
+Two turns, one session, through the same `run_worker` an HTTP request reaches.
+
+### A steer is not a function of its text
+
+`SteerHandle` held a `fn(&str) -> String`, which is enough for Claude Code and **cannot express an ACP steer at all**: a steer there is another `session/prompt`, addressed to the session the handshake opened and carrying a request id nobody else has used.
+`SteerWire::{Native, Acp}` names both, and the ACP arm shares the id counter with the process's own bootstrap so a steer arriving the instant the handle becomes reachable cannot collide with the goal.
+
+`Channel::Acp` also had to grow a role. What ends the read loop is not a property of the protocol but of **what the session is for**: a worker has one goal so the loop ends at the terminal signal, and a manager is a conversation so it stays open exactly as a live Claude Code manager's does.
+
+### The bug the first passing test was hiding
+
+The steer test asserted `answers >= 2` and passed in 2.08 seconds - before the steer could plausibly have mattered.
+It was passing on **one** turn, because farseer was appending a `manager_answered` event **per fragment**: `goose acp` streams an answer a few characters at a time, and the capture from earlier in this ticket shows the sentence "Hello!" arriving as `"Hello"` then `"!"`.
+
+`05 run state model` had already ruled on this - **token streams are activity, not progress** - and the ACP adapter was violating it while the record filled with a manager stuttering one word at a time.
+
+`RunnerSignal::OutputChunk` is the fix: a fragment is activity and accumulates, and one `Output` is emitted when the turn ends. `Output` still means what it always meant, one per turn, which is why no native adapter changed.
+
+The test now asserts **exactly two** answers and that they differ, which is what makes it a test of steering rather than of streaming.
+
+Worth naming: the assertion was weak in the direction that made a green test agree with a broken implementation. `>=` on a count of events is that shape by construction.
+
+
+## Implementation note, 2026-08-26: the menu, and one source of truth for it
+
+Settings offers `goose-acp` and `opencode-acp` now, so the top manager can be an ACP harness from the window.
+
+The list is **read from `farseer_manager::ACP_RUNNERS` rather than repeated in the shell**. A settings menu that drifts from what `start_worker` accepts is worse than a missing entry, because it fails *after* the operator has committed a definition - the failure arrives at spawn, in the record, rather than at the click. A test asserts the two lists agree in both directions.
+
+Two things this reuses rather than rediscovers:
+
+- **Presence is resolved against the executable, not the runner name.** `goose-acp` is driven by a binary called `goose`. The `KNOWN` table already existed for exactly this reason (`claude-code` is driven by `claude`), and a test now pins that `goose-acp` and `goose` report identical presence.
+- **One note for every ACP runner**, because the protocol is what they have in common: names its context window, steers as a manager, reports no quota. That trade does not vary by agent, so saying it once is honest rather than lazy.
+
+Not done: the desktop window was not launched to look at it. The list is data-driven - the widget maps whatever the endpoint returns - and both ends are unit-tested, so there was nothing a screenshot would have decided.
+
+
+## Implementation note, 2026-08-26: the provider, observed rather than declared
+
+An ACP run now records what the agent says about itself. Live, from `goose-acp`:
+
+```json
+{"model":null,"provider":"chatgpt_codex","runner":"goose-acp","session_id":"20260825_17"}
+```
+
+`28 operator surface` wanted a provider on the conversation and could only reach `runners.toml`, which records **what the operator declared**. This is the agent's own answer, and the two are not the same question.
+
+### It arrives through the handshake, not the stream
+
+Claude Code and Codex announce their session mid-stream, on a line the read loop sees. An ACP agent answers it in the **response to `session/new`**, during `bootstrap`, before any store is in reach.
+
+Rather than give `bootstrap` a sink and a second way of recording the same fact, what the handshake learned is **replayed into the read loop** as though the agent had said it mid-stream. One path into the record, and `session_started` means the same thing whichever runner produced it.
+
+### What `chatgpt_codex` says, and what it does not
+
+That value is goose delegating through the already-authenticated `codex` CLI, which AGENTS.md recorded from the 2026-08-24 goose probe. So a `goose-acp` run and a `codex` run are **spending the same subscription**.
+
+`27 quota accounting` made the account **declared by the operator, never inferred**, because nothing in `10 runner inventory` made sharing detectable. This does not overturn that - an inference and an observation are different things, and `27`'s rule was about the former. But it is the first time farseer has seen an agent volunteer the fact, and it is a candidate for seeding a `runners.toml` entry the operator then confirms. Recorded here rather than acted on.
+
+### Kept whole, read narrowly
+
+`SessionOpened.config` keeps the agent's whole `configOptions` as `id -> currentValue`, and `provider()` reads the one key farseer displays. ACP does not standardise those ids, so an agent that names its account something else reports nothing rather than farseer guessing at a synonym - and the map is still there to see what it *did* offer.
+
+`SessionInfo` growing a third field pushed `ManagerError::Cancelled` past clippy's size threshold, so `session` is boxed exactly as `window` already was, for the reason `window`'s own doc comment gives.
+
+
+## Implementation note, 2026-08-26: the second agent, which found the first one's assumptions
+
+`ACP_RUNNERS` claims an entry means farseer has **seen that agent's output**. `opencode-acp` was in the table having never been run, so the claim was false for half of it.
+
+Running it found three differences, and **one of them would have failed every `opencode-acp` run**.
+
+### It advertises no modes at all
+
+`opencode acp` 1.18.22 returns a `session/new` result with **no `modes` key**. The handshake was sending `session/set_mode` unconditionally, which is a JSON-RPC error against an agent that has no modes - and it arrives **before the goal is ever sent**, so the run dies in `bootstrap` having done nothing.
+
+A `goose`-shaped assumption, generalised into "the protocol". The handshake now asks only when the agent said it would accept that id, and an agent with no modes runs in whatever it opened in.
+
+That is a real gap rather than a fix: `29` already recorded that ACP does not standardise mode names, and this is the same hole seen from the other side - farseer cannot request "do not ask" from an agent that never named it, and must not guess at a synonym.
+
+### It names a model where goose names a provider
+
+```json
+{"model":"opencode/big-pickle","provider":null,"runner":"opencode-acp","session_id":"ses_fc4e..."}
+{"model":null,"provider":"chatgpt_codex","runner":"goose-acp","session_id":"20260825_17"}
+```
+
+Both out of the same untouched `configOptions`. Neither is a gap in the other - two agents answering the questions they can - and this is what `SessionOpened.config` being kept whole was for.
+
+It also fills `RunRow.model` from an ACP runner, which no native runner but Claude Code manages.
+
+### It streams its thinking separately
+
+`agent_thought_chunk`, distinct from `agent_message_chunk`. Unmapped, and correctly so: `05 run state model` says token streams are activity. Worth noting that it is the nearest observable to the **thinking level** `28 operator surface` asked for - the presence and volume of reasoning, rather than a setting farseer chose.
+
+### And the trade this ticket named holds
+
+`opencode acp` reports `used: 12352, size: 200000` and `cost: {"amount": 0}` - a context window and a subscription cost of nothing, with **no subscription window** anywhere. Same shape as goose. `27 quota accounting` stays blind on ACP, exactly as section 3 predicted.

@@ -42,7 +42,8 @@ graph TD
   M0 -.->|ACP| RUN[foreign agent as runner]
   M0 -.->|A2A, off by default| PEER[foreign orchestrator as peer cell]
   M0 -.->|third-party MCP, not built| TOOL[tools]
-  M0 -.->|MCP delegate/read/write| MCPFACE[farseer's own MCP face]
+  M0 -.->|MCP delegate/read/write| MCPFACE[farseer's own manager face]
+  M0 -.->|extension, plain JSON| MCPFACE
   MCPFACE --> W0
   MCPFACE --> REC
 
@@ -66,7 +67,7 @@ The operator attaches to any run at any depth, bypassing every manager, because 
 | --- | --- | --- |
 | Foreign agent driven by a farseer manager | **ACP** (Zed) | a **runner** |
 | Foreign orchestrator making its own decisions | **A2A** (Linux Foundation) | a **peer cell**, off by default |
-| Tools | **MCP** | farseer's own `/v1/mcp` face provides memory and roster-worker delegation, never raw event append; calling third-party MCP tool servers is not built |
+| Tools | **MCP** | farseer's own `/v1/mcp` face provides memory and roster-worker delegation, never raw event append; `/v1/manager/delegate/*` offers the same verbs as plain JSON to a runner with no MCP client; calling third-party MCP tool servers is not built |
 
 An external protocol is spoken at a boundary, never shaped into internals.
 
@@ -87,6 +88,9 @@ An external protocol is spoken at a boundary, never shaped into internals.
 │  └─ src/widgets/     runs, activity, quota, fleet - plus whatever cell zero writes
 ├─ widgets/            agent-authored widgets, in git, compiled and sandboxed by the canvas
 │  └─ AGENTS.md        the contract a manager reads before writing one
+├─ skills/             test skills a cell may declare; never discovered from the operator's home
+├─ extensions/         runner extensions farseer supplies
+│  └─ pi/              delegation tools for pi and omp, which have no MCP client
 ├─ cells/              cell definitions, hand-written, in git
 │  ├─ zero.toml        cell #0, the builder harness
 │  └─ social.toml      the second cell, thinner on purpose
@@ -121,7 +125,7 @@ Binds `127.0.0.1` only, opens the record, loads the definitions, and writes its 
 | --- | --- |
 | `GET /v1/cells`, `/v1/cells/{id}` | read definitions. There is deliberately **no edit path** - they are files in git |
 | `POST /v1/cells/reload` | re-read from disk, reporting broken files rather than dying on them |
-| `POST /v1/cells/{id}/instruct` | run the cell's manager against a goal; current native LLM runners require an explicit shell-capable roster grant; a Claude Code manager gets a generated strict MCP config outside the worktree and may delegate to named roster workers; returns `202` with a `run_id` after setup is accepted |
+| `POST /v1/cells/{id}/instruct` | run the cell's manager against a goal; current native LLM runners require an explicit shell-capable roster grant; a Claude Code manager gets a generated strict MCP config outside the worktree, and a pi or omp manager gets farseer's delegation extension and its credentials in the environment, so both may delegate to named roster workers; every other manager is told its roster and told it cannot reach it; returns `202` with a `run_id` after setup is accepted |
 | `GET /v1/events?cell=&run=&since=` | the cursor read. `since` is exclusive, so a client resumes with no gap and no duplicate |
 | `GET /v1/stream` | the same query as SSE, honouring `Last-Event-ID`. Attach and replay are one call with a different cursor |
 | `GET /v1/runs/{id}` | a run's row: lifecycle, outcome, cost, tokens, and `18`/`05`'s liveness - `live`/`stalled`/`likely_hung`, or `null` once nothing in memory can answer |
@@ -132,9 +136,10 @@ Binds `127.0.0.1` only, opens the record, loads the definitions, and writes its 
 | `GET`/`PUT /v1/ui-state/{key}` | an opaque blob farseer never parses, so a canvas survives a restart. `413` above 1 MiB |
 | `GET /v1/analytics/{cost,intervention,rework,lessons}` | the four questions from [11 analytics questions](.scratch/farseer/issues/11-analytics-questions.md) |
 | `/v1/mcp` | the streamable-HTTP MCP face nested into this router and guard; all three tools - `read_memory`, `write_memory`, and `delegate_to_worker` - derive identity from an active manager capability, and no raw event append exists because "an agent that can forge events can rewrite its own history" |
+| `POST /v1/manager/delegate/{worker,cell}` | the same two delegation verbs as plain JSON, for a manager whose runner has no MCP client. It calls the same functions the MCP tools call, so the roster, the worker cap and the budget are one implementation rather than two |
 
 Every request must arrive on a loopback `Host`.
-Operator routes require the process-wide bearer; `/v1/mcp` additionally accepts an active manager's per-run bearer, which is invalid everywhere else.
+Operator routes require the process-wide bearer; `/v1/mcp` and `/v1/manager/` additionally accept an active manager's per-run bearer, which is invalid everywhere else.
 A generated manager config contains only the per-run bearer and never discloses the operator token.
 A cross-site `Origin` is refused before the token is even looked at, because [16 local API surface](.scratch/farseer/issues/16-local-api-surface.md) found that a token alone does not stop DNS rebinding - the browser attaches it for the attacker.
 

@@ -406,3 +406,14 @@ Both now ship a mode that streams:
 
 So the fails column must record **the mode tested**, and re-open when a harness ships a new one.
 `29` also widened the inventory from five harnesses to sixteen, and found that no other host of these binaries parses per-harness dialects the way farseer does.
+
+
+## Corrected by 30 (2026-08-26)
+
+**"Codex emits nothing" was measured against the wrong face.**
+
+This ticket recorded that Claude Code alone reports a rolling window in band, and that Codex and cursor-agent reveal exhaustion only by failing. `codex app-server` - the same binary, a different face - pushes `account/rateLimits/updated` **after every turn, headless**, with `usedPercent`, `resetsAt` and `windowDurationMins` for a 5-hour and a weekly window, plus a plan type and a credit balance.
+
+The compaction column moves too. This inventory scored "does this harness **say when it compacted**" and found only Claude Code did; the app-server has a `thread/compacted` notification and a `thread/compact/start` method, so it both says when and takes instruction.
+
+This is the same correction `29 harness protocol` already made to the fails column, arriving from the other direction: **a column here describes an invocation, not a product.** Two entries now need that: `goose` / `goose-acp`, and `codex` / `codex app-server`.

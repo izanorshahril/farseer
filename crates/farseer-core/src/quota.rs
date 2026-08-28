@@ -9,11 +9,24 @@
 //! So this is not a third budget dimension. It is `26 routing policy`'s runner
 //! availability signal, recorded over time.
 //!
-//! **What is never here: a percentage.** `10 runner inventory` proved
-//! `used_percentage` reaches only a status line that does not fire headless, and
-//! farseer's own consumption is a **lower bound** on window usage - it would be
-//! most wrong exactly near exhaustion, which is when the operator would trust it
-//! most.
+//! **What is never here: a percentage farseer computed.** `27 quota accounting`
+//! refused one because farseer's own consumption is a **lower bound** on window
+//! usage - it would be most wrong exactly near exhaustion, which is when the
+//! operator would trust it most. That reasoning is untouched.
+//!
+//! `30 codex app server` then found that `codex app-server` **pushes the
+//! provider's own `usedPercent`**, headless, for two windows at once - which
+//! `10 runner inventory` had measured as impossible against `codex exec`, the
+//! other face of the same binary. A number the provider states is an
+//! observation, and `10`'s observed-never-advertised rule admits it for exactly
+//! the reason it admits `resetsAt`. So [`WindowObservation::used_percent`] is
+//! **reported when a runner states it and absent otherwise**, and nothing here
+//! ever calculates one.
+//!
+//! **A window is identified by its account *and* its limit.** One account can
+//! have several running at once - Codex reports a five-hour and a weekly - and
+//! keying only by account makes two windows look like one flapping between two
+//! states.
 
 use serde::{Deserialize, Serialize};
 
@@ -74,10 +87,25 @@ pub struct WindowObservation {
     pub availability: Availability,
     /// Which limit the provider named - `10 runner inventory` transcribed
     /// `rateLimitType` from the payload rather than renaming it.
+    ///
+    /// Also the **second half of a window's identity**: an account can be
+    /// running more than one at a time, and Codex reports two.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub rate_limit_type: String,
     #[serde(default)]
     pub is_using_overage: bool,
+    /// How full the provider says this window is, when it says.
+    ///
+    /// **Never derived.** This module refuses to compute a percentage from
+    /// farseer's own spend, and that refusal stands - see the module comment.
+    /// This is the provider's own number, present only for a runner that states
+    /// one, which today is `codex-app-server` and nothing else.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub used_percent: Option<i64>,
+    /// How long the provider says this window runs for, in minutes, when it
+    /// says. Codex reports 300 and 10080; nothing else reports any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub window_duration_mins: Option<i64>,
 }
 
 impl WindowObservation {
@@ -98,6 +126,17 @@ impl WindowObservation {
             || self.availability != previous.availability
             || self.is_using_overage != previous.is_using_overage
             || self.rate_limit_type != previous.rate_limit_type
+            // A window filling up is a transition worth recording even while the
+            // status stays `allowed`: it is the only advance warning farseer has
+            // ever been able to see, and `26 routing policy` was designed
+            // believing no runner offered one.
+            || self.used_percent != previous.used_percent
+    }
+
+    /// What identifies this window: the account it belongs to and the limit the
+    /// provider named. Two of these can be live at once on one account.
+    pub fn window_key(&self) -> (&str, &str) {
+        (&self.account, &self.rate_limit_type)
     }
 }
 
@@ -112,7 +151,47 @@ mod tests {
             availability,
             rate_limit_type: "five_hour".into(),
             is_using_overage: false,
+            used_percent: None,
+            window_duration_mins: None,
         }
+    }
+
+    #[test]
+    fn two_windows_on_one_account_are_two_windows() {
+        // `30 codex app server`: Codex reports a five-hour and a weekly window
+        // at once. Keyed by account alone they would look like one window
+        // flapping between two states.
+        let mut weekly = observation(Availability::Allowed {
+            resets_at: Some(1788273509),
+        });
+        weekly.rate_limit_type = "weekly".into();
+        let five_hour = observation(Availability::Allowed {
+            resets_at: Some(1787710593),
+        });
+        assert_ne!(weekly.window_key(), five_hour.window_key());
+        assert!(weekly.differs_from(&five_hour));
+    }
+
+    #[test]
+    fn a_window_filling_up_is_a_transition_even_while_it_stays_allowed() {
+        // The advance warning `26 routing policy` was designed believing no
+        // runner offered.
+        let mut before = observation(Availability::Allowed { resets_at: Some(1) });
+        before.used_percent = Some(40);
+        let mut after = before.clone();
+        after.used_percent = Some(75);
+        assert!(after.differs_from(&before));
+    }
+
+    #[test]
+    fn a_percentage_is_only_ever_reported_never_computed() {
+        // Nothing in this module takes spend and produces a percentage. The
+        // field is `Option` because a runner that does not state one leaves it
+        // absent, per `10 runner inventory`'s observed-never-advertised rule.
+        let quiet = observation(Availability::Unknown);
+        assert_eq!(quiet.used_percent, None);
+        let json = serde_json::to_string(&quiet).unwrap();
+        assert!(!json.contains("used_percent"), "{json}");
     }
 
     #[test]
