@@ -661,6 +661,9 @@ impl StartedWorker {
         // Fragments of an answer still being written. Emptied into one
         // `manager_answered` when the turn ends - see `RunnerSignal::OutputChunk`.
         let mut chunks = String::new();
+        // Spend from legs that ended without being the end. See `LegSpend`.
+        let mut carried_cost: Option<i64> = None;
+        let mut carried_tokens: Option<i64> = None;
         let mut window = None;
         let mut windows: Vec<farseer_core::WindowObservation> = Vec::new();
         let account = account.map(str::to_string);
@@ -761,6 +764,22 @@ impl StartedWorker {
                     }
                     // Activity, and nothing more, until the turn ends.
                     RunnerSignal::OutputChunk(text) => chunks.push_str(&text),
+                    // A leg that spent money and was not the end. Held here
+                    // and added at the terminal one, because a run report that
+                    // carries only the final leg under-counts every omp run
+                    // that used a background job - see `32 harness capability
+                    // floor` and `11 analytics questions`.
+                    RunnerSignal::LegSpend {
+                        cost_usd_micros,
+                        tokens,
+                    } => {
+                        if let Some(micros) = cost_usd_micros {
+                            carried_cost = Some(carried_cost.unwrap_or(0) + micros);
+                        }
+                        if let Some(count) = tokens {
+                            carried_tokens = Some(carried_tokens.unwrap_or(0) + count);
+                        }
+                    }
                     RunnerSignal::Finished(f) => {
                         if !chunks.trim().is_empty() {
                             let event = NewEvent::new(
@@ -778,10 +797,18 @@ impl StartedWorker {
                             }
                             output = Some(std::mem::take(&mut chunks));
                         }
+                        // `None + None` stays `None`: a runner that reports
+                        // no spend must not be made to look like it reported
+                        // zero, which is `10 runner inventory`'s observed-
+                        // never-advertised rule applied to money.
+                        let total = |leg: Option<i64>, carried: Option<i64>| match (leg, carried) {
+                            (None, None) => None,
+                            (a, b) => Some(a.unwrap_or(0) + b.unwrap_or(0)),
+                        };
                         report = Some(RunReport {
                             outcome: f.outcome,
-                            cost_usd_micros: f.cost_usd_micros,
-                            tokens: f.tokens,
+                            cost_usd_micros: total(f.cost_usd_micros, carried_cost),
+                            tokens: total(f.tokens, carried_tokens),
                             result: output.clone(),
                             // Attached after the stream ends: `10 runner
                             // inventory` observed `rate_limit_event` arriving
@@ -1812,6 +1839,59 @@ mod tests {
                 tokens: Some(1),
             }),
         ])
+    }
+
+    /// omp's shape, as signals: a background-job leg that spends and does not
+    /// end, then a terminal leg carrying only its own.
+    fn two_leg_fixture(line: &str) -> Result<Vec<RunnerSignal>, ParseError> {
+        Ok(match line {
+            "leg" => vec![RunnerSignal::LegSpend {
+                cost_usd_micros: Some(4000),
+                tokens: Some(900),
+            }],
+            "done" => vec![RunnerSignal::Finished(
+                farseer_runner::claude_code::FinishedSignal {
+                    outcome: Outcome::Ok,
+                    cost_usd_micros: Some(1000),
+                    tokens: Some(100),
+                },
+            )],
+            _ => Vec::new(),
+        })
+    }
+
+    /// The run report used to carry the **final leg only**, so an omp run that
+    /// delegated to a background job reported a fraction of what it spent -
+    /// which `11 analytics questions` reads, and a budget draws down against.
+    #[test]
+    fn a_run_report_carries_every_leg_that_spent_not_only_the_last() {
+        let store = Store::open_in_memory().unwrap();
+        let contract = contract();
+        let dir = tempfile::tempdir().unwrap();
+        let lines = dir.path().join("legs.txt");
+        std::fs::write(&lines, "leg\r\ndone\r\n").unwrap();
+
+        let started = StartedWorker::spawn(
+            Path::new(r"C:\Windows\System32\cmd.exe"),
+            &[
+                "/d".into(),
+                "/c".into(),
+                "type".into(),
+                lines.to_string_lossy().into_owned(),
+            ],
+            &std::env::current_dir().unwrap(),
+            &[],
+            LivenessThresholds::default(),
+            two_leg_fixture,
+            Channel::OneShot,
+        )
+        .unwrap();
+
+        let report = started
+            .run_to_completion(&store, &contract, Actor::Worker, || 1, None, 1)
+            .expect("the run completes");
+        assert_eq!(report.cost_usd_micros, Some(5000));
+        assert_eq!(report.tokens, Some(1000));
     }
 
     #[test]

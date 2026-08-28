@@ -134,3 +134,22 @@ tool_call_started  write  {"path":"xd://delegate_to_worker", "content":"{...}"} 
 omp mounts extension tools as **devices addressed by writing JSON to `xd://<tool>`**. It guessed an MCP-shaped name first, read the schema, then called correctly - self-correcting, and farseer's tool descriptions were enough to do it from.
 
 One consequence for `02 record scope`: the event's `tool_name` is `write`, and the verb is inside `args.path`. **An operator scanning omp's events sees a file write where a delegation happened.** The delegation itself is recorded correctly - the child run row exists, under the parent task, with its own spend - so this is a legibility gap in the event stream rather than a false record. Not fixed here.
+
+## The multi-leg spend gap, closed 2026-08-28
+
+This ticket left the under-count open when it recorded omp's background job:
+the non-terminal `agent_end` was written to the record as a `tool_result`, and
+**the run report still carried only the final leg**.
+So an omp run that delegated to a background job reported a fraction of what it
+spent - to `11 analytics questions`, and to the budget that draws down against it.
+
+Fixed with a signal rather than a re-read of the record.
+`RunnerSignal::LegSpend` carries what a non-terminal leg spent, the manager holds it,
+and the terminal `RunReport` adds it in.
+The event still goes to the record, because the record is for a person and the
+signal is for the arithmetic - **money that only exists in a payload string is
+money the report cannot add up.**
+
+`None + None` stays `None`.
+A runner that reports no spend must not be made to look like it reported zero,
+which is `10 runner inventory`'s observed-never-advertised rule applied to money.

@@ -322,24 +322,33 @@ pub fn parse_line(line: &str) -> Result<Vec<RunnerSignal>, ParseError> {
         //
         // Absent means terminal: pi sends no such field and has no background
         // jobs to be waiting on.
-        "agent_end" => Some(
-            if v.get("isTerminal").and_then(Value::as_bool) == Some(false) {
-                // Not the end, but real spending. Recorded now rather than
-                // dropped, because the terminal `agent_end` carries only its
-                // own leg's messages and this leg's tokens are not in it.
-                let spent = finished(&v);
-                RunnerSignal::Progress {
-                    kind: EventKind::new(EventKind::TOOL_RESULT),
-                    payload: json!({
-                        "tool_name": "background job",
-                        "tokens": spent.tokens,
-                        "cost_usd_micros": spent.cost_usd_micros,
-                    }),
-                }
-            } else {
-                RunnerSignal::Finished(finished(&v))
-            },
-        ),
+        "agent_end" => {
+            let spent = finished(&v);
+            return Ok(
+                if v.get("isTerminal").and_then(Value::as_bool) == Some(false) {
+                    // Not the end, but real spending. Twice over: once for the
+                    // operator reading the record, and once for the report,
+                    // because the terminal `agent_end` carries only its own
+                    // leg's messages and this leg's tokens are not in it.
+                    vec![
+                        RunnerSignal::Progress {
+                            kind: EventKind::new(EventKind::TOOL_RESULT),
+                            payload: json!({
+                                "tool_name": "background job",
+                                "tokens": spent.tokens,
+                                "cost_usd_micros": spent.cost_usd_micros,
+                            }),
+                        },
+                        RunnerSignal::LegSpend {
+                            cost_usd_micros: spent.cost_usd_micros,
+                            tokens: spent.tokens,
+                        },
+                    ]
+                } else {
+                    vec![RunnerSignal::Finished(spent)]
+                },
+            );
+        }
         _ => None,
     };
     Ok(signal.into_iter().collect())
@@ -541,13 +550,22 @@ mod tests {
     fn a_loop_that_says_it_is_not_terminal_does_not_end_the_run() {
         let waiting = r#"{"type":"agent_end","isTerminal":false,"messages":[{"role":"assistant","usage":{"totalTokens":900,"cost":{"total":0.004}},"stopReason":"toolUse"}]}"#;
         let signals = parse_line(waiting).unwrap();
-        let [RunnerSignal::Progress { payload, .. }] = &signals[..] else {
+        let [
+            RunnerSignal::Progress { payload, .. },
+            RunnerSignal::LegSpend {
+                cost_usd_micros,
+                tokens,
+            },
+        ] = &signals[..]
+        else {
             panic!("spending, not an ending: {signals:?}")
         };
         // The leg still spent money, and the terminal `agent_end` will carry
-        // only its own messages - so this is the record's only sight of it.
+        // only its own messages - so twice: once for the operator reading the
+        // record, and once for the report, which used to lose it entirely.
         assert_eq!(payload["tokens"], 900);
         assert_eq!(payload["cost_usd_micros"], 4000);
+        assert_eq!((*cost_usd_micros, *tokens), (Some(4000), Some(900)));
 
         let done = r#"{"type":"agent_end","isTerminal":true,"messages":[{"role":"assistant","usage":{"totalTokens":100,"cost":{"total":0.001}},"stopReason":"stop"}]}"#;
         assert!(matches!(

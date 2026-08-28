@@ -72,6 +72,23 @@ pub enum RunnerSignal {
     /// protocol whose authors had already decided it was the number that
     /// matters. See [`crate::acp::UsageInfo`].
     Usage(crate::acp::UsageInfo),
+    /// What a **non-terminal** leg of the agent loop spent.
+    ///
+    /// omp is the reason this exists. It runs a subagent as a named background
+    /// job, so the foreground loop ends with `"isTerminal": false` and its own
+    /// tokens on it, and a *second* loop later ends terminally carrying only
+    /// its own. `32 harness capability floor` recorded the first leg as an
+    /// event and stopped there, which left the run report - and so
+    /// `11 analytics questions` - under-counting every omp run that used a
+    /// background job.
+    ///
+    /// Separate from [`RunnerSignal::Progress`] rather than read back out of
+    /// the record: the record is for a person, and money that only exists in
+    /// a payload string is money the report cannot add up.
+    LegSpend {
+        cost_usd_micros: Option<i64>,
+        tokens: Option<i64>,
+    },
     /// User-visible terminal text which a supervising manager can relay.
     ///
     /// One per **turn**. A native runner emits its whole answer at once, which
