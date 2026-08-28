@@ -8,6 +8,14 @@
 #            that two runners share a login, so it declines to guess and shows
 #            two windows until an operator says otherwise.
 #
+#   usd_micros_per_mtok
+#            what a million tokens costs here, per `26 routing policy`. Absent
+#            means farseer prices nothing, which is the default and the honest
+#            one: a made-up figure is worse than a blank because an operator
+#            plans around it. A run costed from this carries `cost_estimated`
+#            in the record, so a mispriced table argues with somebody rather
+#            than hiding.
+#
 #   model    what farseer launches the runner with. Absent means farseer passes
 #   effort   nothing and the runner keeps its own configuration, which is
 #            `30 codex app server`'s rule. Present here is the operator saying

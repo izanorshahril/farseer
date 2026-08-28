@@ -151,9 +151,9 @@ Neither design is invalidated. The number they were being weighed against change
 
 ---
 
-## Built 2026-08-28, sections 1 to 3
+## Built 2026-08-28, all four sections
 
-Section 4 is **not** built, and is named at the foot of this note rather than left to be discovered.
+Sections 1 to 3 went in first and section 4 followed in the same day; the note below was written between the two and its "not built" section is superseded at the foot of this page.
 
 ### The roster entry holds the list, and one item is still a pin
 
@@ -189,3 +189,40 @@ Whoever builds it inherits section 4's three constraints unchanged, and the firs
 ### Also still true
 
 `11 analytics questions` must exclude `runner_exhausted` from rework. Nothing enforces that yet, and rework is not computed from this reason today.
+
+
+---
+
+## Section 4, built the same day
+
+### The trigger is observed, not estimated
+
+The draft of this build was going to price a run in advance and reorder when the estimate pressed on the remaining budget.
+That needs the one number nobody has: what a run will cost before it runs.
+
+Section 4 already contained the better answer and it took a second reading to see it.
+The cost curve **is not a slope**, it is a cliff: a subscription run costs nothing marginal until its window turns over, and past that the only way to continue is a pay-per-token key that costs real money.
+`is_using_overage` is the provider stating which side of that cliff a runner is on - `10 runner inventory` measured Claude Code reporting it in band, and it has been a field on `WindowObservation` the whole time.
+
+So routing prefers a candidate not on overage, and no estimate enters the decision at all.
+
+**Preference, never exclusion.** A runner on overage still runs when it is the only one left, because this ticket is explicit that budget pressure may **reorder within the author's list** and never add or remove a runner the author named.
+
+### The price table exists, and only for the record
+
+`RunnerEntry::usd_micros_per_mtok`, absent for every runner until an operator writes one down.
+
+One blended rate rather than input and output separately, because that is the granularity farseer can observe: pi and omp report a total token count and no split.
+
+A run that reported tokens and no currency is costed from it and carries **`cost_estimated: true`**, which is this ticket's own constraint - a routing decision made on a farseer estimate must be distinguishable from one made on a reported figure, or a mispriced table becomes invisible.
+A runner that stated its own figure is never overwritten by the table, and with no price at all the field stays **absent rather than zero**, per `10 runner inventory`.
+
+### The reorder event says less than it could
+
+It records `preferred_runner_unavailable` with the preferred and the chosen, and does not say which of the two pressures moved it.
+Exhaustion and overage are read in one pass and the distinction is not reconstructed.
+`11 analytics questions` needs to know a reorder happened and what ran; a confident wrong reason would be worse than an honest vague one.
+
+### Still open
+
+`11 analytics questions` must exclude `runner_exhausted` from rework, and nothing enforces that yet.

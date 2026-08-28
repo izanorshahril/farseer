@@ -222,6 +222,10 @@ pub struct RunOptions {
     /// a credential to an extension without putting it on the argv - visible to
     /// every process listing - or in the prompt, where the model would read it.
     pub runner_env: Vec<(String, String)>,
+    /// `26 routing policy`'s price table for this run's runner, in USD micros
+    /// per million tokens. `None` means farseer prices nothing and a run that
+    /// reported no currency stays blank - see [`estimated_cost`].
+    pub usd_micros_per_mtok: Option<i64>,
     /// Absolute paths to runner extensions farseer itself supplies.
     ///
     /// Separate from [`Self::skills`] because they are different grants: a
@@ -252,6 +256,7 @@ impl Default for RunOptions {
             append_system_prompt: None,
             account: None,
             model: None,
+            usd_micros_per_mtok: None,
             effort: None,
             runner_env: Vec::new(),
             extensions: Vec::new(),
@@ -1442,17 +1447,36 @@ pub fn run_worker(
             RunRole::Worker => Actor::Worker,
         },
         finished_ts,
-        finished_payload(&result),
+        finished_payload(&result, options.usd_micros_per_mtok),
     ));
 
     result
+}
+
+/// A cost farseer worked out, for a runner that reported tokens and no money.
+///
+/// `10 runner inventory` found only some runners report currency; `26 routing
+/// policy` decided farseer may price the rest **provided the estimate says so**,
+/// because a routing decision made on a farseer estimate has to be
+/// distinguishable from one made on a reported figure or a mispriced table
+/// becomes invisible.
+///
+/// Returns `None` unless there is both a token count and a price, so the record
+/// keeps `10`'s rule: absent stays absent, and nothing is made to look like a
+/// zero it never reported.
+fn estimated_cost(tokens: Option<i64>, usd_micros_per_mtok: Option<i64>) -> Option<i64> {
+    let (tokens, rate) = (tokens?, usd_micros_per_mtok?);
+    (tokens > 0 && rate > 0).then(|| tokens.saturating_mul(rate) / 1_000_000)
 }
 
 /// What a finished run has to say for itself.
 ///
 /// `02 record scope` scrubs on write, so the text is scrubbed like any other
 /// payload rather than being trusted because a manager wrote it.
-fn finished_payload(result: &Result<RunReport, ManagerError>) -> serde_json::Value {
+fn finished_payload(
+    result: &Result<RunReport, ManagerError>,
+    usd_micros_per_mtok: Option<i64>,
+) -> serde_json::Value {
     let (outcome, text, cost, tokens) = match result {
         Ok(report) => (
             outcome_str(report.outcome),
@@ -1476,10 +1500,13 @@ fn finished_payload(result: &Result<RunReport, ManagerError>) -> serde_json::Val
             None,
         ),
     };
+    // Reported money wins; farseer's own arithmetic fills a blank and says so.
+    let estimated = cost.is_none() && estimated_cost(tokens, usd_micros_per_mtok).is_some();
     serde_json::json!({
         "outcome": outcome,
         "text": text,
-        "cost_usd_micros": cost,
+        "cost_usd_micros": cost.or_else(|| estimated_cost(tokens, usd_micros_per_mtok)),
+        "cost_estimated": estimated,
         "tokens": tokens,
     })
 }
@@ -1713,7 +1740,7 @@ mod tests {
             window: None,
             windows: Vec::new(),
             session: None,
-        }));
+        }), None);
 
         assert_eq!(payload["outcome"], "ok");
         assert_eq!(payload["text"], "the changelog is posted");
@@ -1730,15 +1757,49 @@ mod tests {
             window: None,
             windows: Vec::new(),
             session: None,
-        })));
+        })), None);
 
         assert_eq!(payload["outcome"], "cancelled");
         assert_eq!(payload["text"], "halfway through");
     }
 
+    /// `26 routing policy`: farseer may price a runner that reports tokens and
+    /// no money, **provided the estimate says it is one**. A mispriced table
+    /// that looks like a reported figure is invisible; one that says
+    /// `cost_estimated` is arguable.
+    #[test]
+    fn a_priced_run_says_its_money_was_worked_out_and_a_reported_one_does_not() {
+        let report = |cost| {
+            Ok(RunReport {
+                outcome: Outcome::Ok,
+                cost_usd_micros: cost,
+                tokens: Some(2_000_000),
+                result: None,
+                window: None,
+                windows: Vec::new(),
+                session: None,
+            })
+        };
+
+        let priced = finished_payload(&report(None), Some(3_000));
+        assert_eq!(priced["cost_usd_micros"], 6_000);
+        assert_eq!(priced["cost_estimated"], true);
+
+        // A runner that stated its own figure is never overwritten by a table.
+        let reported = finished_payload(&report(Some(11)), Some(3_000));
+        assert_eq!(reported["cost_usd_micros"], 11);
+        assert_eq!(reported["cost_estimated"], false);
+
+        // And `10 runner inventory`'s rule outranks the table: with no price,
+        // absent stays absent rather than becoming a zero.
+        let unpriced = finished_payload(&report(None), None);
+        assert!(unpriced["cost_usd_micros"].is_null(), "{unpriced}");
+        assert_eq!(unpriced["cost_estimated"], false);
+    }
+
     #[test]
     fn a_run_with_no_report_quotes_the_error_rather_than_inventing_a_voice() {
-        let payload = finished_payload(&Err(ManagerError::NoResult));
+        let payload = finished_payload(&Err(ManagerError::NoResult), None);
         assert_eq!(payload["outcome"], "failed");
         assert!(payload["text"].as_str().is_some_and(|t| !t.is_empty()));
     }

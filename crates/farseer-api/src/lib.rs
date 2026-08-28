@@ -778,6 +778,7 @@ fn manager_run_options(
         // and passed down rather than derived: the manager crate reads no
         // config, and an undeclared runner is its own account.
         account: Some(state.runner_config().account_for(&contract.runner)),
+        usd_micros_per_mtok: state.runner_config().price_for(&contract.runner),
                 // The manager's own declared skills, resolved to directories.
                 skills: skill_paths(state, &contract.runner, &cell.manager.skills)?,
                 // What the operator pinned, or nothing at all. `30 codex app
@@ -1024,6 +1025,7 @@ pub(crate) fn spawn_run(
         runner_env: Vec::new(),
         extensions: Vec::new(),
             account: Some(state.runner_config().account_for(&contract.runner)),
+        usd_micros_per_mtok: state.runner_config().price_for(&contract.runner),
                 // A run reached without a manager context - a rerun, or a
                 // direct worker - carries no declared skills rather than
                 // inheriting the cell manager's.
@@ -1667,18 +1669,40 @@ fn skill_paths(state: &AppState, runner: &str, names: &[String]) -> ApiResult<Ve
 /// `None` means every candidate is spent, which the caller turns into `26`
 /// section 3's `runner_exhausted` rather than a fifth outcome.
 fn first_available_runner(state: &AppState, candidates: &[String]) -> Option<String> {
+    const EXHAUSTED: &str = "exhausted_until";
+
     let config = state.runner_config();
-    let exhausted: std::collections::HashSet<String> = state
+    let mut exhausted: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut on_overage: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for row in state
         .store()
         .windows(|account| config.runners_on(account))
         .unwrap_or_default()
-        .into_iter()
-        .filter(|row| row.status == farseer_core::Availability::ExhaustedUntil { resets_at: 0 }.as_str())
-        .flat_map(|row| config.runners_on(&row.account))
-        .collect();
-    candidates
-        .iter()
-        .find(|runner| !exhausted.contains(*runner))
+    {
+        let runners = config.runners_on(&row.account);
+        if row.status == EXHAUSTED {
+            exhausted.extend(runners.iter().cloned());
+        }
+        if row.is_using_overage {
+            on_overage.extend(runners);
+        }
+    }
+    let eligible = || candidates.iter().filter(|r| !exhausted.contains(*r));
+    // `26 routing policy` section 4, and the shape is the whole point: a
+    // subscription run costs **nothing marginal** until its window turns over,
+    // and the only way to continue past that is a pay-per-token key that costs
+    // real money. So the cost curve is not a slope a router shaves margins off.
+    // It is **a cliff at the moment of exhaustion**, and `is_using_overage` is
+    // the provider saying which side of it a runner is on.
+    //
+    // Observed, not estimated: farseer does not price a run in advance to decide
+    // this, because the one number it would need is the one nobody has yet.
+    // Preference only - a runner in overage still runs when it is all there is,
+    // since `26` is explicit that budget pressure may **reorder within the
+    // author's list** and never introduce or remove a runner the author named.
+    eligible()
+        .find(|runner| !on_overage.contains(*runner))
+        .or_else(|| eligible().next())
         .cloned()
 }
 

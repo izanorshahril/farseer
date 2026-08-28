@@ -45,6 +45,26 @@ pub struct RunnerEntry {
     /// is why this is config rather than a constant.
     #[serde(default)]
     pub model: Option<String>,
+    /// What a million tokens costs on this runner, in USD micros.
+    ///
+    /// `26 routing policy`'s price table, which that ticket placed here rather
+    /// than in a cell definition: pricing is per runner and machine-wide, so
+    /// putting it in the definition would duplicate it into every cell and
+    /// reopen `08 generalization test` for no gain.
+    ///
+    /// **Absent means farseer prices nothing**, which is the honest default:
+    /// `10 runner inventory` found only some runners report currency at all,
+    /// and a made-up figure in the record is worse than a blank one because an
+    /// operator would plan around it. A run whose cost is derived from this
+    /// carries `cost_estimated` beside it, per `26` - a routing decision made
+    /// on a farseer estimate must be distinguishable from one made on a
+    /// reported figure, or a mispriced table becomes invisible.
+    ///
+    /// One blended rate rather than input and output separately, because that
+    /// is the granularity farseer can actually observe: pi and omp report a
+    /// total token count and no split.
+    #[serde(default)]
+    pub usd_micros_per_mtok: Option<i64>,
     /// How hard the runner should think: `low`, `medium`, `high`, `xhigh` on
     /// this machine, in the runner's own vocabulary rather than a farseer one.
     ///
@@ -95,6 +115,16 @@ impl RunnerConfig {
     /// `27 quota accounting` section 3: **the correct key for accounting and the
     /// natural key for display are different**, and that is fine as long as it
     /// is deliberate.
+    /// What the operator says a million tokens costs on this runner.
+    ///
+    /// Absent for every runner until somebody writes one down - see
+    /// [`RunnerEntry::usd_micros_per_mtok`].
+    pub fn price_for(&self, runner: &str) -> Option<i64> {
+        self.runners
+            .get(runner)
+            .and_then(|entry| entry.usd_micros_per_mtok)
+    }
+
     pub fn runners_on(&self, account: &str) -> Vec<String> {
         let declared: Vec<String> = self
             .runners

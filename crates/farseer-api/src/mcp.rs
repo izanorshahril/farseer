@@ -246,6 +246,7 @@ impl FarseerMcp {
         runner_env: Vec::new(),
         extensions: Vec::new(),
                 account: Some(self.state.runner_config().account_for(&contract.runner)),
+                usd_micros_per_mtok: self.state.runner_config().price_for(&contract.runner),
                 skills: skill_dirs.to_vec(),
                 // What the operator pinned, or nothing at all. `30 codex app
                 // server`: farseer passes a model or an effort only when a
@@ -351,7 +352,12 @@ impl FarseerMcp {
                 Actor::System,
                 now_ms(),
                 serde_json::json!({
-                    "routing": "runner_exhausted",
+                    // Which of `26 routing policy`'s two pressures moved it is
+                    // not distinguishable here, and saying so is better than
+                    // naming one: `11 analytics questions` needs to know a
+                    // reorder happened and what it chose, and a confident wrong
+                    // reason would be worse than an honest vague one.
+                    "routing": "preferred_runner_unavailable",
                     "worker": args.worker,
                     "preferred": candidates.first(),
                     "chosen": runner,
