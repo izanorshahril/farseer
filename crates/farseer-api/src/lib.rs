@@ -773,6 +773,7 @@ fn manager_run_options(
         claude_mcp_config: None,
         append_system_prompt: None,
         runner_env: Vec::new(),
+        mcp: None,
         extensions: Vec::new(),
         // Declared by the operator in runner config, per `27 quota accounting`,
         // and passed down rather than derived: the manager crate reads no
@@ -835,12 +836,23 @@ fn manager_run_options(
         && delegate_extension(state).is_some()
     {
         Reach::PiExtension
+    } else if contract.runner == "codex-app-server" {
+        Reach::CodexAppServer
     } else {
         Reach::None
     };
 
     let mut prompt = match reach {
-        Reach::Mcp => format!(
+        // Codex shares Claude Code's wording because it shares the transport,
+        // and that is the point rather than an accident: **an MCP client calls
+        // the tool itself**, so it has to pass the two credentials the tool
+        // authorizes on. The extension route does not, which is why pi's prompt
+        // carries none - see the note on `Reach::PiExtension`.
+        //
+        // Found by running it. The first version of this reused pi's wording and
+        // the manager answered `Unable to delegate: manager authorization token
+        // unavailable.` - it could see the tools and had nothing to present.
+        Reach::Mcp | Reach::CodexAppServer => format!(
             "You are the manager for farseer cell `{}`. Your manager_run_id is `{}` and your \
              manager_token is `{}`. The roster workers available to delegate to are: {}. \
              The cells you may call are: {}. \
@@ -941,6 +953,24 @@ fn manager_run_options(
                 ),
             ];
         }
+        // The same two verbs as `Reach::Mcp`, over the same MCP face, with the
+        // credential moved off the model's page and into the environment - the
+        // improvement `31 manager delegation reach` made for pi, arriving here
+        // for free because Codex resolves the variable in its own process.
+        //
+        // No config file: `Reach::Mcp` writes one because Claude Code reads MCP
+        // servers from disk, and a file is a secret with a lifetime to manage.
+        // This route has neither.
+        Reach::CodexAppServer => {
+            options.mcp = Some((
+                state.mcp_endpoint().expect("reach implies a bound listener"),
+                "FARSEER_MANAGER_TOKEN".to_string(),
+            ));
+            options.runner_env = vec![(
+                "FARSEER_MANAGER_TOKEN".to_string(),
+                manager_token.as_str().to_string(),
+            )];
+        }
         Reach::None => {}
     }
     Ok(options)
@@ -954,6 +984,12 @@ enum Reach {
     /// farseer's plain-JSON manager face, through an extension registering the
     /// two verbs as ordinary tools. pi and omp.
     PiExtension,
+    /// farseer's MCP face again, but configured **in the handshake** rather than
+    /// in a file on disk: `codex-app-server` takes `config.mcp_servers` on
+    /// `thread/start`, and takes the bearer as the *name of an environment
+    /// variable* it resolves in its own process. `31 manager delegation reach`
+    /// predicted this route; `30 codex app server` named the field.
+    CodexAppServer,
     /// Nothing. The manager is told so rather than left to improvise.
     None,
 }
@@ -1023,6 +1059,7 @@ pub(crate) fn spawn_run(
             claude_mcp_config: None,
             append_system_prompt: None,
         runner_env: Vec::new(),
+        mcp: None,
         extensions: Vec::new(),
             account: Some(state.runner_config().account_for(&contract.runner)),
         usd_micros_per_mtok: state.runner_config().price_for(&contract.runner),

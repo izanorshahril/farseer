@@ -222,6 +222,10 @@ pub struct RunOptions {
     /// a credential to an extension without putting it on the argv - visible to
     /// every process listing - or in the prompt, where the model would read it.
     pub runner_env: Vec<(String, String)>,
+    /// `(endpoint, env var holding the bearer)` for a runner whose MCP client is
+    /// configured in its handshake - `codex-app-server` today. The token itself
+    /// travels in [`Self::runner_env`], never here.
+    pub mcp: Option<(String, String)>,
     /// `26 routing policy`'s price table for this run's runner, in USD micros
     /// per million tokens. `None` means farseer prices nothing and a run that
     /// reported no currency stays blank - see [`estimated_cost`].
@@ -257,6 +261,7 @@ impl Default for RunOptions {
             account: None,
             model: None,
             usd_micros_per_mtok: None,
+            mcp: None,
             effort: None,
             runner_env: Vec::new(),
             extensions: Vec::new(),
@@ -387,6 +392,10 @@ pub struct StartedWorker {
     /// Manager identity and roster, for the protocols that carry it in a frame
     /// rather than on the argv. See [`RunOptions::append_system_prompt`].
     identity: Option<String>,
+    /// The MCP endpoint and bearer-holding env var this run's manager may
+    /// delegate through, for a protocol that takes it in the handshake rather
+    /// than on the argv. `31 manager delegation reach`, third transport.
+    mcp: Option<(String, String)>,
 }
 
 /// A cloneable handle that writes a steer message into a run's live process,
@@ -482,6 +491,7 @@ impl StartedWorker {
             pinned_model: None,
             pinned_effort: None,
             identity: None,
+            mcp: None,
         })
     }
 
@@ -619,6 +629,9 @@ impl StartedWorker {
                     // worktree is still the guarantee.
                     CODEX_SANDBOX,
                     identity.as_deref(),
+                    self.mcp
+                        .as_ref()
+                        .map(|(url, var)| (url.as_str(), var.as_str())),
                     &mut ids,
                     &mut discard,
                 )?;
@@ -1356,6 +1369,7 @@ pub fn start_worker(
     started.pinned_model = options.model.clone();
     started.pinned_effort = options.effort.clone();
     started.identity = options.append_system_prompt.clone();
+    started.mcp = options.mcp.clone();
     started.bootstrap(&contract.goal, cwd)?;
     Ok(started)
 }

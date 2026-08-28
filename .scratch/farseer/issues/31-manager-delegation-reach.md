@@ -151,3 +151,48 @@ The MCP shape put it in the prompt, because a Claude Code manager presents its o
 - **ACP.** `goose-acp` and `opencode-acp` get the roster prompt and no reach. The client serves capabilities in ACP, and farseer currently declines `fs` and `terminal`; whether it can serve tools instead is unprobed.
 - **codex-app-server.** Its route was the one this ticket predicted - `thread/start`'s free-form `config` plus `bearer_token_env_var` - and `spawn` can now set that variable. Untried, because pi got there first and the operator runs pi.
 - **omp's own subagents next to farseer's workers.** `32 harness capability floor` left `hub` open; an omp manager can now delegate two different ways, and they do not know about each other.
+
+---
+
+## codex-app-server reaches it too, 2026-08-28
+
+Third transport, and the one this ticket predicted on closing: `thread/start`'s free-form config plus `bearer_token_env_var`.
+
+### The nesting was the whole finding
+
+`mcpServers` at the top of `params` is **accepted and silently ignored**. The thread starts, no server is launched, and nothing says so - the same failure mode `36 tool grant enforcement` found in `pi --tools nosuchtool`, from a different vendor on the same afternoon.
+
+Under `config`, in Codex's own snake_case, it starts:
+
+```
+"name":"farseerprobe","status":"starting"
+"name":"farseerprobe","status":"failed"
+"error":"MCP client for `farseerprobe` failed to start: MCP startup failed:
+         Environment variable FARSEER_MANAGER_TOKEN for MCP server 'farseerprobe' is not set"
+```
+
+A deliberately unreachable URL and a deliberately unset variable, and the error is the server **proving it read the field**. A probe that only asked "did the thread start" would have called the ignored spelling a success.
+
+The test asserts the nesting and asserts `params.mcpServers` is absent, because a test checking only that the field appears *somewhere* in the frame would pass on the shape that does nothing.
+
+### What running it corrected
+
+The first version reused pi's prompt - no credentials, because pi's extension injects them. The manager answered:
+
+```
+Unable to delegate: manager authorization token unavailable.
+```
+
+It could see the tools and had nothing to present. **An MCP client calls the tool itself**, so it must pass the two credentials the tool authorizes on; an extension route does not. Codex now shares Claude Code's wording because it shares Claude Code's transport, and the split in this ticket's prompts is by transport rather than by runner.
+
+### Proven
+
+`PERSIMMON`, relayed by a `codex-app-server` manager from a real `pi` worker (`01a048ff-3e8a`, finished ok) delegated through farseer's MCP face.
+
+### The asymmetry this leaves, and it is worth closing
+
+This ticket called the env-var route **strictly better** than the MCP shape where a manager carries its own bearer, and Codex has landed on the worse of the two: the token is in its prompt, where the model can quote it.
+
+Half of it is already better - the *transport* bearer is an env var Codex resolves in its own process, so it is not in the frame or the record. What remains is the tool's own `manager_token` argument.
+
+**The fix is to derive manager identity from the bearer the guard already validated**, making both arguments optional. That would remove the credential from Claude Code's prompt as well, which is the older instance of the same problem. Not done here.

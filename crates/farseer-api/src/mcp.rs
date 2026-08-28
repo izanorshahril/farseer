@@ -244,6 +244,7 @@ impl FarseerMcp {
                 claude_mcp_config: None,
                 append_system_prompt: None,
         runner_env: Vec::new(),
+        mcp: None,
         extensions: Vec::new(),
                 account: Some(self.state.runner_config().account_for(&contract.runner)),
                 usd_micros_per_mtok: self.state.runner_config().price_for(&contract.runner),
