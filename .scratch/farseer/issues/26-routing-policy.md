@@ -223,6 +223,20 @@ It records `preferred_runner_unavailable` with the preferred and the chosen, and
 Exhaustion and overage are read in one pass and the distinction is not reconstructed.
 `11 analytics questions` needs to know a reorder happened and what ran; a confident wrong reason would be worse than an honest vague one.
 
-### Still open
+### The rework exclusion, and a departure from section 3
 
-`11 analytics questions` must exclude `runner_exhausted` from rework, and nothing enforces that yet.
+Section 3 asked for `failed` with reason `runner_exhausted`, on `17 cell lifecycle`'s precedent of an orphaned run becoming `finished(failed)` with reason `runtime_restarted`.
+**That is not what was built, and the difference is the point.**
+
+`17`'s run had started: a process existed and its outcome was genuinely unknown, so a row saying so is the honest record of something that happened.
+An exhausted delegation starts nothing - no contract sealed, no workspace, no process.
+Writing a run row would put a run into `11 analytics questions`'s denominators that never ran, in order to record an event that is not about a run at all.
+
+So it is a `status_changed` event on the manager's own run, naming the worker and every candidate.
+"How often did exhaustion block work" is a scan of those, rather than an outcome filter over phantom rows.
+
+And the consequence section 3 wanted arrives for free.
+With no run and no rescope edge, `runner_exhausted` **cannot** reach `rework_depth`, whose chain walks `rescoped_from`.
+`11`'s exclusion is true by construction rather than by a rule somebody has to keep remembering - which is the only kind that survives.
+
+`26` is closed.

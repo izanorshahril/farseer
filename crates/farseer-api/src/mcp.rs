@@ -329,18 +329,45 @@ impl FarseerMcp {
         // `unknown`, which behaves as **available until proven otherwise** -
         // most runners will never report one, so that is the permanent normal
         // case rather than a shim.
-        let runner = crate::first_available_runner(&self.state, &candidates).ok_or_else(|| {
-            // `26` section 3: `failed` with a reason, not a fifth outcome. The
-            // work was not wrong and a retry is right, just not yet - which is
-            // also why `11 analytics questions` must exclude this from rework.
-            McpError::internal_error(
+        let Some(runner) = crate::first_available_runner(&self.state, &candidates) else {
+            // `26 routing policy` section 3 asked for `failed` with reason
+            // `runner_exhausted`, on the precedent of `17 cell lifecycle`'s
+            // orphaned run. **This departs from that, and deliberately.**
+            //
+            // `17`'s run had started - a process existed and its outcome was
+            // genuinely unknown. Nothing starts here: no contract is sealed, no
+            // workspace is made, no process is spawned. Writing a run row would
+            // put a run in `11 analytics questions`'s denominators that never
+            // ran, to record an event that is not about a run at all.
+            //
+            // So it is an event, on the manager's own run, and the operator's
+            // question - how often did exhaustion block work - is a scan of
+            // these rather than an outcome filter over phantom rows.
+            //
+            // The consequence `26` wanted falls out for free: with no run and no
+            // rescope edge, `runner_exhausted` cannot reach rework depth, so the
+            // exclusion it asked for is true by construction rather than by a
+            // rule somebody has to remember.
+            let _ = self.state.store().append(&NewEvent::new(
+                manager.cell.cell_id.clone(),
+                manager.contract.run_id,
+                EventKind::new(EventKind::STATUS_CHANGED),
+                Actor::System,
+                now_ms(),
+                serde_json::json!({
+                    "routing": "runner_exhausted",
+                    "worker": args.worker,
+                    "candidates": candidates,
+                }),
+            ));
+            return Err(McpError::internal_error(
                 format!(
                     "runner_exhausted: every runner for worker `{}` has a spent window ({candidates:?})",
                     args.worker
                 ),
                 None,
-            )
-        })?;
+            ));
+        };
         if candidates.first() != Some(&runner) {
             // `26` section 4: **a reorder emits an event.** Without it,
             // `11 analytics questions`'s cost-by-runner cannot explain why a

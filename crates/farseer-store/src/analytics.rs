@@ -94,6 +94,17 @@ impl Store {
     }
 
     /// Q3. The recursive CTE `09 store decision` benched, walking up the `rescoped_from` chain.
+    ///
+    /// `26 routing policy` required that `runner_exhausted` stay out of this,
+    /// because **rework measures the agent doing a bad job and an operator's
+    /// subscription window turning over is not the agent doing a bad job** - a
+    /// metric conflating them is worse than no metric.
+    ///
+    /// Nothing here enforces that and nothing needs to. An exhausted delegation
+    /// seals no contract, so there is no run, no rescope edge, and no way for it
+    /// to reach this chain. It is recorded as a `status_changed` event instead.
+    /// **The exclusion is a property of the shape rather than a rule somebody
+    /// has to keep remembering**, which is the only kind that survives.
     pub fn rework_depth(&self) -> Result<Vec<ReworkRow>> {
         let mut stmt = self.conn().prepare_cached(
             "WITH RECURSIVE chain(run_id, root, depth) AS (
@@ -186,6 +197,34 @@ mod tests {
             })
             .unwrap();
         run_id
+    }
+
+    /// The invariant `26 routing policy` asked for, asserted where it can
+    /// actually be broken: a run has to exist before it can be reworked, and an
+    /// exhausted delegation never makes one.
+    #[test]
+    fn a_run_that_never_started_cannot_appear_in_rework_depth() {
+        let s = Store::open_in_memory().unwrap();
+        finished(&s, "zero", "pi", "ok", 1, true);
+        let before = s.rework_depth().unwrap().len();
+
+        // What an exhausted delegation actually writes: an event on the
+        // manager's run, and no run row of its own.
+        s.append(&farseer_core::NewEvent::new(
+            farseer_core::CellId::new("zero"),
+            farseer_core::RunId::new(),
+            farseer_core::EventKind::new(farseer_core::EventKind::STATUS_CHANGED),
+            farseer_core::Actor::System,
+            1,
+            serde_json::json!({ "routing": "runner_exhausted", "worker": "coder" }),
+        ))
+        .unwrap();
+
+        assert_eq!(
+            s.rework_depth().unwrap().len(),
+            before,
+            "an exhausted delegation is not the agent doing a bad job"
+        );
     }
 
     #[test]
