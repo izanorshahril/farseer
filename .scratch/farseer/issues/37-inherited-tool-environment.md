@@ -1,6 +1,6 @@
 # 37 inherited tool environment
 
-**Status:** open. The visible half is built; the decision is not made.
+**Status:** resolved 2026-08-29. The decision was already made and unstated; this ticket found that out, stated it, and applied it where it had been missed.
 **Found:** 2026-08-29, probing what `36 tool grant enforcement` left open - what it would mean to enforce a `kind = "tool"` roster entry farseer cannot itself serve.
 
 ## The finding
@@ -69,3 +69,44 @@ That makes "the roster is the grant" true rather than aspirational - but only as
 ## Not decided here
 
 Whether the deny list gets a second look. `12` settled that it prevents mistakes rather than attacks, and nothing found here changes that.
+
+---
+
+## Resolution, 2026-08-29: there was no decision to make
+
+Question 1 asked whether farseer should deny the inherited set at all.
+Reading the code answered it: **farseer already does, everywhere a flag exists.**
+
+| runner | denial | since |
+| --- | --- | --- |
+| claude-code | `--strict-mcp-config` | `10 runner inventory` |
+| pi, omp | `--no-extensions`, `--no-skills` | `32 harness capability floor` |
+| opencode-acp | `--pure` | **this ticket** |
+| goose-acp | none available - `--with-builtin` only adds | - |
+| codex-app-server | none - `config.mcp_servers` merges | - |
+
+Three runners were already isolated and nobody had written down that this was the rule.
+The two ACP runners and the app-server were simply newer than the habit, and `opencode --pure` was a flag nobody had looked for.
+
+**So this was an inconsistency, not a design question**, and the ticket's framing was wrong: it asked whether to adopt a policy that had been in force since `10`.
+That is the second time on this map that a rule the code followed was never stated - `36 tool grant enforcement` found the same with the tool level's default.
+
+Proven live: an `opencode-acp` manager launched with `--pure` answered `JUNIPER`, so denial costs nothing on the runner that offers it.
+
+### What stays open, and it is now precise
+
+**`goose-acp` and `codex-app-server` inherit, and farseer cannot stop them.**
+
+That is not a gap to close by trying harder; it is a property of those two binaries, probed rather than assumed:
+
+- `goose acp --help` offers `--with-builtin` and nothing that subtracts.
+- `codex app-server` starts `node_repl` and `codex_apps` from the operator's config before farseer names a server, and keeps them when farseer adds one.
+
+What farseer does instead is what it does everywhere else it cannot guarantee something: **record it.** Every tool server a session loads is in the record, farseer's and the operator's alike, so a run on those two says what it reached even though it could not choose it.
+
+The remaining choice - refuse a cell that asks for isolation on a runner that cannot give it - is deliberately **not** taken. There is no field asking for it yet, and inventing one to refuse would be a policy nobody requested. When a cell needs guaranteed isolation, `36`'s pattern is sitting there: a declared field, a per-runner table, and a refusal naming the runner.
+
+### Correction to this ticket's own framing
+
+The finding as written said "farseer's grants are additive rather than exclusive" as though it were true everywhere.
+It is true of `goose-acp` and `codex-app-server`, and false of the other four.

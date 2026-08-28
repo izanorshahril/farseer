@@ -1250,6 +1250,25 @@ pub const ACP_RUNNERS: [(&str, &str, &str); 2] = [
     ("opencode-acp", "opencode", "acp"),
 ];
 
+/// Flags that stop a runner loading the operator's own plugins and extensions.
+///
+/// `37 inherited tool environment` found farseer was already doing this
+/// everywhere a flag existed and had simply never checked the newest runners:
+/// Claude Code gets `--strict-mcp-config`, pi and omp get `--no-extensions` and
+/// `--no-skills`. It was a rule the code followed and nothing stated.
+///
+/// So this is the rule stated, and `opencode --pure` joining it - not a new
+/// policy. **The two absences are the finding**: goose offers no such flag
+/// (`--with-builtin` only adds), and `codex app-server` merges what farseer
+/// sends with what the operator configured. Those two inherit, farseer records
+/// exactly what they loaded, and `37` owns what to do about it.
+fn deny_discovered_tools(runner: &str) -> &'static [&'static str] {
+    match runner {
+        "opencode-acp" => &["--pure"],
+        _ => &[],
+    }
+}
+
 /// `contract.runner` selects one of the four verified native stream-json dialects: Claude Code, Codex, cursor-agent, or Goose.
 /// The ACP runner from `20 worker control channel` remains unimplemented, so anything else is `UnsupportedRunner`.
 ///
@@ -1412,9 +1431,11 @@ pub fn start_worker(
             Some((_, exe_name, subcommand)) => {
                 let exe = resolve(exe_name)
                     .ok_or_else(|| ManagerError::ExecutableNotFound((*exe_name).into()))?;
+                let mut args = vec![(*subcommand).to_string()];
+                args.extend(deny_discovered_tools(other).iter().map(|f| f.to_string()));
                 StartedWorker::spawn(
                     &exe,
-                    &[(*subcommand).to_string()],
+                    &args,
                     cwd,
                     &options.runner_env,
                     thresholds,
@@ -2174,6 +2195,19 @@ mod tests {
             !matches!(result, Err(ManagerError::UnsupportedRunner(_))),
             "codex must dispatch to a process, not fall through to the unsupported-runner error: {result:?}"
         );
+    }
+
+    /// `37 inherited tool environment`. The rule farseer was already following
+    /// without saying so, now said - and the two runners it cannot follow it on.
+    #[test]
+    fn a_runner_that_can_deny_the_operators_own_plugins_is_told_to() {
+        assert_eq!(deny_discovered_tools("opencode-acp"), ["--pure"]);
+        // Neither has a flag for it. goose's `--with-builtin` only adds, and
+        // `codex app-server` merges farseer's `config.mcp_servers` with the
+        // operator's rather than replacing them - both probed 2026-08-29. An
+        // empty list here is a measured absence, not a runner nobody looked at.
+        assert!(deny_discovered_tools("goose-acp").is_empty());
+        assert!(deny_discovered_tools("codex-app-server").is_empty());
     }
 
     #[test]
