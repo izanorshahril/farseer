@@ -295,14 +295,14 @@ impl FarseerMcp {
         if args.goal.trim().is_empty() {
             return Err(McpError::invalid_params("goal must not be empty", None));
         }
-        let (runner, roster_budget, skill_names, tool_level) = manager
+        let (candidates, roster_budget, skill_names, tool_level) = manager
             .cell
             .roster
             .iter()
             .find_map(|entry| match entry {
                 RosterEntry::Worker {
                     name,
-                    runner,
+                    runners,
                     max_budget,
                     skills,
                     tools,
@@ -310,7 +310,7 @@ impl FarseerMcp {
                     // The roster entry's own skills and tool level, not the
                     // manager's: `22 cell addressing` made the roster the grant,
                     // and a reviewer has no business holding what a coder needs.
-                    Some((runner.clone(), *max_budget, skills.clone(), *tools))
+                    Some((runners.clone(), *max_budget, skills.clone(), *tools))
                 }
                 _ => None,
             })
@@ -323,6 +323,41 @@ impl FarseerMcp {
                     None,
                 )
             })?;
+        // `26 routing policy`: the author's order, first candidate whose window
+        // is not spent. Every runner farseer cannot see a window for reports
+        // `unknown`, which behaves as **available until proven otherwise** -
+        // most runners will never report one, so that is the permanent normal
+        // case rather than a shim.
+        let runner = crate::first_available_runner(&self.state, &candidates).ok_or_else(|| {
+            // `26` section 3: `failed` with a reason, not a fifth outcome. The
+            // work was not wrong and a retry is right, just not yet - which is
+            // also why `11 analytics questions` must exclude this from rework.
+            McpError::internal_error(
+                format!(
+                    "runner_exhausted: every runner for worker `{}` has a spent window ({candidates:?})",
+                    args.worker
+                ),
+                None,
+            )
+        })?;
+        if candidates.first() != Some(&runner) {
+            // `26` section 4: **a reorder emits an event.** Without it,
+            // `11 analytics questions`'s cost-by-runner cannot explain why a
+            // non-preferred runner ran.
+            let _ = self.state.store().append(&NewEvent::new(
+                manager.cell.cell_id.clone(),
+                manager.contract.run_id,
+                EventKind::new(EventKind::STATUS_CHANGED),
+                Actor::System,
+                now_ms(),
+                serde_json::json!({
+                    "routing": "runner_exhausted",
+                    "worker": args.worker,
+                    "preferred": candidates.first(),
+                    "chosen": runner,
+                }),
+            ));
+        }
         // Resolved here, where the roster entry is in hand: a worker that names
         // a skill farseer cannot find is a refusal at delegation time rather
         // than a worse answer later for a reason nobody can see.

@@ -48,6 +48,28 @@ pub struct Manager {
     pub tools: ToolLevel,
 }
 
+/// Accept either `runner = "pi"` or `runners = ["pi", "omp"]`.
+///
+/// The singular spelling is not a legacy alias to be removed: `26 routing
+/// policy` found a one-item list is the normal case, and making every cell
+/// write brackets to say the ordinary thing would be a tax on the common path
+/// for the benefit of the rare one.
+fn one_or_many<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum OneOrMany {
+        One(String),
+        Many(Vec<String>),
+    }
+    Ok(match OneOrMany::deserialize(deserializer)? {
+        OneOrMany::One(one) => vec![one],
+        OneOrMany::Many(many) => many,
+    })
+}
+
 /// What a cell may use.
 ///
 /// `22 cell addressing` widened this from "workers and tools" to "workers, tools and callable
@@ -59,7 +81,20 @@ pub enum RosterEntry {
     /// not by whether an LLM is involved.
     Worker {
         name: String,
-        runner: String,
+        /// The runners this worker may run on, best first.
+        ///
+        /// `26 routing policy`: **the author asserts equivalence and farseer
+        /// never infers it.** `10 runner inventory` measured that a full-shell
+        /// coding agent and an `ffmpeg` adapter that renders one file are both
+        /// runners with nothing in common, so a runtime cannot know two are
+        /// substitutes. Within a worker kind an author can know, and saying so
+        /// here is that claim.
+        ///
+        /// **A one-item list is a pin**, which is the normal case, and
+        /// `runner = "pi"` still parses as one - so nothing changes for a cell
+        /// that never wanted this and `08 generalization test` stays shut.
+        #[serde(alias = "runner", deserialize_with = "one_or_many")]
+        runners: Vec<String>,
         /// `23 prototype loose ends` makes this the per-callee cap, narrowed again by the caller's remaining task budget.
         #[serde(default)]
         max_budget: Budget,

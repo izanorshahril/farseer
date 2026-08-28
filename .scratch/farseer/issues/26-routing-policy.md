@@ -148,3 +148,44 @@ That is true of `codex exec`. It is **false of `codex app-server`**, which pushe
 So the choice this ticket framed - one observable runner against two blind ones - is now two observable runners against one blind one, and the observable ones **do not report the same shape**. "Level down" gets more expensive as more runners can see; "exploit it" was priced against one exception and now has two.
 
 Neither design is invalidated. The number they were being weighed against changed, and this ticket should be re-read before it is wired rather than wired as written.
+
+---
+
+## Built 2026-08-28, sections 1 to 3
+
+Section 4 is **not** built, and is named at the foot of this note rather than left to be discovered.
+
+### The roster entry holds the list, and one item is still a pin
+
+`runner = "pi"` and `runners = ["pi", "omp"]` are the same field, deserialised through a string-or-sequence helper.
+That is not a legacy alias to be removed later: this ticket found a one-item list is the normal case, and making every cell write brackets to say the ordinary thing would tax the common path for the benefit of the rare one.
+
+`cells/zero.toml`'s `reviewer` now names `["pi", "omp"]`, which is the author asserting equivalence **for that kind of work** - the claim `10 runner inventory` says a runtime cannot make.
+
+### The router, and `unknown` doing the work
+
+`first_available_runner` takes the author's order and returns the first candidate whose account has no spent window.
+Exhaustion is read from the record - `27 quota accounting`'s on-change window log - and expanded through `runners_on`, so **an account being spent takes every runner on it out of the running at once**, which is the whole reason `27` keyed by account rather than by runner.
+
+A runner farseer has never seen a window for is not in the exhausted set, so it stays eligible.
+That is section 2's `unknown` behaving as available until proven otherwise, and it is the common case rather than a gap: most runners will never report a window.
+
+### `runner_exhausted`, and the reorder that explains itself
+
+Every candidate spent is `runner_exhausted` on the delegation, not a fifth outcome.
+
+When a non-preferred runner is chosen, farseer appends a `status_changed` event with `actor: system` naming the preferred and the chosen.
+Section 4 asked for that in the budget case; it is needed in this case for the same reason, and the reason is the load-bearing part - **if the record does not say why a non-preferred runner ran, `11 analytics questions`'s cost-by-runner numbers cannot be explained.**
+
+### Not built: section 4, the budget-aware reorder
+
+The price table this ticket put "with the runner configuration" **does not exist yet**.
+`crates/farseer-core/src/runners.rs` says so in a comment on `RunnerEntry::account`: absent rather than stubbed, per `13 harness build kit`.
+
+So farseer routes on availability today and not on money.
+The cliff this ticket identified - a subscription costs nothing marginal until the window turns over, then only a pay-per-token key continues - is real and unaddressed.
+Whoever builds it inherits section 4's three constraints unchanged, and the first is the one to hold on to: **budget pressure may only reorder within the author's list**, never introduce a runner the author did not name.
+
+### Also still true
+
+`11 analytics questions` must exclude `runner_exhausted` from rework. Nothing enforces that yet, and rework is not computed from this reason today.

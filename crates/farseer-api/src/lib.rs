@@ -1652,6 +1652,36 @@ fn skill_paths(state: &AppState, runner: &str, names: &[String]) -> ApiResult<Ve
         .collect()
 }
 
+/// The first runner in the author's order whose subscription window is not spent.
+///
+/// `26 routing policy` put the ordered list on the roster entry because **the
+/// author asserts equivalence and farseer never infers it**. This is the other
+/// half: farseer picks, and it picks by the one signal it gets for free.
+///
+/// Three states, per `26` section 2, and the third is the common one - a runner
+/// farseer has never seen a window for is `unknown`, which behaves as
+/// **available until proven otherwise**. The router tries, and a failure is what
+/// teaches it. Most runners will never report a window, so `unknown` is
+/// permanent rather than a gap to close.
+///
+/// `None` means every candidate is spent, which the caller turns into `26`
+/// section 3's `runner_exhausted` rather than a fifth outcome.
+fn first_available_runner(state: &AppState, candidates: &[String]) -> Option<String> {
+    let config = state.runner_config();
+    let exhausted: std::collections::HashSet<String> = state
+        .store()
+        .windows(|account| config.runners_on(account))
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|row| row.status == farseer_core::Availability::ExhaustedUntil { resets_at: 0 }.as_str())
+        .flat_map(|row| config.runners_on(&row.account))
+        .collect();
+    candidates
+        .iter()
+        .find(|runner| !exhausted.contains(*runner))
+        .cloned()
+}
+
 /// Refuse a tool level farseer cannot actually impose on this runner.
 ///
 /// The third application of one rule, and the one `36 tool grant enforcement`
@@ -4226,6 +4256,72 @@ runner = "{runner}"
             env.get("FARSEER_ENDPOINT").map(String::as_str),
             Some("http://127.0.0.1:8787")
         );
+    }
+
+    /// `26 routing policy` in three states. The author's order is honoured, an
+    /// account with a spent window takes every runner on it out of the running,
+    /// and a runner farseer has never seen a window for stays eligible.
+    #[test]
+    fn routing_skips_a_spent_window_and_never_a_merely_unseen_one() {
+        let h = harness();
+        let pinned = vec!["pi".to_string()];
+        let pair = vec!["pi".to_string(), "omp".to_string()];
+
+        // Nothing observed yet. `unknown` behaves as available until proven
+        // otherwise, which `26` calls permanent rather than a gap to close.
+        assert_eq!(
+            first_available_runner(&h.state, &pair).as_deref(),
+            Some("pi")
+        );
+
+        let spent = farseer_core::WindowObservation {
+            account: "pi".to_string(),
+            runner: "pi".to_string(),
+            availability: farseer_core::Availability::ExhaustedUntil {
+                resets_at: 1_787_000_000,
+            },
+            rate_limit_type: "five_hour".to_string(),
+            is_using_overage: false,
+            used_percent: None,
+            window_duration_mins: None,
+        };
+        assert!(
+            h.state
+                .store()
+                .observe_window(&CellId::new("zero"), RunId::new(), &spent, 1_000)
+                .expect("the observation lands"),
+            "a first sighting is a transition"
+        );
+
+        // The author's second choice, because the first has nowhere to spend.
+        assert_eq!(
+            first_available_runner(&h.state, &pair).as_deref(),
+            Some("omp")
+        );
+        // And a pin with nowhere to go is `None`, which the delegation path
+        // turns into `runner_exhausted` - `26` section 3, not a fifth outcome.
+        assert_eq!(first_available_runner(&h.state, &pinned), None);
+    }
+
+    /// `runner = "pi"` and `runners = ["pi", "omp"]` are the same field, because
+    /// `26` found a one-item list is the normal case and making every cell write
+    /// brackets would tax the common path for the rare one.
+    #[test]
+    fn a_worker_may_name_one_runner_or_several() {
+        let one: farseer_core::RosterEntry = serde_json::from_value(serde_json::json!({
+            "kind": "worker", "name": "coder", "runner": "pi"
+        }))
+        .expect("singular");
+        let many: farseer_core::RosterEntry = serde_json::from_value(serde_json::json!({
+            "kind": "worker", "name": "coder", "runners": ["pi", "omp"]
+        }))
+        .expect("plural");
+        let names = |entry: &farseer_core::RosterEntry| match entry {
+            farseer_core::RosterEntry::Worker { runners, .. } => runners.clone(),
+            _ => panic!("a worker"),
+        };
+        assert_eq!(names(&one), ["pi"]);
+        assert_eq!(names(&many), ["pi", "omp"]);
     }
 
     /// The sentence that exists because a manager fabricated a delegation.
