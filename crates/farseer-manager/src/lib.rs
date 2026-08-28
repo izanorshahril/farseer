@@ -222,10 +222,9 @@ pub struct RunOptions {
     /// a credential to an extension without putting it on the argv - visible to
     /// every process listing - or in the prompt, where the model would read it.
     pub runner_env: Vec<(String, String)>,
-    /// `(endpoint, env var holding the bearer)` for a runner whose MCP client is
-    /// configured in its handshake - `codex-app-server` today. The token itself
-    /// travels in [`Self::runner_env`], never here.
-    pub mcp: Option<(String, String)>,
+    /// How this run's manager reaches farseer's MCP face, for a runner
+    /// configured in its handshake rather than from a file.
+    pub mcp: Option<McpReach>,
     /// `26 routing policy`'s price table for this run's runner, in USD micros
     /// per million tokens. `None` means farseer prices nothing and a run that
     /// reported no currency stays blank - see [`estimated_cost`].
@@ -287,6 +286,22 @@ pub const ACP_UNATTENDED_MODE: &str = "auto";
 /// become the answer to all three questions and could only express two of them.
 /// `29 harness protocol` added the third case and the omission became a bug -
 /// twice, in the same shape.
+/// farseer's MCP endpoint, and how this protocol wants the bearer presented.
+///
+/// Two variants because the second field's *meaning* differs, and one tuple
+/// carrying either would be the ambiguity `14 vocabulary lock` exists to refuse:
+/// Codex is handed the **name of an environment variable** it resolves in its
+/// own process, ACP is handed the **secret itself**, because its `HttpHeader` is
+/// a literal value. One is strictly better and neither is farseer's choice.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum McpReach {
+    /// `codex-app-server`: the token travels in [`RunOptions::runner_env`] and
+    /// only its variable name is in the frame.
+    BearerFromEnv { url: String, var: String },
+    /// ACP: the token is in the frame, on a pipe to a child farseer spawned.
+    BearerInline { url: String, bearer: String },
+}
+
 #[derive(Debug, Clone, Copy)]
 pub enum Channel {
     /// Goal on argv, EOF at spawn, ends at end of stream.
@@ -392,10 +407,16 @@ pub struct StartedWorker {
     /// Manager identity and roster, for the protocols that carry it in a frame
     /// rather than on the argv. See [`RunOptions::append_system_prompt`].
     identity: Option<String>,
-    /// The MCP endpoint and bearer-holding env var this run's manager may
-    /// delegate through, for a protocol that takes it in the handshake rather
-    /// than on the argv. `31 manager delegation reach`, third transport.
-    mcp: Option<(String, String)>,
+    /// MCP servers the agent was handed and could not reach, `(name, error)`.
+    ///
+    /// `31 manager delegation reach`: a manager told it may delegate, over a
+    /// channel that did not open, is a manager that will fabricate one. Only the
+    /// agent knows, only at handshake time, so it is carried here to the layer
+    /// that owns the record rather than assumed either way.
+    failed_mcp: Vec<(String, String)>,
+    /// How this run's manager reaches farseer's MCP face, if its protocol takes
+    /// that in the handshake. `31 manager delegation reach`.
+    mcp: Option<McpReach>,
 }
 
 /// A cloneable handle that writes a steer message into a run's live process,
@@ -491,6 +512,7 @@ impl StartedWorker {
             pinned_model: None,
             pinned_effort: None,
             identity: None,
+            failed_mcp: Vec::new(),
             mcp: None,
         })
     }
@@ -587,9 +609,23 @@ impl StartedWorker {
                     // decides autonomy before the run, and nobody is watching a
                     // prompt farseer did not expect.
                     Some(ACP_UNATTENDED_MODE),
+                    match self.mcp.as_ref() {
+                        Some(McpReach::BearerInline { url, bearer }) => {
+                            Some((url.as_str(), bearer.as_str()))
+                        }
+                        // ACP has no variable indirection to hand a name to, so
+                        // a reach spelled the other way is not one this protocol
+                        // can use. Nothing here invents the missing spelling.
+                        _ => None,
+                    },
                     &mut next_id,
                     &mut discard,
                 )?;
+                // `31 manager delegation reach`: a manager told it may delegate
+                // and given a channel that did not open is a manager that will
+                // fabricate one. The agent's own report is the only thing that
+                // knows, so it goes to the record rather than being assumed.
+                self.failed_mcp = opened.failed_mcp_servers.clone();
                 let goal_id = next_id;
                 // Bumped before the goal is sent, so a steer arriving the
                 // instant the handle becomes reachable cannot reuse this id.
@@ -629,9 +665,12 @@ impl StartedWorker {
                     // worktree is still the guarantee.
                     CODEX_SANDBOX,
                     identity.as_deref(),
-                    self.mcp
-                        .as_ref()
-                        .map(|(url, var)| (url.as_str(), var.as_str())),
+                    match self.mcp.as_ref() {
+                        Some(McpReach::BearerFromEnv { url, var }) => {
+                            Some((url.as_str(), var.as_str()))
+                        }
+                        _ => None,
+                    },
                     &mut ids,
                     &mut discard,
                 )?;
@@ -674,6 +713,19 @@ impl StartedWorker {
         // mid-run does not move it.
         started_ts: i64,
     ) -> Result<RunReport, ManagerError> {
+        // Recorded first, because it changes what every later event means: a
+        // manager whose delegation channel never opened did the work itself.
+        // `31 manager delegation reach` - the record says what actually ran.
+        for (name, error) in std::mem::take(&mut self.failed_mcp) {
+            let _ = sink.append(&NewEvent::new(
+                contract.cell_id.clone(),
+                contract.run_id,
+                EventKind::new(EventKind::STATUS_CHANGED),
+                Actor::System,
+                now_ms(),
+                serde_json::json!({ "mcp_server": name, "reachable": false, "error": error }),
+            ));
+        }
         let mut report = None;
         let mut output = None;
         // Fragments of an answer still being written. Emptied into one

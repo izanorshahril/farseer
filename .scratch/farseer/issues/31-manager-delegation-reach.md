@@ -196,3 +196,50 @@ This ticket called the env-var route **strictly better** than the MCP shape wher
 Half of it is already better - the *transport* bearer is an env var Codex resolves in its own process, so it is not in the frame or the record. What remains is the tool's own `manager_token` argument.
 
 **The fix is to derive manager identity from the bearer the guard already validated**, making both arguments optional. That would remove the credential from Claude Code's prompt as well, which is the older instance of the same problem. Not done here.
+
+---
+
+## ACP has a channel after all, 2026-08-28
+
+### The assumption that hid it
+
+`29 harness protocol` found ACP's `fs/*` and `terminal/*` are served **by the client**, incompatible with a runner-owned worktree, so farseer declines both.
+That made it easy to conclude ACP had nothing to offer a manager, and this ticket closed saying "whether it can serve tools instead is unprobed".
+
+**It does not need to serve tools.** `session/new` takes `mcpServers`, which is the opposite arrangement: farseer names an address and the agent dials it. farseer's own comment on that field said it was empty because the MCP face "is reached by the manager's runner-native configuration" - true for Claude Code, and for an ACP runner there is no such configuration, so the field was empty for a reason that did not apply.
+
+### Probed, not read
+
+goose 1.47.0, live:
+
+```
+"agentCapabilities":{"mcpCapabilities":{"http":true,"sse":false}}
+"_meta":{"extensionResults":[{"name":"farseerprobe","success":false,
+  "error":"failed to initialize MCP client: ... error sending request for url (http://127.0.0.1:9/v1/mcp)"}]}
+```
+
+Two facts in one exchange: goose says it speaks HTTP MCP, and goose says **whether it reached what it was given**. The second is the more valuable, and farseer now records it as a `status_changed` event before anything else in the run - a manager whose channel never opened did the work itself, and the record has to say so.
+
+Offered only when `initialize` claims the capability, so an agent that never said it speaks HTTP MCP is not handed an address it may quietly ignore.
+
+### The bearer is inline here, and that split the type
+
+ACP's `HttpHeader` is a literal value, so the token is in the frame. Codex takes the **name** of an environment variable it resolves itself.
+
+One `Option<(String, String)>` carrying either would be exactly the ambiguity `14 vocabulary lock` refuses, so `McpReach` is an enum: `BearerFromEnv { url, var }` and `BearerInline { url, bearer }`. Each protocol matches the spelling it can use and neither invents the other.
+
+### What is built, and what stopped
+
+The channel works. goose connected to farseer's MCP face, found `delegate_to_worker`, and called it. It then failed on the credential:
+
+```
+manager_answered {'text': 'Delegation failed: manager_token does not authorize this manager run.'}
+```
+
+The run id resolved to a live manager; the token did not match. The token is a 64-character hex string that this transport requires the **model** to copy out of its prompt and into a tool argument - and `gpt-5.6-luna` did not copy it exactly. Codex did, on the same prompt, an hour earlier.
+
+**This is the asymmetry noted above arriving as a live failure rather than a principle.** This ticket argued a credential in a prompt is one the model can quote, spend or leak; it can also simply mistype it, and then the delegation fails in a way that reads like an authorization bug.
+
+**The fix is unchanged and now has evidence: derive manager identity from the bearer the guard already validated, and make both arguments optional.** The guard scans `AppState::managers` for the presented token already, so the identity is resolved a few frames earlier and thrown away. That removes the credential from every MCP prompt - Claude Code's included - and makes this transport work without asking a model to be a courier for a secret.
+
+Not built here. It is one change that touches all three MCP transports and deserves its own pass.

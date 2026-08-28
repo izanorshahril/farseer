@@ -838,6 +838,11 @@ fn manager_run_options(
         Reach::PiExtension
     } else if contract.runner == "codex-app-server" {
         Reach::CodexAppServer
+    } else if farseer_manager::ACP_RUNNERS
+        .iter()
+        .any(|(name, _, _)| *name == contract.runner)
+    {
+        Reach::Acp
     } else {
         Reach::None
     };
@@ -852,7 +857,7 @@ fn manager_run_options(
         // Found by running it. The first version of this reused pi's wording and
         // the manager answered `Unable to delegate: manager authorization token
         // unavailable.` - it could see the tools and had nothing to present.
-        Reach::Mcp | Reach::CodexAppServer => format!(
+        Reach::Mcp | Reach::CodexAppServer | Reach::Acp => format!(
             "You are the manager for farseer cell `{}`. Your manager_run_id is `{}` and your \
              manager_token is `{}`. The roster workers available to delegate to are: {}. \
              The cells you may call are: {}. \
@@ -961,11 +966,22 @@ fn manager_run_options(
         // No config file: `Reach::Mcp` writes one because Claude Code reads MCP
         // servers from disk, and a file is a secret with a lifetime to manage.
         // This route has neither.
+        // ACP takes a literal header rather than the name of a variable, so
+        // the bearer is in the frame - a step down from the other two, recorded
+        // in `31 manager delegation reach` rather than smoothed over. The frame
+        // goes down a pipe to a child farseer spawned, and `02 record scope`
+        // scrubs what reaches the log.
+        Reach::Acp => {
+            options.mcp = Some(farseer_manager::McpReach::BearerInline {
+                url: state.mcp_endpoint().expect("reach implies a bound listener"),
+                bearer: manager_token.as_str().to_string(),
+            });
+        }
         Reach::CodexAppServer => {
-            options.mcp = Some((
-                state.mcp_endpoint().expect("reach implies a bound listener"),
-                "FARSEER_MANAGER_TOKEN".to_string(),
-            ));
+            options.mcp = Some(farseer_manager::McpReach::BearerFromEnv {
+                url: state.mcp_endpoint().expect("reach implies a bound listener"),
+                var: "FARSEER_MANAGER_TOKEN".to_string(),
+            });
             options.runner_env = vec![(
                 "FARSEER_MANAGER_TOKEN".to_string(),
                 manager_token.as_str().to_string(),
@@ -984,6 +1000,15 @@ enum Reach {
     /// farseer's plain-JSON manager face, through an extension registering the
     /// two verbs as ordinary tools. pi and omp.
     PiExtension,
+    /// farseer's MCP face over ACP's own `session/new` `mcpServers`.
+    ///
+    /// `29 harness protocol` found ACP's `fs/*` and `terminal/*` are served **by
+    /// the client** and incompatible with a runner-owned worktree, so farseer
+    /// declines both - which made it easy to conclude ACP had nothing to offer a
+    /// manager. `mcpServers` is a different mechanism: farseer serves no tools,
+    /// it names an address the agent dials itself. goose 1.47.0 advertises
+    /// `mcpCapabilities.http` and reports what it reached.
+    Acp,
     /// farseer's MCP face again, but configured **in the handshake** rather than
     /// in a file on disk: `codex-app-server` takes `config.mcp_servers` on
     /// `thread/start`, and takes the bearer as the *name of an environment
