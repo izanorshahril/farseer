@@ -78,7 +78,7 @@ An external protocol is spoken at a boundary, never shaped into internals.
 ├─ crates/
 │  ├─ farseer-core/    domain model: cells, policy, run state, scrubbing. Pure, no I/O
 │  ├─ farseer-store/   the record: one append-only SQLite log, memory, UI state
-│  ├─ farseer-api/     local HTTP plus SSE on 127.0.0.1, token and loopback guard; nests the MCP face at /v1/mcp
+│  ├─ farseer-api/     local HTTP plus SSE on 127.0.0.1, token and loopback guard; nests the MCP face at /v1/mcp; pushes notifications out
 │  ├─ farseer-runner/  runners: Claude Code, Codex, cursor-agent and goose, PATHEXT resolution, Job-Object spawn, stream-json mapping, worktree lifecycle
 │  ├─ farseer-manager/ runs one sealed contract, captures terminal text, and records what happened
 │  ├─ farseer/         the binary: runtime and CLI in one
@@ -143,10 +143,24 @@ Operator routes require the process-wide bearer; `/v1/mcp` and `/v1/manager/` ad
 A generated manager config contains only the per-run bearer and never discloses the operator token.
 A cross-site `Origin` is refused before the token is even looked at, because [16 local API surface](.scratch/farseer/issues/16-local-api-surface.md) found that a token alone does not stop DNS rebinding - the browser attaches it for the attacker.
 
+### Notifications
+
+Set `FARSEER_NOTIFY_URL` and farseer POSTs to it when a root run answers, finishes, or goes `likely-hung`.
+Unset, the whole plane is off.
+
+```
+set FARSEER_NOTIFY_URL=https://ntfy.sh/some-hard-to-guess-topic
+```
+
+The backend is the URL, so ntfy, Slack, Discord or an operator's own bridge are one code path.
+ntfy is the documented default because it needs no account, no token and no SDK, and its topic is a password - which is why this is an environment variable rather than a line in `runners.toml`.
+Delivery is best-effort and never in the path of a run.
+See [35 notification plane](.scratch/farseer/issues/35-notification-plane.md).
+
 ### What is not built yet
 
-- **Cross-cell delegation and non-Claude manager MCP wiring.** A Claude Code manager can delegate to a `kind = "worker"` roster entry and receive its terminal text in the same turn.
-  `kind = "cell"` calls remain open, and Codex, cursor-agent, and Goose managers still execute their goal directly because no verified live MCP-config path exists for those CLIs.
+- **Delegation reach for ACP and Codex managers.** Claude Code managers delegate over MCP and pi/omp managers over farseer's own extension, both verified live.
+  `goose-acp`, `opencode-acp`, `codex-app-server`, `agy` and `cursor-agent` managers are told their roster and told they cannot reach it, because no channel for the verbs has been probed on those protocols yet.
 - **Pre-spend enforcement for bounded native-runner budgets.** Task-root and per-worker caps narrow and draw down as `23 prototype loose ends` requires, but every bounded dimension fails closed before spawn today.
   Claude Code 2.1.233's `--max-budget-usd` exceeded a one-micro-dollar cap by more than five orders of magnitude before reporting `budget_exhausted`, while the other runners report only after spending.
 - Gated actions.

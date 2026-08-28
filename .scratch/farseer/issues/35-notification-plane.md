@@ -1,6 +1,6 @@
 # 35 notification plane
 
-**Status:** open.
+**Status:** resolved and built 2026-08-28, proven end-to-end against a real listener.
 **Raised:** 2026-08-28, from a gap review of the architecture. Four of its five findings were already built or misdiagnosed; this one was real.
 
 ## The question
@@ -55,3 +55,50 @@ A webhook the operator points at their own bridge satisfies that; a farseer acco
 
 `crates/farseer-manager/src/lib.rs:2443` cites `34 record mojibake`, and **no such ticket exists**.
 The assertion it guards is real and passing. The citation is dangling.
+
+## Resolution
+
+Built as `crates/farseer-api/src/notify.rs`.
+Off unless `FARSEER_NOTIFY_URL` is set, which is the whole configuration surface.
+
+### The backend is a URL, and ntfy is the documented default
+
+Anything that accepts an HTTP POST is a backend - ntfy, Slack, Discord, an operator's own bridge - so there is one code path and a different address, and no Rust trait was needed to get a seam.
+ntfy earns the default on the constraint `00` set rather than on features: **no account, no token, no SDK**, self-hostable, phone app, `Title` and `Priority` are plain headers.
+
+The URL lives in the environment because ntfy's own documentation says a topic *is* the password.
+That makes it a credential, and `31 manager delegation reach` already settled where those live.
+
+### Three triggers, and the third was found by running it
+
+**`run_finished`, root run only.** A manager delegating six workers finishes seven runs; a notifier that reports all seven is one the operator mutes, after which it is worse than absent. `Store::first_run_of_task` is the scoping, and a run farseer cannot resolve is treated as a root - what this guards against is noise, and the worse failure is silence.
+
+**`likely-hung`.** This ticket originally called this the risky trigger. **It is not, and this ticket was wrong about why.** `18 hang detection prior art` keyed the watchdog on progress events, and `05 run state model` overruled it precisely because a model reasoning for twenty minutes emits none and would have been flagged while working perfectly. The watchdog now keys on **any bytes from the adapter**, so `likely-hung` means mechanical silence. That correction is what makes a notifier possible at all.
+
+Read from the live handles rather than the record, because `16 local api surface` keeps liveness **derived, never stored**.
+There is no `status_changed` event to subscribe to and this module does not add one: a stored liveness would be a second truth to keep in step with the first.
+
+**`manager_answered`, root run only - which the two-event plan did not have.**
+An end-to-end run found it. `15 manager conversation` keeps a manager **open** on live stdin after it answers, so `run_finished` does not arrive until somebody cancels or closes the session.
+The plan would have shipped a notifier that stayed silent through exactly the case it was built for: instruct a cell, walk away, come back.
+This is the same moment Claude Code raises its own `Notification` hook on.
+
+### Never in the path of anything
+
+A refused POST, a dead host and a wrong URL all end in a discarded `Result`.
+Nothing retries - the next thing worth saying will be along, and a queue of stale alerts is its own problem.
+
+### Proven
+
+Against a local listener, `pi` on cell zero, 2026-08-28:
+
+```
+NOTIFICATION title='farseer: answered'  priority='3' body='run 01a0481a is waiting for you'
+NOTIFICATION title='farseer: cancelled' priority='4' body='run 01a0481a cancelled'
+```
+
+### Still open
+
+- **Chattiness of `manager_answered`.** One per turn. A manager that answers three times in a task pings three times. Correct today, and the first thing to watch.
+- **A WinRT toast**, which needs a packaged app identity. The trait did not need building for it; the URL already is one.
+- **`34 record mojibake` is cited at `crates/farseer-manager/src/lib.rs:2443` and does not exist.** The assertion it guards is real and passing. The citation dangles.

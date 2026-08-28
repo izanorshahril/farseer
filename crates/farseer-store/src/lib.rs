@@ -447,6 +447,31 @@ impl Store {
             .collect()
     }
 
+    /// The first run of a task, which is the one an operator asked for.
+    ///
+    /// Every run a manager delegates carries its manager's `task_id`, so a task
+    /// is a tree and this is its root. `35 notification plane` is the caller:
+    /// one manager delegating six workers must send **one** notification, not
+    /// seven, and a notifier nobody trusts is one people mute.
+    ///
+    /// Earliest `started_ts`, with the id as the tie-break so two runs started
+    /// inside the same millisecond still give a stable answer rather than
+    /// whichever the planner happened to reach first.
+    pub fn first_run_of_task(&self, task_id: farseer_core::TaskId) -> Result<Option<RunId>> {
+        let row = self
+            .conn
+            .query_row(
+                "SELECT run_id FROM runs WHERE task_id = ?1
+                 ORDER BY started_ts, run_id LIMIT 1",
+                [&task_id.as_bytes()[..]],
+                |row| row.get::<_, Vec<u8>>(0),
+            )
+            .optional()?;
+        Ok(row
+            .and_then(|bytes| <[u8; 16]>::try_from(bytes.as_slice()).ok())
+            .map(RunId::from_bytes))
+    }
+
     pub fn run(&self, run_id: RunId) -> Result<Option<RunRow>> {
         let row = self
             .conn

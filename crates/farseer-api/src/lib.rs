@@ -43,6 +43,7 @@ use farseer_runner::spawn::CancelToken;
 use farseer_store::{RunRow, ScanFilter, Store, StoreError, UI_STATE_CAP_BYTES};
 
 mod mcp;
+mod notify;
 pub mod security;
 
 pub use security::{RuntimeToken, runtime_file_path, write_runtime_file};
@@ -413,6 +414,9 @@ pub async fn serve(state: Arc<AppState>, port: u16) -> std::io::Result<()> {
     let bound = listener.local_addr()?.port();
     state.set_mcp_endpoint(bound);
     write_runtime_file(&runtime_file_path(), bound, &state.token)?;
+    // `35 notification plane`: off unless the operator set a URL, and never in
+    // the path of anything - a failed notification must not fail a run.
+    notify::spawn(Arc::clone(&state));
     axum::serve(listener, router(state)).await
 }
 
