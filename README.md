@@ -97,6 +97,7 @@ An external protocol is spoken at a boundary, never shaped into internals.
 ├─ runners.toml        machine-wide runner facts: which account each signs in with
 ├─ BRIEF.md            landscape research, Windows failure catalogue, operator questions
 ├─ ARCHITECTURE.md     the cell model this map decided on
+├─ HARNESS.md          what eight harnesses taught farseer, written as the contract a farseer-native one would meet
 ├─ AGENTS.md           conventions for agents working here (CLAUDE.md points at it)
 └─ .scratch/farseer/
    ├─ map.md           the decision route: destination, decisions, fog, out of scope
