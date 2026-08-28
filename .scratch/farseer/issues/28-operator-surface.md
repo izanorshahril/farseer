@@ -415,3 +415,29 @@ The meta strip should therefore grow **`used` / `size`**, and `size` is the fiel
 
 **And "thinking level" was unrequested, not unavailable.**
 This ticket recorded that neither runner reports one. Codex's `app-server` accepts a per-turn reasoning `effort` of `none | minimal | low | medium | high | xhigh`; `codex exec --json`, which farseer drives, does not.
+
+## Usage metrics and step breakdowns, 2026-08-29
+
+Two references the operator named - Kilo Code's usage panel and DeepSeek Harness's trajectory view - read for what farseer could actually adopt, and one of them mostly could not be.
+
+### What was taken
+
+**A meter, from DeepSeek's duration capsules.** Its trajectory view renders every step as a bar spanning start to end, so "a 3-minute bash and a 0.2s read are no longer the same dot". farseer's feed had exactly that defect: every row the same height, so nothing stood out. The record already knew - `tool_call_started` and `tool_result` both carry a `ts` - and nothing was subtracting them. Log-scaled, because the interesting range runs from milliseconds to minutes and a linear bar renders everything under ten seconds as a dot.
+
+**A meter for a provider-stated percentage**, from Kilo's context bar. Rendered as three named bands rather than a gradient, because an operator reads position and three states they can name beat a hue they have to interpret.
+
+### What was refused, and why the refusal is the design
+
+Kilo breaks tokens into **input, output, cache reads and cache writes**. farseer cannot: `10 runner inventory` and `32 harness capability floor` both measured that the runners here report a **total** and no split. Rendering four segments would mean inventing three of them.
+
+Kilo's context bar also has a **reserved** segment. farseer has `used` and `size` from `usage_updated` and nothing that says what is reserved.
+
+And the one that matters most: **`27 quota accounting` refuses a bar built from farseer's own spend**, because that spend is a lower bound on a window drained by sessions farseer cannot see - most wrong exactly near exhaustion, when an operator would trust it most. A bar reads as a measurement whatever the caption says, so the rule is now enforced by the component: `Meter` takes a percentage and nothing else, and a window whose runner states none renders **no bar at all**.
+
+### A bug found by measuring rather than looking
+
+The first capsule put the bar and its label in one flex row. Flexbox then shrank the bar to make room for the label, and the wider label belongs to the longer duration - so a **142.7s step drew a shorter bar than an 8.4s one**, exactly inverting what the capsule is for.
+
+It was invisible in a screenshot and obvious in `getBoundingClientRect`: 46% rendered at 42.3px, 76% at 57.9px, 93% at 43.8px. Fixed with a fixed-width track, and now monotonic: 25.8px, 42.5px, 52.1px.
+
+**A visual element whose whole job is proportion has to be checked as a number.**

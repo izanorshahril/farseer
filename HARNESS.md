@@ -98,11 +98,35 @@ Absent stays absent. Zero means zero.
 ## 6. Skills, extensions and discovery are explicit
 
 `32` found **every harness discovering skills from the operator's home directory**, so a run reached whatever happened to be installed on the machine.
-That makes a run unreproducible for a reason nobody can see, and farseer now denies discovery on every runner and passes only what a cell names.
+That makes a run unreproducible for a reason nobody can see, and farseer denies discovery **on every runner that offers a flag for it** and passes only what a cell names.
+
+That qualifier was added on 2026-08-29 and is the honest version: `37 inherited tool environment` found two runners with no such flag at all, so "farseer denies discovery" was true of four runners and stated as though it were true of six.
 
 **Requirement.** Discovery is off by default.
 Skills, extensions and rules load **by path**, repeatably, from arguments only.
 A harness that cannot load one by path says so in the capability query, so the refusal happens before the run rather than in the answer.
+
+## 6a. Who can actually take a skill, and who can take a tool list
+
+Probed 2026-08-29, by reading each binary's own flags and by launching it. Two capabilities that sound like one:
+
+| runner | load a named skill | deny skill discovery | tool allowlist | deny plugin/MCP discovery |
+| --- | --- | --- | --- | --- |
+| **pi** 0.84.3 | `--skill <path>`, repeatable | `--no-skills` | `--tools` | `--no-extensions` |
+| **omp** 18.0.4 | **no** - `--skills` is a glob *filter* over what it discovered | `--no-skills` | `--tools` | `--no-extensions` |
+| **claude-code** | not probed - the operator drives it interactively | - | - | `--strict-mcp-config` |
+| **codex-app-server** | no | no | no | **no** - `config.mcp_servers` merges |
+| **goose-acp** 1.47.0 | no | no | no | **no** - `--with-builtin` only adds |
+| **opencode-acp** 1.18.22 | no | no | no | `--pure` |
+| **agy** 1.1.13 | no | `--disable-slash-commands` | no | no |
+
+Read the columns rather than the rows, because they do not agree:
+
+- **Only pi can be handed a skill directory.** Every other runner discovers skills or does without. omp is the instructive case: it *has* skills, streams them as `available_commands_update`, and offers no argv that loads a specific one - so a filter over discovery is not a loader, and with discovery denied there is nothing left to filter.
+- **Denial and loading are separate capabilities and separate flags.** agy can deny (`--disable-slash-commands`) and cannot load; opencode can deny plugins (`--pure`) and cannot deny skills. A design that treats "controls its skills" as one bit gets four of these seven wrong.
+- **Two runners cannot be isolated at all.** goose and `codex app-server` load the operator's own extensions and MCP servers before the client speaks, and keep them when it adds more. A `goose acp` session handed an empty server list still loaded `developer`, `skills`, `scheduler`, `summon` and `Extension Manager`.
+
+**Requirement.** Loading by path and denying discovery are two capabilities, declared separately in the capability query, and a harness that offers one without the other says which. The orchestrator refuses in front of a person rather than silently dropping a declaration - which is what farseer does today, per `32 harness capability floor` and `36 tool grant enforcement`.
 
 ## 7. Nothing waits for a person unless asked
 

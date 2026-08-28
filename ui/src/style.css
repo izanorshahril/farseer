@@ -556,3 +556,57 @@ code {
   margin-left: 2px;
   opacity: 0.7;
 }
+
+/* `27 quota accounting`: a meter is only ever a number the provider stated.
+   Farseer's own spend is a lower bound and never gets one - see `Meter`. */
+.meter {
+  height: 6px;
+  border-radius: 3px;
+  background: var(--line, rgba(255, 255, 255, 0.09));
+  overflow: hidden;
+  margin: 6px 0 2px;
+}
+.meter-fill {
+  display: block;
+  height: 100%;
+  border-radius: 3px;
+  transition: width 240ms ease;
+}
+.meter-fill.ok { background: var(--ok, #3fb950); }
+.meter-fill.warn { background: var(--warn, #d29922); }
+.meter-fill.bad { background: var(--bad, #f85149); }
+
+/* A step's duration, so a three-minute bash and a 200ms read stop looking
+   alike. Log-scaled - see `Capsule`. */
+.capsule {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-left: auto;
+  flex: none;
+}
+/* A fixed track, so the bar's width means duration and nothing else. Without
+   it flexbox shrinks the bar to make room for the label, and a 142.7s step
+   draws *shorter* than an 8.4s one - measured, not imagined. */
+.capsule-track {
+  width: 56px;
+  flex: none;
+  display: block;
+}
+.capsule-bar {
+  display: block;
+  height: 4px;
+  min-width: 3px;
+  border-radius: 2px;
+  opacity: 0.75;
+}
+.capsule-bar.ok { background: var(--ok); }
+.capsule-bar.warn { background: var(--warn); }
+.capsule-bar.bad { background: var(--bad); }
+/* Right-aligned in its own column so the bars all start at the same x. */
+.capsule-label {
+  white-space: nowrap;
+  width: 42px;
+  flex: none;
+  text-align: right;
+}

@@ -34,6 +34,37 @@ type Window = {
 
 const usd = (micros: number) => `$${(micros / 1_000_000).toFixed(2)}`;
 
+/**
+ * A meter, for a number the provider stated.
+ *
+ * **Only ever rendered from `used_percent`.** `27 quota accounting` refused a
+ * bar built from farseer's own spend, because that spend is a *lower bound* on a
+ * window drained by sessions farseer cannot see - it would be most wrong exactly
+ * near exhaustion, which is when an operator would trust it most. A bar reads as
+ * a measurement whatever the caption says, so the rule is enforced by this
+ * component taking a percentage and nothing else.
+ *
+ * Bands rather than a gradient: an operator reads position, and three states
+ * they can name beat a hue they have to interpret.
+ */
+function Meter({ percent, exhausted }: { percent: number; exhausted: boolean }) {
+  const clamped = Math.max(0, Math.min(100, percent));
+  const band = exhausted || clamped >= 90 ? "bad" : clamped >= 70 ? "warn" : "ok";
+  return (
+    <div
+      className="meter"
+      role="meter"
+      aria-valuenow={clamped}
+      aria-valuemin={0}
+      aria-valuemax={100}
+      aria-label="reported by the provider"
+      title={`${clamped}% used, reported by the provider`}
+    >
+      <span className={`meter-fill ${band}`} style={{ width: `${clamped}%` }} />
+    </div>
+  );
+}
+
 function countdown(resetsAt: number | null, now: number): string {
   if (resetsAt === null) return "no reset reported";
   const seconds = resetsAt - Math.floor(now / 1000);
@@ -97,6 +128,14 @@ export function QuotaWidget({ bridge }: { bridge: Bridge }) {
               </span>
             )}
           </div>
+          {/* Absent for every runner that states nothing, which is most of them.
+              No bar at all is the honest rendering of "nobody said". */}
+          {window.used_percent !== undefined && (
+            <Meter
+              percent={window.used_percent}
+              exhausted={window.status === "exhausted_until"}
+            />
+          )}
           <div className="row dim">
             <span>{window.runners.join(", ")}</span>
             <span className="grow" />
