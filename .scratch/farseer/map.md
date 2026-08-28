@@ -308,6 +308,8 @@ Every correction is recorded on the corrected ticket itself as well as here, so 
 
 - **A number in the record is not a number in the report.** omp's background-job leg was recorded correctly and still under-counted the run, because the record is a log for a person and the report is arithmetic, and nothing carried the figure from one to the other. The fix is a second signal, not a query back over the log: an adapter that knows a leg spent money says so twice, once for each audience.
 
+- `35 notification plane` **opened 2026-08-28** out of an architecture gap review, of which this was the only finding that was not already built or misdiagnosed. Every surface farseer has is pull - one SSE endpoint, live and replay as one call, a canvas on top - so a run that finishes or hangs while nobody is looking reaches nobody. The shape to argue is a subscriber to the record rather than a call site in the manager, which keeps a notifier from inventing a notification the log does not hold. Kept deliberately separate from the gate bar the same review asked for: **telling a person is not asking one for permission**, and `12 autonomy and deny list` already refused the second.
+
 **None reversed a decision.** Each narrowed a promise, hardened a fact, widened a word, or added an enum value.
 
 Two tickets were **split** rather than answered, because a research question and a grilling question bundled into one ticket cannot resolve in one session: `20` from `05`, `21` from `06`.
