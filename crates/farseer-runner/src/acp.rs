@@ -122,6 +122,19 @@ pub fn serves_http_mcp(line: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// Every tool server this session loaded, as `(name, ok, error)` - **farseer's
+/// and the operator's alike**.
+///
+/// `37 inherited tool environment` is why this reports the successes too. A
+/// `goose acp` session with an empty `mcpServers` still loaded five extensions
+/// of the operator's own - `developer`, `skills`, `scheduler`, `summon`,
+/// `Extension Manager` - before farseer said anything at all. That is `32
+/// harness capability floor`'s skills finding in a second place: **a run reaches
+/// whatever happened to be installed on the machine**, and the record could not
+/// say what.
+///
+/// It still cannot say *whether it should have*. This only makes it visible.
+///
 /// What the agent says happened when it tried to connect to the servers it was
 /// given, as `(name, error)` pairs for the ones that failed.
 ///
@@ -138,6 +151,34 @@ pub fn serves_http_mcp(line: &str) -> bool {
 /// limitation of the evidence rather than of the channel, and it is why this
 /// returns failures rather than a verdict: farseer records what an agent said
 /// and never a conclusion it did not.
+pub fn loaded_mcp_servers(line: &str) -> Vec<(String, bool, String)> {
+    serde_json::from_str::<Value>(line)
+        .ok()
+        .and_then(|v| {
+            v.pointer("/result/_meta/extensionResults")
+                .and_then(Value::as_array)
+                .map(|results| {
+                    results
+                        .iter()
+                        .map(|r| {
+                            (
+                                r.get("name")
+                                    .and_then(Value::as_str)
+                                    .unwrap_or_default()
+                                    .to_string(),
+                                r.get("success").and_then(Value::as_bool).unwrap_or(false),
+                                r.get("error")
+                                    .and_then(Value::as_str)
+                                    .unwrap_or_default()
+                                    .to_string(),
+                            )
+                        })
+                        .collect()
+                })
+        })
+        .unwrap_or_default()
+}
+
 pub fn failed_mcp_servers(line: &str) -> Vec<(String, String)> {
     serde_json::from_str::<Value>(line)
         .ok()
@@ -223,6 +264,9 @@ pub struct SessionOpened {
     /// MCP servers the agent was given and could not reach, `(name, error)`.
     /// See [`failed_mcp_servers`].
     pub failed_mcp_servers: Vec<(String, String)>,
+    /// Every tool server the session loaded, farseer's and the operator's
+    /// alike. See [`loaded_mcp_servers`] and `37 inherited tool environment`.
+    pub loaded_mcp_servers: Vec<(String, bool, String)>,
     /// The agent's own settings, as `id -> currentValue`.
     ///
     /// `goose acp` returns a `configOptions` array on `session/new` naming its
@@ -285,6 +329,7 @@ pub fn session_opened(line: &str) -> Option<SessionOpened> {
     Some(SessionOpened {
         session_id,
         failed_mcp_servers: Vec::new(),
+        loaded_mcp_servers: Vec::new(),
         current_mode: modes
             .and_then(|m| m.get("currentModeId"))
             .and_then(Value::as_str)
@@ -504,6 +549,26 @@ mod tests {
         );
         // An agent that reports nothing is not accused of anything.
         assert!(failed_mcp_servers(r#"{"result":{"sessionId":"s"}}"#).is_empty());
+    }
+
+    /// `37 inherited tool environment`, on the line that raised it.
+    ///
+    /// Verbatim from a `goose acp` session farseer gave **no** servers at all:
+    /// five of the operator's own loaded anyway. The record could not say what a
+    /// run reached until this, which is `32 harness capability floor`'s skills
+    /// finding in a second place.
+    #[test]
+    fn a_session_reports_the_operators_own_tool_servers_not_only_farseers() {
+        let answer = r#"{"result":{"sessionId":"s","_meta":{"extensionResults":[
+            {"name":"developer","success":true},{"name":"skills","success":true},
+            {"name":"scheduler","success":true},{"name":"summon","success":true},
+            {"name":"Extension Manager","success":true}]}}}"#;
+        let loaded = loaded_mcp_servers(answer);
+        assert_eq!(loaded.len(), 5, "{loaded:?}");
+        assert!(loaded.iter().all(|(_, ok, _)| *ok), "{loaded:?}");
+        // None of them is farseer's, and none of them failed - so the failure
+        // list stays empty and the loaded list is the only thing that knows.
+        assert!(failed_mcp_servers(answer).is_empty());
     }
 
     #[test]

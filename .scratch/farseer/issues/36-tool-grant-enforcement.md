@@ -137,3 +137,9 @@ argv: `--tools read,ls,find,grep`. No `write`, no `bash`, no `powershell`.
 
 - **`tool_grants` remains recorded and unenforced**, which is where this ticket started. It is now correctly *scoped*: it is the cell-capability axis, and enforcing `post` means a tool farseer serves, not a flag it passes. That is a different ticket.
 - **Only pi and omp are in the table.** Every other runner refuses below `shell` rather than guessing, per `10 runner inventory`.
+
+## The remaining half moved to 37, 2026-08-29
+
+This ticket closed leaving `tool_grants` "correctly scoped and unenforced", and said enforcing `post` means a tool farseer serves rather than a flag it passes.
+
+Probing that produced a bigger finding first: **farseer does not control the tool set it would be granting from.** Every runner loads the operator's own MCP servers and extensions, and farseer's additions do not replace them. See `37 inherited tool environment`.

@@ -98,6 +98,7 @@ where
     // that failed to start is a delegation channel that does not exist, and a
     // manager told otherwise would fabricate - which is the whole of `31`.
     opened.failed_mcp_servers = acp::failed_mcp_servers(&answer.to_string());
+    opened.loaded_mcp_servers = acp::loaded_mcp_servers(&answer.to_string());
 
     // Only if the agent said it would take it. `opencode acp` advertises **no
     // modes at all**, and asking it to set one is a JSON-RPC error that kills

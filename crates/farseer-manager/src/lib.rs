@@ -414,6 +414,10 @@ pub struct StartedWorker {
     /// agent knows, only at handshake time, so it is carried here to the layer
     /// that owns the record rather than assumed either way.
     failed_mcp: Vec<(String, String)>,
+    /// Every tool server the session loaded, **farseer's and the operator's
+    /// alike**. `37 inherited tool environment`: a run reaches whatever happened
+    /// to be installed, and until this the record could not say what.
+    loaded_mcp: Vec<(String, bool, String)>,
     /// How this run's manager reaches farseer's MCP face, if its protocol takes
     /// that in the handshake. `31 manager delegation reach`.
     mcp: Option<McpReach>,
@@ -513,6 +517,7 @@ impl StartedWorker {
             pinned_effort: None,
             identity: None,
             failed_mcp: Vec::new(),
+            loaded_mcp: Vec::new(),
             mcp: None,
         })
     }
@@ -626,6 +631,7 @@ impl StartedWorker {
                 // fabricate one. The agent's own report is the only thing that
                 // knows, so it goes to the record rather than being assumed.
                 self.failed_mcp = opened.failed_mcp_servers.clone();
+                self.loaded_mcp = opened.loaded_mcp_servers.clone();
                 let goal_id = next_id;
                 // Bumped before the goal is sent, so a steer arriving the
                 // instant the handle becomes reachable cannot reuse this id.
@@ -716,6 +722,22 @@ impl StartedWorker {
         // Recorded first, because it changes what every later event means: a
         // manager whose delegation channel never opened did the work itself.
         // `31 manager delegation reach` - the record says what actually ran.
+        if !self.loaded_mcp.is_empty() {
+            let servers: Vec<_> = std::mem::take(&mut self.loaded_mcp)
+                .into_iter()
+                .map(|(name, ok, error)| {
+                    serde_json::json!({ "name": name, "ok": ok, "error": error })
+                })
+                .collect();
+            let _ = sink.append(&NewEvent::new(
+                contract.cell_id.clone(),
+                contract.run_id,
+                EventKind::new(EventKind::STATUS_CHANGED),
+                Actor::System,
+                now_ms(),
+                serde_json::json!({ "tool_servers": servers }),
+            ));
+        }
         for (name, error) in std::mem::take(&mut self.failed_mcp) {
             let _ = sink.append(&NewEvent::new(
                 contract.cell_id.clone(),
