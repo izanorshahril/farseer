@@ -2438,9 +2438,18 @@ mod tests {
             eprintln!("{runner}: {:?}", answer.as_bytes());
             // The first character of the cp1252 misreading of any UTF-8
             // punctuation. Cheap, and specific enough not to fire on prose.
+            //
+            // This assertion outlived the ticket that prompted it, on purpose.
+            // A manager's typographic apostrophe *appeared* to reach the record
+            // double-encoded; the record was correct and the corruption was in
+            // the `curl | python` one-liner checking it, because Python decodes
+            // stdin as cp1252 on Windows. The ticket was deleted - **the
+            // verification tool was part of the system under test** - and this
+            // was kept, because the failure it chases is real elsewhere and
+            // invisible when it happens.
             assert!(
                 !answer.contains('\u{e2}'),
-                "{runner} reached the record double-encoded - see `34 record mojibake`: {answer:?}"
+                "{runner} reached the record double-encoded: {answer:?}"
             );
         }
     }

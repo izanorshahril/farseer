@@ -153,3 +153,11 @@ money the report cannot add up.**
 `None + None` stays `None`.
 A runner that reports no spend must not be made to look like it reported zero,
 which is `10 runner inventory`'s observed-never-advertised rule applied to money.
+
+## The `hub` question moved, 2026-08-28
+
+This ticket's open item - "omp's `hub` tool ... a runner having its own parallel one is worth a look before the two collide" - was looked at, and it is not its own question.
+`task` and `hub` are **tools**, and omp takes a `--tools` allowlist.
+Whether an omp manager may spawn its own subagents alongside farseer's workers is therefore a grant somebody makes on purpose, which is `36 tool grant enforcement`.
+
+That look found the larger thing: **farseer records `tool_grants` on every contract and passes them to no runner at all.**
