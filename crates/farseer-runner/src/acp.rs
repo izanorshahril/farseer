@@ -130,6 +130,14 @@ pub fn serves_http_mcp(line: &str) -> bool {
 /// *having* one. A manager whose farseer server failed to start has the roster
 /// in its prompt and no way to reach it - the exact fabrication `31 manager
 /// delegation reach` exists to prevent - so this is not a nicety.
+///
+/// **opencode 1.18.22 reports nothing here**, though it advertises
+/// `mcpCapabilities.http` and `sse` and does connect - proven live, a delegation
+/// relayed from a real worker. So empty means "nothing was said", not "nothing
+/// failed", and the two are not distinguishable on this runner. That is a
+/// limitation of the evidence rather than of the channel, and it is why this
+/// returns failures rather than a verdict: farseer records what an agent said
+/// and never a conclusion it did not.
 pub fn failed_mcp_servers(line: &str) -> Vec<(String, String)> {
     serde_json::from_str::<Value>(line)
         .ok()

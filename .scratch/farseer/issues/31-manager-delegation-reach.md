@@ -271,3 +271,34 @@ Codex copied the same string correctly an hour earlier. **It had been working by
 It asserts the new rule instead: **the transport proved this manager, and a mistyped argument beside it must not undo that.** A caller with no bearer never reaches a tool body at all; the guard tests already cover that.
 
 That is the second time this map has found a test that would have passed on a premise that had quietly expired, after `31`'s own `a_manager_that_cannot_delegate...` asserted against pi once pi could delegate.
+
+---
+
+## opencode closes the set, 2026-08-29
+
+`SAFFRON`, relayed by an `opencode-acp` manager from a real `pi` worker - `01a0494e-ac12`, ok, 1535 micros, 7638 tokens.
+
+No new code. `opencode-acp` is an ACP runner, so it inherited the channel goose's work built, and this was a probe rather than a build.
+
+**Every runner farseer drives as a manager can now delegate**, over four transports:
+
+| transport | runners | bearer |
+| --- | --- | --- |
+| generated MCP config file | claude-code | from the request |
+| `thread/start` `config.mcp_servers` | codex-app-server | env var name in the frame |
+| `session/new` `mcpServers` | goose-acp, opencode-acp | literal header in the frame |
+| farseer's own extension | pi, omp | environment, never in a frame |
+
+None of the four tells a manager its own token.
+
+### What opencode does not say
+
+goose reports `_meta.extensionResults` on `session/new` - whether each server it was handed actually started. **opencode reports nothing at all**, while advertising both `mcpCapabilities.http` and `sse`, and while in fact connecting.
+
+So on this runner an empty failure list means "nothing was said", not "nothing failed", and the two are indistinguishable.
+
+That is a limitation of the evidence and not of the channel, and it is why `failed_mcp_servers` returns what the agent said rather than a verdict farseer computed. The rule holds either way: **farseer records what an agent said and never a conclusion it did not.**
+
+### Also worth noting for `29 harness protocol`
+
+opencode advertises `sse: true` where goose advertises `sse: false`, and opencode's `sessionCapabilities` include `fork` and `resume` where goose's include `delete`. Two ACP agents, one protocol version, different surfaces - the same lesson `32 harness capability floor` learned about pi and omp, arriving in a protocol designed to prevent it.
