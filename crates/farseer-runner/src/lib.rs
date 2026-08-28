@@ -33,6 +33,7 @@ pub mod codex_app_server;
 pub mod cursor_agent;
 pub mod goose;
 pub mod invocation;
+pub mod omp_usage;
 pub mod pi;
 #[cfg(windows)]
 pub mod jsonrpc;

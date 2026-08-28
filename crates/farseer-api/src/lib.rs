@@ -97,6 +97,14 @@ pub struct AppState {
     worker_counts: Mutex<HashMap<CellId, u32>>,
     /// Set exactly once after `serve` binds, including an OS-selected port.
     base_url: OnceLock<String>,
+    /// The last snapshot [`poll_windows`] took, or empty if nothing has polled.
+    ///
+    /// Cached rather than fetched per request for two reasons, and the second is
+    /// the load-bearing one: a live `omp usage` takes seconds, and a handler
+    /// that shells out per request makes an operator's quota view cost a process
+    /// launch. Empty is the honest resting state - farseer reports what it
+    /// observed, and before the first poll it has observed nothing.
+    polled_windows: Mutex<Vec<farseer_core::WindowObservation>>,
 }
 
 /// What `farseer_manager::run_worker`'s `on_started` callback hands back for
@@ -230,6 +238,7 @@ impl AppState {
             cells_dir: cells_dir.into(),
             token,
             thresholds: LivenessThresholds::default(),
+            polled_windows: Mutex::new(Vec::new()),
             runs_dir: runs_dir.into(),
             repo_root: repo_root.into(),
             runner_config: RunnerConfig::default(),
@@ -417,6 +426,7 @@ pub async fn serve(state: Arc<AppState>, port: u16) -> std::io::Result<()> {
     // `35 notification plane`: off unless the operator set a URL, and never in
     // the path of anything - a failed notification must not fail a run.
     notify::spawn(Arc::clone(&state));
+    spawn_window_poll(Arc::clone(&state));
     axum::serve(listener, router(state)).await
 }
 
@@ -1813,18 +1823,84 @@ async fn quota(State(state): State<Arc<AppState>>) -> ApiResult<Json<serde_json:
         let store = state.store();
         store.windows(|account| config.runners_on(account))?
     };
-    let rows: Vec<serde_json::Value> = windows
+    let mut rows: Vec<serde_json::Value> = windows
         .into_iter()
         .map(|window| {
             let runners = config.runners_on(&window.account);
             let mut value = serde_json::to_value(&window).unwrap_or_default();
             if let Some(object) = value.as_object_mut() {
                 object.insert("runners".into(), serde_json::json!(runners));
+                object.insert("source".into(), serde_json::json!("record"));
             }
             value
         })
         .collect();
+    let polled = state
+        .polled_windows
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone();
+    rows.extend(polled.into_iter().map(|window| {
+        let mut value = serde_json::to_value(&window).unwrap_or_default();
+        if let Some(object) = value.as_object_mut() {
+            object.insert("runners".into(), serde_json::json!([window.runner]));
+            object.insert("source".into(), serde_json::json!("omp usage"));
+        }
+        value
+    }));
     Ok(Json(serde_json::json!({ "windows": rows })))
+}
+
+/// Refresh [`AppState::polled_windows`] on a slow loop, for as long as farseer runs.
+///
+/// Started from `serve`, so nothing polls in a test: a unit test that shells out
+/// to a binary on the developer's machine is not testing farseer.
+fn spawn_window_poll(state: Arc<AppState>) {
+    tokio::spawn(async move {
+        // Windows move on the scale of hours. Anything faster would be a
+        // process launch nobody asked for.
+        let mut ticker = tokio::time::interval(std::time::Duration::from_secs(300));
+        loop {
+            ticker.tick().await;
+            let windows = tokio::task::block_in_place(poll_windows);
+            // Only overwrite with something. A failed poll leaves the last good
+            // snapshot in place rather than blanking the operator's view.
+            if !windows.is_empty() {
+                *state
+                    .polled_windows
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner()) = windows;
+            }
+        }
+    });
+}
+
+/// Every window omp is logged into, asked for now rather than remembered.
+///
+/// **A read, never an append.** `27 quota accounting` made the record's windows
+/// a log of *transitions observed by a run*; this is a snapshot belonging to no
+/// run and no cell, so writing it would need a cell id the record has no honest
+/// value for. `27` also made current state **derived**, and a live poll is the
+/// most derived thing there is.
+///
+/// This is farseer's only view of a window while nothing is running - every
+/// other one arrives on a run's own stream, so an idle farseer learned nothing.
+/// It is also the only reading of a Google quota at all, which `33 google quota`
+/// closed as impossible against `agy`; see [`farseer_runner::omp_usage`].
+///
+/// Best-effort: omp absent, not logged in, or slow yields nothing, because a
+/// missing side-channel must not fail the operator's quota view.
+fn poll_windows() -> Vec<farseer_core::WindowObservation> {
+    let Some(exe) = farseer_runner::resolve::resolve("omp") else {
+        return Vec::new();
+    };
+    std::process::Command::new(exe)
+        .args(farseer_runner::omp_usage::build_args())
+        .output()
+        .ok()
+        .filter(|output| output.status.success())
+        .map(|output| farseer_runner::omp_usage::parse(&String::from_utf8_lossy(&output.stdout)))
+        .unwrap_or_default()
 }
 
 macro_rules! analytics_route {
@@ -3974,7 +4050,14 @@ account = "anthropic-max"
         assert_eq!(body["windows"][0]["status"], "exhausted_until");
         assert_eq!(body["windows"][0]["resets_at"], 1_787_000_000i64);
 
-        let wire = body.to_string();
+        // Scoped to the **recorded** window, not the whole payload, and the
+        // distinction is `27 quota accounting`'s own: what farseer refuses is a
+        // percentage **it computed**, because its spend is a lower bound on the
+        // window and would be most wrong exactly at exhaustion. A number the
+        // provider states is an observation and is admitted - `30 codex app
+        // server` settled that, and `33 google quota`'s reversal now brings
+        // omp's through the same door with `source: "omp usage"` on it.
+        let wire = body["windows"][0].to_string();
         for absent in ["percent", "used_", "remaining", "quota_left"] {
             assert!(
                 !wire.contains(absent),
