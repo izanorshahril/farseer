@@ -1470,6 +1470,11 @@ pub struct StreamQuery {
     /// The cursor. Omit for live only.
     pub since: Option<Seq>,
     pub limit: Option<usize>,
+    /// Read the **last** this-many events instead of the first, for a surface
+    /// opening cold with no cursor to resume from. Ignored when `since` is
+    /// given, because a caller holding a cursor is resuming and a tail would
+    /// skip the gap it is resuming across. See `Store::scan_tail`.
+    pub tail: Option<usize>,
 }
 
 impl StreamQuery {
@@ -1496,11 +1501,15 @@ async fn read_events(
     Query(query): Query<StreamQuery>,
 ) -> ApiResult<Json<Vec<farseer_core::Event>>> {
     let store = state.store();
-    let events = store.scan(
-        query.since.unwrap_or(0),
-        query.limit.unwrap_or(500).min(5_000),
-        &query.filter()?,
-    )?;
+    let filter = query.filter()?;
+    let events = match query.tail {
+        Some(tail) if query.since.is_none() => store.scan_tail(tail.min(5_000), &filter)?,
+        _ => store.scan(
+            query.since.unwrap_or(0),
+            query.limit.unwrap_or(500).min(5_000),
+            &filter,
+        )?,
+    };
     Ok(Json(events))
 }
 
@@ -2009,9 +2018,7 @@ async fn skills(State(state): State<Arc<AppState>>) -> ApiResult<Json<serde_json
             .filter(|cell| {
                 cell.manager.skills.contains(&name)
                     || cell.roster.iter().any(|entry| match entry {
-                        farseer_core::RosterEntry::Worker { skills, .. } => {
-                            skills.contains(&name)
-                        }
+                        farseer_core::RosterEntry::Worker { skills, .. } => skills.contains(&name),
                         _ => false,
                     })
             })

@@ -7,6 +7,7 @@ import { RunsWidget } from "./widgets/runs";
 import { RunnersWidget } from "./widgets/runners";
 import { SettingsWidget } from "./widgets/settings";
 import { ConversationWidget } from "./widgets/conversation";
+import { DelegationWidget } from "./widgets/delegation";
 import { SandboxWidget } from "./SandboxWidget";
 import { GateBar } from "./GateBar";
 
@@ -38,6 +39,11 @@ const REGISTRY = {
     subtitle: "you and the top manager",
     render: ConversationWidget,
   },
+  delegation: {
+    title: "Delegation",
+    subtitle: "the top manager and its workers",
+    render: DelegationWidget,
+  },
   quota: { title: "Windows", subtitle: "by account", render: QuotaWidget },
   fleet: { title: "Cells", subtitle: "loaded definitions", render: FleetWidget },
   activity: { title: "Activity", subtitle: "the record, live", render: ActivityWidget },
@@ -59,12 +65,31 @@ type WidgetId = string;
  */
 type AgentWidget = { id: string; title: string; subtitle: string; cell?: string };
 
-/** The blob. Farseer never reads this shape; only the canvas does. */
-type Layout = { mounted: WidgetId[]; wide: WidgetId[] };
+/**
+ * The blob. Farseer never reads this shape; only the canvas does.
+ *
+ * `v` is the canvas's own, and a stored blob from an older one is **replaced
+ * rather than migrated**. `24 ui state persistence` made this an arrangement,
+ * not data: nothing is lost by starting again from a better default, and a
+ * migration for a value the operator can restore by dragging two cards is
+ * machinery that has to be right forever to save one gesture once.
+ */
+type Layout = { v?: number; mounted: WidgetId[]; wide: WidgetId[] };
 
+const LAYOUT_VERSION = 2;
+
+/**
+ * The two conversations first, side by side, and everything else below them.
+ *
+ * Reading order is the argument: the operator's own exchange with the top
+ * manager is what they came to the screen for, and what the manager did about it
+ * is the next question rather than a separate one. Both are `wide`, so on any
+ * screen wide enough for four columns they occupy the top row together.
+ */
 const DEFAULT_LAYOUT: Layout = {
-  mounted: ["conversation", "runners", "runs", "activity", "quota", "fleet"],
-  wide: ["conversation", "runs"],
+  v: LAYOUT_VERSION,
+  mounted: ["conversation", "delegation", "runs", "activity", "quota", "runners", "fleet"],
+  wide: ["conversation", "delegation", "runs"],
 };
 
 export function App() {
@@ -77,13 +102,20 @@ export function App() {
   // Which widget is being dragged, and which one it is currently over.
   // `24 ui state persistence` already stores the order; the grip has looked
   // like a handle since the first canvas and never moved anything.
+  //
+  // **The grip is the draggable element**, and the first attempt at this made
+  // the whole card `draggable={dragging === id}` on the grip's `mousedown`.
+  // That cannot work: the browser decides whether a gesture is a drag at
+  // mousedown, and React sets the attribute a render later - by which time the
+  // gesture has already been rejected as a text selection. The card stays a
+  // plain drop target, which is the half that was right.
   const [dragging, setDragging] = useState<WidgetId | null>(null);
   const [over, setOver] = useState<WidgetId | null>(null);
 
   useEffect(() => {
     bridge
       .loadState<Layout>("canvas")
-      .then((stored) => setLayout(stored ?? DEFAULT_LAYOUT))
+      .then((stored) => setLayout(stored?.v === LAYOUT_VERSION ? stored : DEFAULT_LAYOUT))
       .catch(() => setLayout(DEFAULT_LAYOUT));
     // Discovered, not imported: a widget appears because a file exists, which
     // is what makes "ask for a widget" a thing the operator can do.
@@ -190,7 +222,10 @@ export function App() {
               onDrop={(event) => {
                 event.preventDefault();
                 setOver(null);
-                const from = dragging;
+                // Read from the transfer rather than from state: a drop is
+                // handled on a different element than the one that set the
+                // state, and Firefox clears `dragging` before it fires.
+                const from = event.dataTransfer.getData("text/farseer-widget") || dragging;
                 setDragging(null);
                 if (!from || from === id) return;
                 // Move rather than swap: an operator dragging one card past
@@ -202,16 +237,21 @@ export function App() {
                   return { ...current, mounted: order };
                 });
               }}
-              draggable={dragging === id}
             >
               <div className="head">
                 <span
                   className="grip"
+                  role="button"
+                  aria-label={`move the ${widget.title} widget`}
                   title="drag to move this widget"
-                  // Draggable only while the grip is held, so selecting text in
-                  // a widget body does not start a drag.
-                  onMouseDown={() => setDragging(id)}
-                  onMouseUp={() => setDragging(null)}
+                  // Only the grip drags, so selecting text in a widget body is
+                  // still a selection.
+                  draggable
+                  onDragStart={(event) => {
+                    event.dataTransfer.effectAllowed = "move";
+                    event.dataTransfer.setData("text/farseer-widget", id);
+                    setDragging(id);
+                  }}
                   onDragEnd={() => {
                     setDragging(null);
                     setOver(null);

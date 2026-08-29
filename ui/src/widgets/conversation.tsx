@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { Bridge } from "../bridge";
 import { follow, type RecordEvent } from "../stream";
 
@@ -122,10 +122,74 @@ function turnFrom(event: RecordEvent): Turn | null {
   return null;
 }
 
+/**
+ * Type to the top manager from inside the conversation.
+ *
+ * The canvas has always had one composer, in the footer, and `28 operator
+ * surface`'s rule is why: **the widget you type from is the anchor, never the
+ * destination.** That rule is about where the work goes, not about where the
+ * box is - so a second composer here breaks nothing, and answers the thing the
+ * footer could not: a reply belongs under the thing it replies to.
+ *
+ * It calls the same `bridge.ask`, anchored to this widget, and gets back a run
+ * id rather than an answer. The answer arrives on the stream and lands in the
+ * thread above, which is what makes this a conversation rather than a form.
+ */
+function Composer({ bridge }: { bridge: Bridge }) {
+  const [sending, setSending] = useState(false);
+  const [failed, setFailed] = useState<string | null>(null);
+  const field = useRef<HTMLTextAreaElement>(null);
+
+  const send = async () => {
+    const text = field.current?.value.trim();
+    if (!text || sending) return;
+    setSending(true);
+    setFailed(null);
+    try {
+      await bridge.ask({ widget: "Conversation" }, text);
+      if (field.current) field.current.value = "";
+    } catch (e) {
+      setFailed((e as Error).message);
+    } finally {
+      setSending(false);
+    }
+  };
+
+  return (
+    <form
+      className="composer"
+      onSubmit={(event) => {
+        event.preventDefault();
+        void send();
+      }}
+    >
+      <textarea
+        ref={field}
+        rows={2}
+        disabled={sending}
+        placeholder="Say something to the top manager - Enter sends, Shift+Enter for a new line"
+        // A textarea rather than an input, because a goal is usually a
+        // paragraph. Enter still sends, since the common case is one line.
+        onKeyDown={(event) => {
+          if (event.key === "Enter" && !event.shiftKey) {
+            event.preventDefault();
+            void send();
+          }
+        }}
+      />
+      <button className="chip on" disabled={sending}>
+        {sending ? "sending" : "send"}
+      </button>
+      {failed && <span className="bad small">{failed}</span>}
+    </form>
+  );
+}
+
 export function ConversationWidget({ bridge }: { bridge: Bridge }) {
   const [turns, setTurns] = useState<Turn[]>([]);
   const [meta, setMeta] = useState<Meta>({});
   const [error, setError] = useState<string | null>(null);
+  const thread = useRef<HTMLOListElement>(null);
 
   useEffect(() => {
     let live = true;
@@ -200,9 +264,12 @@ export function ConversationWidget({ bridge }: { bridge: Bridge }) {
       });
     };
 
-    // Replay what was already said, then follow. Same call, different cursor.
+    // Replay what was already said, then follow. `tail` rather than `limit`: a
+    // surface opening cold wants what just happened, and reading forward from
+    // zero gives it the oldest 400 events instead - which looked right while
+    // the log was shorter than the limit and would have frozen silently.
     bridge
-      .read<RecordEvent[]>("/events?limit=200")
+      .read<RecordEvent[]>("/events?tail=400")
       .then((events) => live && events.forEach(add))
       .catch((e: Error) => live && setError(e.message));
     const subscription = follow(add);
@@ -211,6 +278,23 @@ export function ConversationWidget({ bridge }: { bridge: Bridge }) {
       subscription.close();
     };
   }, [bridge]);
+
+  // The newest turn is the one being waited for, and a thread that keeps its
+  // scroll at the top hides exactly the line the operator is here to read.
+  //
+  // The thread scrolls, not the widget body: a composer that scrolls away with
+  // the messages is a composer the operator has to go looking for, and it is
+  // the one control on this widget.
+  useEffect(() => {
+    // After the frame, not during it: the thread takes what the flex column
+    // leaves it, so its scroll height is not settled at the moment the turns
+    // change - scrolling now lands short of the bottom on first paint.
+    const frame = requestAnimationFrame(() => {
+      const el = thread.current;
+      if (el) el.scrollTop = el.scrollHeight;
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [turns.length]);
 
   // 75-90% is worth noticing and above 95% the next prompt may not fit, which
   // is the convention ACP's clients already settled on - farseer does not need
@@ -263,13 +347,14 @@ export function ConversationWidget({ bridge }: { bridge: Bridge }) {
           Nothing said yet. Type below - it goes to the top manager, and its answer lands here
           when the run finishes.
         </p>
+        <Composer bridge={bridge} />
       </>
     );
 
   return (
     <>
       {strip}
-      <ol className="thread">
+      <ol className="thread" ref={thread}>
       {turns.map((turn) => (
         <li key={turn.seq} className={turn.who}>
           <div className="row small">
@@ -290,6 +375,7 @@ export function ConversationWidget({ bridge }: { bridge: Bridge }) {
         </li>
         ))}
       </ol>
+      <Composer bridge={bridge} />
     </>
   );
 }

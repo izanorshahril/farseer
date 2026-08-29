@@ -42,7 +42,8 @@ fn help(exe: &str, args: &[&str]) -> Option<String> {
 fn assert_flag(text: &str, flag: &str, expected: bool, runner: &str, table: &str) {
     let found = text.contains(flag);
     assert_eq!(
-        found, expected,
+        found,
+        expected,
         "{runner} {} `{flag}`, and {table} says it {}. \
          Re-probe the runner and update the table - do not edit this assertion \
          to match. See `HARNESS.md` section 6a.",
@@ -68,7 +69,13 @@ fn only_pi_still_loads_a_skill_by_path() {
         // over what omp discovered, not a loader, so there is no argv that hands
         // it a directory. If omp ever grows `--skill`, this fails and the table
         // is the thing to change.
-        assert_flag(&text, "--skill=", false, "omp", "`pi::loads_skills_by_path`");
+        assert_flag(
+            &text,
+            "--skill=",
+            false,
+            "omp",
+            "`pi::loads_skills_by_path`",
+        );
         assert!(!farseer_runner::pi::loads_skills_by_path("omp"));
     }
 }

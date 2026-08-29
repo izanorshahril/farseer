@@ -132,10 +132,14 @@ footer input:focus {
 .canvas {
   flex: 1;
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
   gap: 12px;
   padding: 14px;
   align-content: start;
+  /* Each card is its own content height. A grid row is as tall as its tallest
+     item and stretches the rest to match, so one long widget - Settings, with a
+     card per runner - made every card beside it a column of empty panel. */
+  align-items: start;
 }
 
 .widget {
@@ -166,9 +170,31 @@ footer input:focus {
   color: var(--faint);
   letter-spacing: -2px;
   cursor: grab;
+  /* A hit target rather than three dots. The glyph is 10px wide; the padding is
+     what makes it grabbable without aiming. */
+  padding: 2px 4px;
+  margin: -2px -2px -2px -4px;
+  border-radius: 4px;
+  user-select: none;
+}
+.grip:hover {
+  color: var(--fg);
+  background: var(--line);
+}
+.grip:active {
+  cursor: grabbing;
 }
 .widget .body {
   padding: 10px 12px;
+  /* Bounded, and it scrolls itself. Without a cap a widget's own length is the
+     canvas's length, which is how a nine-runner Settings card came to set the
+     height of the whole screen. A wide card is the one the operator chose to
+     give room to, so it gets more. */
+  max-height: 46vh;
+  overflow-y: auto;
+}
+.widget.wide .body {
+  max-height: 62vh;
 }
 
 .badge {
@@ -658,4 +684,88 @@ code {
   padding: 4px 8px;
   border: 1px solid var(--line);
   border-radius: 6px;
+}
+
+/* The composer inside the Conversation widget. `28 operator surface` keeps the
+   footer one - the widget you type from is the anchor, never the destination -
+   and this answers what the footer could not: a reply belongs under the thing
+   it replies to. */
+.composer {
+  display: flex;
+  align-items: flex-end;
+  gap: 8px;
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px solid var(--line);
+}
+.composer textarea {
+  flex: 1;
+  resize: vertical;
+  min-height: 38px;
+  font: inherit;
+  color: var(--fg);
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 8px 10px;
+}
+.composer textarea:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+.composer textarea:disabled {
+  opacity: 0.6;
+}
+
+/* One delegation, read as an exchange rather than a row. The Runs widget cuts
+   the goal to fit a column; this is the widget for when the goal is the
+   question. */
+.exchanges {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 12px;
+}
+.exchanges > li {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 8px 10px;
+}
+.exchanges p {
+  margin: 6px 0 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+/* Indented and quoted, so which half is the instruction is legible without a
+   label on every line. */
+.exchanges .asked {
+  border-left: 2px solid var(--accent);
+  padding-left: 8px;
+  color: var(--fg);
+}
+.exchanges .answered {
+  border-left: 2px solid var(--line);
+  padding-left: 8px;
+  color: var(--dim);
+}
+
+/* The thread scrolls; the composer under it does not move. The widget body's
+   own cap would scroll both together, which walks the one control on this
+   widget off the bottom of the card exactly when a reply arrives.
+
+   A column rather than two fixed heights: the meta strip above the thread is
+   ten fields that wrap differently at every width, so any height picked for the
+   thread is wrong at some width. Letting the thread take what is left is right
+   at all of them. */
+.widget .body:has(> .thread) {
+  display: flex;
+  flex-direction: column;
+}
+.widget .body > .thread {
+  flex: 1 1 auto;
+  /* Without this a flex child refuses to shrink below its content, and the
+     scrollbar lands on the body again - taking the composer with it. */
+  min-height: 0;
+  overflow-y: auto;
 }

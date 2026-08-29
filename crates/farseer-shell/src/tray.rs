@@ -294,7 +294,10 @@ mod tests {
         assert!(!line.contains('%'), "{line}");
 
         // And it sorts below a known zero, because farseer knows less about it.
-        let windows = vec![window("pi", "allowed", None), window("codex", "allowed", Some(0))];
+        let windows = vec![
+            window("pi", "allowed", None),
+            window("codex", "allowed", Some(0)),
+        ];
         assert!(tooltip(&windows, 1_000).contains("codex"));
     }
 

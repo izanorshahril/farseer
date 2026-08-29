@@ -236,6 +236,52 @@ impl Store {
         Ok(events)
     }
 
+    /// The **last** `limit` events, oldest first.
+    ///
+    /// [`Self::scan`] reads forward from a cursor, which is what an attach
+    /// wants: `07 attach semantics` made replay and live the same call with a
+    /// different cursor, and a cursor always points at a beginning.
+    ///
+    /// A surface that opens cold has no cursor and does not want one. It wants
+    /// what just happened - and reading forward from zero gives it the opposite,
+    /// silently: with a limit of 200 and a log of 200, the canvas's conversation
+    /// looked correct, and the day the log passed 200 it would have frozen on
+    /// the oldest 200 events with no error anywhere.
+    ///
+    /// Ordered ascending on the way out so a caller folds it exactly like a
+    /// `scan`. Selected descending, because "the last N" cannot be expressed as
+    /// an offset over a log with holes in it, and `05 run state model`'s purge
+    /// puts holes in it.
+    pub fn scan_tail(&self, limit: usize, filter: &ScanFilter) -> Result<Vec<Event>> {
+        let head = self.latest_seq()?;
+        let mut sql = String::from("SELECT seq FROM events WHERE seq <= ?1");
+        let mut params: Vec<Box<dyn rusqlite::ToSql>> = vec![Box::new(head)];
+        if let Some(cell_id) = &filter.cell_id {
+            params.push(Box::new(cell_id.as_str().to_string()));
+            sql.push_str(&format!(" AND cell_id = ?{}", params.len()));
+        }
+        if let Some(run_id) = &filter.run_id {
+            params.push(Box::new(run_id.as_bytes().to_vec()));
+            sql.push_str(&format!(" AND run_id = ?{}", params.len()));
+        }
+        params.push(Box::new(limit as i64));
+        sql.push_str(&format!(" ORDER BY seq DESC LIMIT ?{}", params.len()));
+
+        let mut stmt = self.conn.prepare_cached(&sql)?;
+        let mut seqs = stmt
+            .query_map(params_from_iter(params.iter().map(|p| p.as_ref())), |row| {
+                row.get::<_, Seq>(0)
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        // The oldest of the tail, made exclusive, is the cursor that reads the
+        // tail forwards - so the rows themselves come back through `scan` and
+        // there is one place that turns a row into an `Event`.
+        let Some(oldest) = seqs.pop() else {
+            return Ok(Vec::new());
+        };
+        self.scan(oldest - 1, limit, filter)
+    }
+
     /// The highest cursor position in the log, or 0 when it is empty.
     pub fn latest_seq(&self) -> Result<Seq> {
         Ok(self
@@ -515,6 +561,47 @@ impl Store {
 
 #[cfg(test)]
 mod tests {
+    /// `38`-adjacent, found while reviewing the canvas: the two conversation
+    /// widgets replayed with `limit`, which reads **forward from zero**. With a
+    /// log shorter than the limit that is indistinguishable from a tail, and
+    /// the day it grows past one the surface freezes on ancient history with no
+    /// error anywhere.
+    #[test]
+    fn a_tail_reads_the_end_of_the_log_and_a_scan_reads_the_start() {
+        let store = Store::open_in_memory().unwrap();
+        let run = RunId::new();
+        for n in 0..10 {
+            store
+                .append(&event("zero", run, &format!("kind-{n}"), n))
+                .unwrap();
+        }
+        let filter = ScanFilter::default();
+        let head: Vec<_> = store
+            .scan(0, 3, &filter)
+            .unwrap()
+            .iter()
+            .map(|e| e.kind.as_str().to_string())
+            .collect();
+        let tail: Vec<_> = store
+            .scan_tail(3, &filter)
+            .unwrap()
+            .iter()
+            .map(|e| e.kind.as_str().to_string())
+            .collect();
+        assert_eq!(head, ["kind-0", "kind-1", "kind-2"]);
+        // Oldest first, so a caller folds a tail exactly like a scan.
+        assert_eq!(tail, ["kind-7", "kind-8", "kind-9"]);
+        // A tail longer than the log is the whole log, not an error.
+        assert_eq!(store.scan_tail(100, &filter).unwrap().len(), 10);
+        assert!(
+            Store::open_in_memory()
+                .unwrap()
+                .scan_tail(5, &filter)
+                .unwrap()
+                .is_empty()
+        );
+    }
+
     use super::*;
     use farseer_core::TaskId;
     use serde_json::json;
