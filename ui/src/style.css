@@ -800,3 +800,15 @@ code {
 .disclose:hover .caret {
   color: var(--accent);
 }
+
+/* The quota widget's own controls. A select styled as a chip so the row reads
+   as one bar rather than a button and a form element that met by accident. */
+.quota-controls {
+  margin-bottom: 10px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--line);
+}
+.quota-controls select.chip {
+  padding: 4px 6px;
+  cursor: pointer;
+}

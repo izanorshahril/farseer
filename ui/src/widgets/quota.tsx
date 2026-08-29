@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import type { Bridge } from "../bridge";
 
 /**
@@ -133,50 +133,148 @@ function WindowTile({ window: w, now }: { window: Window; now: number }) {
   );
 }
 
+/**
+ * How often the widget re-reads, in seconds. `0` is off.
+ *
+ * A window that a run reports moves when a run happens; the polled one moves
+ * every five minutes at most, because it costs a process launch. So the useful
+ * range is "faster than I can hit the button" to "leave it alone" - and the
+ * default stays what it has always been.
+ */
+const INTERVALS: [string, number][] = [
+  ["every 10s", 10],
+  ["every 30s", 30],
+  ["every 1m", 60],
+  ["every 5m", 300],
+  // The whole phrase, not a suffix: prefixing "every" made this read "every
+  // off", which is the cost of building a label out of a template.
+  ["no auto-refresh", 0],
+];
+
+const DEFAULT_INTERVAL = 30;
+
+/** What this widget keeps in `24 ui state persistence`'s blob, under its own key. */
+type Prefs = { intervalSecs: number };
+
 export function QuotaWidget({ bridge }: { bridge: Bridge }) {
   const [windows, setWindows] = useState<Window[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [now, setNow] = useState(Date.now());
+  const [intervalSecs, setIntervalSecs] = useState(DEFAULT_INTERVAL);
+  /** When the numbers on screen were last fetched, so "live" is checkable. */
+  const [readAt, setReadAt] = useState<number | null>(null);
+  const [polling, setPolling] = useState(false);
 
-  useEffect(() => {
-    let live = true;
-    const load = () =>
+  const load = useCallback(
+    () =>
       bridge
         .read<{ windows: Window[] }>("/quota")
-        .then((body) => live && setWindows(body.windows))
-        .catch((e: Error) => live && setError(e.message));
-    load();
-    const tick = setInterval(() => {
-      setNow(Date.now());
-      load();
-    }, 30_000);
-    return () => {
-      live = false;
-      clearInterval(tick);
-    };
+        .then((body) => {
+          setWindows(body.windows);
+          setReadAt(Date.now());
+          setError(null);
+        })
+        .catch((e: Error) => setError(e.message)),
+    [bridge],
+  );
+
+  /**
+   * Ask the runner **now**, rather than waiting for farseer's own five-minute
+   * poll. Refused by the runtime when no runner is configured to poll, and the
+   * refusal names the line to add - which is the whole reason the button says
+   * something rather than doing nothing.
+   */
+  const refresh = useCallback(async () => {
+    setPolling(true);
+    setError(null);
+    try {
+      await bridge.post("/quota/refresh");
+      await load();
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      setPolling(false);
+    }
+  }, [bridge, load]);
+
+  useEffect(() => {
+    bridge
+      .loadState<Prefs>("quota")
+      .then((stored) => stored && setIntervalSecs(stored.intervalSecs))
+      .catch(() => undefined);
   }, [bridge]);
 
-  if (error) return <p className="empty">quota unavailable - {error}</p>;
-  if (!windows) return <p className="empty">reading windows...</p>;
-  if (windows.length === 0)
-    return (
-      <p className="empty">
-        No window observed yet. A window appears the first time a runner reports one, which is
-        after its first successful run.
-      </p>
-    );
+  useEffect(() => {
+    void load();
+    // The countdowns tick every second whatever the reload interval is: they
+    // are computed from `resets_at` and need no request to stay right, and a
+    // clock that only moves every thirty seconds looks stopped.
+    const clock = setInterval(() => setNow(Date.now()), 1_000);
+    if (intervalSecs === 0) return () => clearInterval(clock);
+    const tick = setInterval(() => void load(), intervalSecs * 1_000);
+    return () => {
+      clearInterval(clock);
+      clearInterval(tick);
+    };
+  }, [load, intervalSecs]);
+
+  const chooseInterval = (secs: number) => {
+    setIntervalSecs(secs);
+    void bridge.saveState("quota", { intervalSecs: secs } satisfies Prefs).catch(() => undefined);
+  };
+
+  const controls = (
+    <div className="row small quota-controls">
+      <button className="chip" disabled={polling} onClick={() => void refresh()}>
+        {polling ? "asking the runner" : "refresh now"}
+      </button>
+      <span className="grow" />
+      <span className="faint">
+        {readAt === null
+          ? "not read yet"
+          : `read ${Math.max(0, Math.round((now - readAt) / 1000))}s ago`}
+      </span>
+      <select
+        className="chip"
+        aria-label="how often to re-read"
+        value={intervalSecs}
+        onChange={(event) => chooseInterval(Number(event.target.value))}
+      >
+        {INTERVALS.map(([label, secs]) => (
+          <option key={secs} value={secs}>
+            {label}
+          </option>
+        ))}
+      </select>
+    </div>
+  );
+
+  // The controls stay on screen in every state, including the failing one: a
+  // widget that hides its refresh button exactly when the read is broken hides
+  // the control the operator came for, and shows them a message about a setting
+  // with nothing to click afterwards.
+  if (!windows && !error) return <p className="empty">reading windows...</p>;
 
   // Grouped in first-seen order rather than sorted, so the list does not
   // reshuffle under the operator every thirty seconds.
   const accounts: { account: string; runners: string[]; windows: Window[] }[] = [];
-  for (const w of windows) {
+  for (const w of windows ?? []) {
     const found = accounts.find((a) => a.account === w.account);
     if (found) found.windows.push(w);
     else accounts.push({ account: w.account, runners: w.runners, windows: [w] });
   }
 
   return (
-    <ul className="accounts">
+    <>
+      {controls}
+      {error && <p className="empty bad">{error}</p>}
+      {accounts.length === 0 && !error && (
+        <p className="empty">
+          No window observed yet. A window appears the first time a runner reports one, which is
+          after its first successful run.
+        </p>
+      )}
+      <ul className="accounts">
       {accounts.map((account) => (
         <li key={account.account}>
           <div className="row">
@@ -191,6 +289,7 @@ export function QuotaWidget({ bridge }: { bridge: Bridge }) {
           </div>
         </li>
       ))}
-    </ul>
+      </ul>
+    </>
   );
 }

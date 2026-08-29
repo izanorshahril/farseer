@@ -419,6 +419,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/v1/ui-state/{key}", get(get_ui_state).put(put_ui_state))
         .route("/v1/skills", get(skills))
         .route("/v1/quota", get(quota))
+        .route("/v1/quota/refresh", post(refresh_quota))
         .route("/v1/analytics/cost", get(analytics_cost))
         .route("/v1/analytics/intervention", get(analytics_intervention))
         .route("/v1/analytics/rework", get(analytics_rework))
@@ -2106,6 +2107,44 @@ async fn quota(State(state): State<Arc<AppState>>) -> ApiResult<Json<serde_json:
         value
     }));
     Ok(Json(serde_json::json!({ "windows": rows })))
+}
+
+/// Read every window omp can see **now**, then answer like [`quota`].
+///
+/// The background poll runs every five minutes because windows move on the
+/// scale of hours, and that is the right default for something farseer does on
+/// its own. It is the wrong answer for an operator who has just switched
+/// accounts and is looking at the widget: the number they want is one process
+/// launch away and they have to wait up to five minutes for it.
+///
+/// **A POST, and not a query parameter on the read.** This launches somebody
+/// else's binary, which is not a read however it is spelled - and `16 local api
+/// surface` would then have a GET with a side effect, which is the kind of
+/// thing that gets retried by a proxy.
+///
+/// **Refuses when the poll is off** rather than quietly answering the cached
+/// numbers. `13 harness build kit` made the poll a menu item an operator picks
+/// (`usage_poll = true` in `runners.toml`), and a button that appears to do
+/// something farseer was never given permission to do is the failure mode this
+/// repository keeps naming: silence around a missing capability.
+async fn refresh_quota(State(state): State<Arc<AppState>>) -> ApiResult<Json<serde_json::Value>> {
+    if !state.runner_config().polls_usage("omp") {
+        return Err(ApiError::BadRequest(
+            "no runner is configured to poll its usage; set `usage_poll = true` under [omp] in runners.toml",
+        ));
+    }
+    let windows = tokio::task::spawn_blocking(poll_windows)
+        .await
+        .unwrap_or_default();
+    // Only overwrite with something, for the same reason the loop does: a failed
+    // poll must leave the last good snapshot rather than blank the view.
+    if !windows.is_empty() {
+        *state
+            .polled_windows
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = windows;
+    }
+    quota(State(state)).await
 }
 
 /// Refresh [`AppState::polled_windows`] on a slow loop, for as long as farseer runs.
@@ -4217,6 +4256,58 @@ grants_shell = true
             "`22 cell addressing` section 2: one task, one owner"
         );
     }
+    /// A refresh button on a poll nobody enabled must say so, not do nothing.
+    ///
+    /// `13 harness build kit` made the usage poll a menu item an operator picks
+    /// (`usage_poll = true`), so the button is offered on every machine and
+    /// works on the ones where it was asked for. The failure this pins is the
+    /// one this repository keeps finding: **silence around a missing
+    /// capability** - a control that appears to work, changes nothing, and
+    /// leaves the operator with no way to learn why.
+    #[tokio::test]
+    async fn forcing_a_quota_read_refuses_by_name_when_no_runner_polls() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("zero.toml"), CELL).unwrap();
+        let runs_dir = tempfile::tempdir().unwrap();
+        let repo = git_repo_with_a_commit();
+        let token = RuntimeToken::generate();
+        let state = Arc::new(
+            AppState::new(
+                Store::open_in_memory().unwrap(),
+                dir.path(),
+                token.clone(),
+                runs_dir.path(),
+                repo.path(),
+            )
+            // No `usage_poll` anywhere, which is the default and the common case.
+            .with_runner_config(
+                RunnerConfig::load(
+                    "[omp]
+account = \"chatgpt\"
+",
+                )
+                .unwrap(),
+            ),
+        );
+        state.reload();
+        let h = Harness {
+            router: router(state.clone()),
+            token,
+            state,
+            _dir: dir,
+            _runs_dir: runs_dir,
+            _repo: repo,
+        };
+
+        let (status, body) = h.post("/v1/quota/refresh", serde_json::json!({})).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        let said = body["error"].as_str().unwrap_or_default();
+        assert!(
+            said.contains("usage_poll") && said.contains("runners.toml"),
+            "the refusal must name the line to add, not just refuse: {said}"
+        );
+    }
+
     /// `27 quota accounting`'s utilisation surface, end to end through the API.
     ///
     /// The assertion that matters most is the negative one: no percentage, ever.

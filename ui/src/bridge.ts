@@ -57,8 +57,15 @@ export function createBridge(): Bridge {
     read: (path) => json(`/v1${path}`),
 
     post: async (path, body) => {
-      if (!/^\/runs\/[0-9a-f-]+\/(steer|cancel|rerun|rescope)$/.test(path)) {
-        throw new Error(`${path} is not a run verb`);
+      // Still an allowlist, now with two entries. `28 operator surface` gate 3
+      // narrows what a widget may reach, and the narrowing is the point - so a
+      // second entry is added by name rather than by loosening the pattern.
+      //
+      // `quota/refresh` launches a poll the operator has already enabled in
+      // `runners.toml`; the runtime refuses it when they have not.
+      const allowed = [/^\/runs\/[0-9a-f-]+\/(steer|cancel|rerun|rescope)$/, /^\/quota\/refresh$/];
+      if (!allowed.some((pattern) => pattern.test(path))) {
+        throw new Error(`${path} is not a verb this bridge offers`);
       }
       const response = await fetch(`/v1${path}`, {
         method: "POST",
@@ -68,7 +75,17 @@ export function createBridge(): Bridge {
       // `400` is a runner with no steering path and `404` a run already
       // finished. Both are the runtime refusing a verb the surface should not
       // have offered, so they surface as errors rather than being swallowed.
-      if (!response.ok) throw new Error(`${path}: ${response.status}`);
+      //
+      // The runtime's own sentence when it wrote one: a refusal that says
+      // `quota/refresh: 400` tells the operator nothing, while the body says
+      // which line of `runners.toml` to add.
+      if (!response.ok) {
+        const said = await response
+          .json()
+          .then((body: { error?: string }) => body.error)
+          .catch(() => undefined);
+        throw new Error(said ?? `${path}: ${response.status}`);
+      }
     },
 
     ask: async (anchor, text) => {
