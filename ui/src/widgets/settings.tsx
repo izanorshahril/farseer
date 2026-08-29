@@ -140,7 +140,9 @@ export function SettingsWidget({ bridge }: { bridge: Bridge }) {
                   </span>
                   <b className="mono">{runner.name}</b>
                   {!expanded && runner.cannot.length > 0 && (
-                    <span className="dim small">{runner.cannot.length} caveats</span>
+                    <span className="dim small">
+                      {runner.cannot.length} caveat{runner.cannot.length === 1 ? "" : "s"}
+                    </span>
                   )}
                 </button>
                 {expanded && (
