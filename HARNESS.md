@@ -128,6 +128,26 @@ Read the columns rather than the rows, because they do not agree:
 
 **Requirement.** Loading by path and denying discovery are two capabilities, declared separately in the capability query, and a harness that offers one without the other says which. The orchestrator refuses in front of a person rather than silently dropping a declaration - which is what farseer does today, per `32 harness capability floor` and `36 tool grant enforcement`.
 
+### Keeping this page true
+
+Every table above is an observation with a date on it, and observations expire: these binaries update on their own schedule and nothing in a normal test run re-checks them.
+
+`crates/farseer-runner/tests/capability_drift.rs` is the re-check.
+
+```
+cargo test -p farseer-runner --test capability_drift -- --ignored
+```
+
+It reads each installed runner's own `--help` and asserts the flag facts this page and farseer's tables depend on - that pi still takes `--skill` and omp still does not, that omp still has no `--exclude-tools`, that `opencode acp` still takes `--pure` and `goose acp` still offers nothing that subtracts, that `codex app-server generate-json-schema` still exists.
+
+Three properties make it worth having:
+
+- **It costs nothing.** No model is invoked and no subscription is spent, which is what separates it from the live-run tests in `farseer-manager` that do both. Run it as often as you like.
+- **A missing binary skips.** `13 harness build kit` made the inventory a menu; not owning a runner is a choice, not a fault.
+- **Its failure means the world changed, not that the code is wrong.** The messages say so, and say which table to re-probe - `do not edit this assertion to match`. A capability suite that gets "fixed" by loosening its assertions is worse than none, because it converts a real change into a silent one.
+
+The negatives are the load-bearing half. `goose acp` gaining a `--pure`-shaped flag is farseer failing to isolate a runner it now could, and only an assertion that the flag is **absent** ever notices.
+
 ## 7. Nothing waits for a person unless asked
 
 pi ships `ask_question`, and an unattended run holding on it is a hang farseer must detect and kill rather than a question anybody will answer.
