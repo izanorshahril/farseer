@@ -82,7 +82,7 @@ An external protocol is spoken at a boundary, never shaped into internals.
 │  ├─ farseer-runner/  runners: Claude Code, Codex, cursor-agent and goose, PATHEXT resolution, Job-Object spawn, stream-json mapping, worktree lifecycle
 │  ├─ farseer-manager/ runs one sealed contract, captures terminal text, and records what happened
 │  ├─ farseer/         the binary: runtime and CLI in one
-│  └─ farseer-shell/   the desktop shell: finds a farseer, serves the canvas, holds the token
+│  └─ farseer-shell/   the desktop shell: finds a farseer, serves the canvas, holds the token, and puts the most constrained quota window in the tray
 ├─ ui/                 the canvas: the operator surface, a client of /v1 like any other
 │  ├─ src/bridge.ts    everything a widget may reach, and nothing else
 │  └─ src/widgets/     runs, activity, quota, fleet - plus whatever cell zero writes

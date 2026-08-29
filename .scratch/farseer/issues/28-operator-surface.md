@@ -441,3 +441,31 @@ The first capsule put the bar and its label in one flex row. Flexbox then shrank
 It was invisible in a screenshot and obvious in `getBoundingClientRect`: 46% rendered at 42.3px, 76% at 57.9px, 93% at 43.8px. Fixed with a fixed-width track, and now monotonic: 25.8px, 42.5px, 52.1px.
 
 **A visual element whose whole job is proportion has to be checked as a number.**
+
+## Tray mode, 2026-08-29
+
+A third surface, and the first that answers a question without being opened.
+
+`28` made the canvas the home screen, and a canvas has to be looked at. `35 notification plane` covered the far end - something happened, wake somebody. The middle was unserved: **is there quota left right now**, asked at a glance while doing something else.
+
+### Why quota is the right thing to put there
+
+Because it is the only thing farseer knows when nothing is running.
+
+Every other surface describes runs, and a tray that says "no runs" all day is a tray nobody looks at. `33 google quota`'s reversal changed that: `/v1/quota` now polls `omp usage --json` on a timer and reports every account it is logged into, live, with no run in flight.
+
+### What it shows
+
+The tooltip carries **one window - the most constrained** - because that is the only one that changes what an operator does next: an account with three windows at 2% and one exhausted is, practically, exhausted. The menu lists all of them, worst first, as **disabled** items: they are readings, not commands, and a tray that can act would be a second control surface to keep in step with the first.
+
+### The two rules that survive the move
+
+`27 quota accounting`'s refusal of a farseer-derived percentage matters more here than anywhere else in the product. **A tray line is read in half a second and remembered as fact**, so a number the operator cannot check is worse there than in a panel they are studying.
+
+And absent stays absent: a runner that states no percentage renders `- no percentage reported`, never `0%`. A window with no stated percentage also sorts **below** a known zero, because farseer knows less about it and the tooltip should carry the more informative row.
+
+`no window reported yet` is its own state, distinct from a healthy fleet at 0%.
+
+### Cost
+
+One feature flag on a crate already in the tree - `tauri = { features = ["tray-icon"] }` - and no new dependency. The tray reads the same `/v1/quota` the canvas does, through the token the shell already holds, so it is a second **reader** of one surface rather than a second source of truth.

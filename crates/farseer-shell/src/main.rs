@@ -13,6 +13,7 @@
 mod runtime;
 mod serve;
 mod settings;
+mod tray;
 
 use std::path::PathBuf;
 
@@ -66,12 +67,20 @@ fn run() -> anyhow::Result<()> {
     println!("farseer-shell: canvas on {origin}");
 
     let url = tauri::WebviewUrl::External(origin.parse()?);
+    let (tray_port, tray_token) = (attached.port, attached.token.clone());
     tauri::Builder::default()
         .setup(move |app| {
             tauri::WebviewWindowBuilder::new(app, "canvas", url.clone())
                 .title("farseer")
                 .inner_size(1280.0, 820.0)
                 .build()?;
+            // The tray asks the daemon directly rather than the canvas origin:
+            // it is a second reader of one surface, not a second surface.
+            tray::install(
+                app.handle(),
+                format!("http://127.0.0.1:{tray_port}"),
+                tray_token.clone(),
+            )?;
             Ok(())
         })
         .run(tauri::generate_context!())?;
