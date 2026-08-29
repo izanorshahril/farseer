@@ -86,7 +86,8 @@ Stripped of the shared floor, three real differences:
 Two of the four items below are discharged; struck through rather than deleted, because what closed them is the useful part.
 
 - **Skills consequence 1 - a cell cannot ask for a skill.** ~~Open.~~ **Closed 2026-08-28**: a cell declares `skills = [...]`, farseer passes them by path on the runners that take one, and refuses in front of a person on the ones that do not.
-- **Skills consequences 2 and 3 - the record does not say a skill was used, and the menu cannot show them.** **Still open, and now the only thing left on this page.** A run that invoked `skill:diagnosing-bugs` and one that did not still look identical.
+- **Skills consequence 2 - the record does not say a skill was used.** **Half closed 2026-08-29**: `run_queued` now carries the skill **paths** a run was handed, so two runs of one contract that differ only in their skills are no longer identical in the record. What is still missing is *invocation* - farseer records what a run was given, not what it reached for, and a skill loaded and never used looks the same as one the model leaned on throughout.
+- **Skills consequence 3 - the menu cannot show them.** Still open. `13 harness build kit` made the inventory a menu, and skills are the part of a harness an operator has actually customised.
 - ~~omp's `hub` tool.~~ **Moved to `36 tool grant enforcement` 2026-08-28**: `task` and `hub` are tools, so whether an omp manager spawns its own subagents is a tool level somebody chose rather than a capability nobody did.
 - ~~Whether `agent_end`'s under-counting is fixed in the adapter or in `RunReport`.~~ **Fixed in the adapter 2026-08-28**, as `RunnerSignal::LegSpend`: the record keeps the event for a person and a separate signal carries the arithmetic, because money that only exists in a payload string is money the report cannot add up.
 

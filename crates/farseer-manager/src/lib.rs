@@ -1499,6 +1499,31 @@ pub fn run_worker(
                 serde_json::to_value(cell).unwrap_or(serde_json::Value::Null),
             );
         }
+        // What this run was actually handed, by path, rather than what its cell
+        // asked for. `32 harness capability floor` listed this as the second of
+        // three skills consequences: **a run that loaded `skill:diagnosing-bugs`
+        // and one that did not looked identical in the record.**
+        //
+        // The contract carries no skills field - they are a launch input, not a
+        // term of the contract - so without this the record's own account of a
+        // run's inputs is incomplete, which is what `21 a2a conformance` cares
+        // about and what makes two runs of one contract comparable.
+        //
+        // Paths, because that is what reached the argv. A name is what the cell
+        // wrote down; a path is what the process opened, and `32` exists because
+        // the two came apart.
+        if !options.skills.is_empty() {
+            payload.insert(
+                "skills".into(),
+                serde_json::Value::Array(
+                    options
+                        .skills
+                        .iter()
+                        .map(|p| serde_json::Value::String(p.display().to_string()))
+                        .collect(),
+                ),
+            );
+        }
     }
     sink.append(&NewEvent::new(
         contract.cell_id.clone(),
@@ -1949,6 +1974,60 @@ mod tests {
         assert_eq!(row.outcome.as_deref(), Some("cancelled"));
         assert_eq!(row.usd_micros, 0);
         assert_eq!(row.tokens, 0);
+    }
+
+    /// `32 harness capability floor`'s second skills consequence: the record
+    /// could not say a run had loaded one, so two runs of one contract were
+    /// indistinguishable when only their skills differed.
+    #[test]
+    fn a_run_records_the_skills_it_was_handed_and_stays_silent_when_it_had_none() {
+        let store = Store::open_in_memory().unwrap();
+        let sealed = contract();
+        let run_id = sealed.run_id;
+        let skill = std::env::temp_dir().join("farseer-echo");
+
+        let _ = run_worker(
+            &store,
+            &sealed,
+            &std::env::temp_dir(),
+            LivenessThresholds::default(),
+            &RunOptions {
+                skills: vec![skill.clone()],
+                ..RunOptions::default()
+            },
+            || 1,
+            |_, _, _| {},
+        );
+        let queued = |store: &Store, run_id| {
+            store
+                .scan(0, 10, &farseer_store::ScanFilter::run(run_id))
+                .unwrap()
+                .into_iter()
+                .find(|e| e.kind.as_str() == EventKind::RUN_QUEUED)
+                .expect("a queued event")
+                .payload
+        };
+        assert_eq!(
+            queued(&store, run_id)["skills"][0],
+            serde_json::Value::String(skill.display().to_string()),
+            "the path that reached the argv, not the name the cell wrote down"
+        );
+
+        // Absent rather than an empty array: `10 runner inventory`'s rule that
+        // nothing observed is not the same as something observed to be empty.
+        let bare = Store::open_in_memory().unwrap();
+        let other = contract();
+        let other_id = other.run_id;
+        let _ = run_worker(
+            &bare,
+            &other,
+            &std::env::temp_dir(),
+            LivenessThresholds::default(),
+            &RunOptions::default(),
+            || 1,
+            |_, _, _| {},
+        );
+        assert!(queued(&bare, other_id).get("skills").is_none());
     }
 
     #[test]

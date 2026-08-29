@@ -122,6 +122,12 @@ Build the canvas once first, or the shell has nothing to serve:
 bun run --cwd ui build
 ```
 
+`cargo build` and `cargo test` follow the same default, so **both cover the shell alone** - pass `--workspace` to build or test everything:
+
+```bash
+cargo test --workspace
+```
+
 The daemon can still be driven on its own, which is what CI and the tests do:
 
 ```bash

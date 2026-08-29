@@ -5,7 +5,8 @@ Twenty-eight decision tickets are closed, and the foundation is implemented agai
 ## Scope
 
 Farseer builds, tests and runs with **`cargo` and `bun` alone**.
-`cargo test`, `cargo clippy --all-targets`, `cargo fmt` and `bun run --cwd ui check` are the whole toolchain, and every live-runner test is `#[ignore]`d behind them.
+`cargo test --workspace`, `cargo clippy --workspace --all-targets`, `cargo fmt` and `bun run --cwd ui check` are the whole toolchain, and every live-runner test is `#[ignore]`d behind them.
+**`--workspace` is not optional on either**: `cargo run` opens the desktop shell, which means `default-members` is the shell, which means a bare `cargo test` covers the shell and nothing else.
 
 No push gate, review pipeline or daemon is part of this project. If one is installed on a machine it belongs to that machine, not to farseer, and farseer must keep working when it is absent.
 
