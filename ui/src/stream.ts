@@ -32,9 +32,63 @@ export type Subscription = { close: () => void };
  * which is what makes dropping the connection a non-event rather than a hole in
  * the operator's view.
  */
+/**
+ * The one connection this page holds, and everyone who is listening to it.
+ *
+ * `16 local api surface` gives farseer **one** stream endpoint. The canvas had
+ * quietly stopped agreeing with that: every widget that wanted live data called
+ * `follow` and got its own connection, and at five of them the page hit the
+ * browser's six-connection-per-origin limit for HTTP/1.1. An SSE stream never
+ * closes, so those five were permanent - and the sixth request the page made,
+ * whatever it happened to be, hung forever with no error. The Cells widget sat
+ * on "reading cells..." because a *different* widget had taken the last socket.
+ *
+ * One connection, fanned out. Adding a live widget is now free, which is the
+ * property that was silently missing.
+ */
+let shared: { subscribers: Set<(event: RecordEvent) => void>; stop: () => void } | null = null;
+
+/**
+ * Subscribe to the record.
+ *
+ * A caller passing `since` gets its own connection, because a cursor is a
+ * position and two readers at different positions are two reads. Everybody else
+ * - which is every widget on the canvas - shares one.
+ */
 export function follow(
   onEvent: (event: RecordEvent) => void,
   options: { since?: number } = {},
+): Subscription {
+  if (options.since === undefined) {
+    if (!shared) {
+      const subscribers = new Set<(event: RecordEvent) => void>();
+      const connection = connect((event) => {
+        // A copy, so a subscriber unsubscribing inside its own handler does not
+        // mutate the set being iterated.
+        for (const subscriber of [...subscribers]) subscriber(event);
+      }, {});
+      shared = { subscribers, stop: connection.close };
+    }
+    const here = shared;
+    here.subscribers.add(onEvent);
+    return {
+      close: () => {
+        here.subscribers.delete(onEvent);
+        // The last widget to unmount closes the connection, so a page with no
+        // live widgets holds no socket.
+        if (here.subscribers.size === 0 && shared === here) {
+          shared = null;
+          here.stop();
+        }
+      },
+    };
+  }
+  return connect(onEvent, options);
+}
+
+function connect(
+  onEvent: (event: RecordEvent) => void,
+  options: { since?: number },
 ): Subscription {
   const controller = new AbortController();
   let cursor = options.since;

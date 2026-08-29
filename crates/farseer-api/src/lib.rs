@@ -1616,6 +1616,20 @@ pub struct RunView {
     /// conversation they can still steer, a worker is a job - and it was in the
     /// record all along while no surface showed it.
     pub role: Option<String>,
+    /// Why a finished run finished the way it did, when the record says so.
+    ///
+    /// `17 cell lifecycle` chose no orphan survival, so a run whose farseer
+    /// process is gone is reaped and marked `failed` - correct, because the run
+    /// *had started* and its outcome is genuinely unknown. On a fleet view it
+    /// is also indistinguishable from a run that tried and could not do the
+    /// work, and a screen of `failed` after a restart reads as breakage.
+    ///
+    /// **Derived, not a new outcome.** Adding a fifth outcome word would change
+    /// what `11 analytics questions` counts, to fix a presentation problem;
+    /// `26 routing policy` refused a new outcome on the same grounds. The reason
+    /// is already in `run_finished`, and this is the same move `title` makes
+    /// with `run_queued` - read the record rather than add a column.
+    pub finished_reason: Option<String>,
 }
 
 /// The fleet, newest first.
@@ -1843,6 +1857,23 @@ fn runner_loads_skills(runner: &str) -> bool {
     farseer_runner::pi::loads_skills_by_path(runner)
 }
 
+/// Why the run ended, from its own last event.
+///
+/// The mirror of [`queued_facts`], which reads a run's first event - and it is
+/// the same one query, pointed at the other end of the run.
+fn finished_reason(state: &Arc<AppState>, run_id: RunId) -> Option<String> {
+    let store = state.store();
+    let events = store.scan_tail(1, &ScanFilter::run(run_id)).ok()?;
+    let last = events.first()?;
+    if last.kind.as_str() != farseer_core::EventKind::RUN_FINISHED {
+        return None;
+    }
+    last.payload
+        .get("reason")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_string)
+}
+
 fn run_view(state: &Arc<AppState>, row: RunRow) -> RunView {
     let run_id = row.run_id;
     let (title, role) = queued_facts(state, run_id);
@@ -1872,6 +1903,7 @@ fn run_view(state: &Arc<AppState>, row: RunRow) -> RunView {
             .map(|h| liveness_str(h.liveness.liveness()).to_string()),
         title,
         role,
+        finished_reason: finished_reason(state, run_id),
     };
     view
 }

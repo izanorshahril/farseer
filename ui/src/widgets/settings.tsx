@@ -37,6 +37,8 @@ export function SettingsWidget({ bridge }: { bridge: Bridge }) {
   const [current, setCurrent] = useState<TopManager | null>(null);
   const [note, setNote] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  /** Which runner is expanded. `null` means "whichever is in use". */
+  const [open, setOpen] = useState<string | null>(null);
   const [available, setAvailable] = useState(true);
 
   const load = useCallback(async () => {
@@ -110,19 +112,49 @@ export function SettingsWidget({ bridge }: { bridge: Bridge }) {
       <ul className="runners">
         {runners.map((runner) => {
           const chosen = runner.name === current.runner;
+          // Expanded for the one in use, folded for the rest. Nine runners each
+          // showing a note plus up to four caveats made this the tallest widget
+          // on the canvas by a wide margin, and a grid row is as tall as its
+          // tallest card - so one menu the operator reads once was setting the
+          // height of every card beside it.
+          //
+          // **Not moved off the canvas**, which was the other option: `28
+          // operator surface` settled that the canvas is the home screen and if
+          // it is not the canvas it is a widget on it. A settings modal is a
+          // second layout, and the height was a layout problem rather than a
+          // reason to reopen that.
+          const expanded = open === null ? chosen : open === runner.name;
           return (
             <li key={runner.name} className={chosen ? "chosen" : ""}>
               <span className={`dot ${runner.installed ? "live" : ""}`} />
               <span className="grow">
-                <b className="mono">{runner.name}</b>
-                <div className="dim small">{runner.note}</div>
-                {/* Everyone is offered. A runner farseer holds loosely says so
-                    rather than being dropped from the list. */}
-                {runner.cannot.map((warning) => (
-                  <div key={warning} className="dim small caveat">
-                    {warning}
-                  </div>
-                ))}
+                <button
+                  type="button"
+                  className="disclose"
+                  aria-expanded={expanded}
+                  onClick={() => setOpen(expanded ? "" : runner.name)}
+                  title={expanded ? "fold this runner" : `what farseer knows about ${runner.name}`}
+                >
+                  <span className="caret" aria-hidden>
+                    {expanded ? "▾" : "▸"}
+                  </span>
+                  <b className="mono">{runner.name}</b>
+                  {!expanded && runner.cannot.length > 0 && (
+                    <span className="dim small">{runner.cannot.length} caveats</span>
+                  )}
+                </button>
+                {expanded && (
+                  <>
+                    <div className="dim small">{runner.note}</div>
+                    {/* Everyone is offered. A runner farseer holds loosely says
+                        so rather than being dropped from the list. */}
+                    {runner.cannot.map((warning) => (
+                      <div key={warning} className="dim small caveat">
+                        {warning}
+                      </div>
+                    ))}
+                  </>
+                )}
                 {!runner.installed && (
                   <div className="faint small">not on PATH here - farseer would fail at spawn</div>
                 )}

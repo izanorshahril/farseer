@@ -769,3 +769,34 @@ code {
   min-height: 0;
   overflow-y: auto;
 }
+
+/* The footer's anchor, made visible. Two composers that both say "to: top
+   manager" are two identical controls; the anchor is what makes them two jobs. */
+.badge.accent {
+  color: var(--accent);
+  border-color: var(--accent);
+}
+
+/* A runner folds to one line. The note and its caveats are what an author reads
+   once while choosing; leaving all nine open made Settings the tallest card on
+   the canvas, and a grid row is as tall as its tallest card. */
+.disclose {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  padding: 0;
+  background: none;
+  border: 0;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.disclose .caret {
+  color: var(--faint);
+  font-size: 10px;
+}
+.disclose:hover .caret {
+  color: var(--accent);
+}

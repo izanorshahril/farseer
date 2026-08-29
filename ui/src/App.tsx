@@ -317,14 +317,26 @@ export function App() {
             }
           }}
         >
-          <span className="badge" title="every request goes to the top manager, whatever you are looking at">
+          {/* The anchor is the whole reason this box exists beside the one in
+              the Conversation widget. Both go to the top manager - `28 operator
+              surface`: the widget you type from is the anchor, never the
+              destination - so with the anchor invisible they were two identical
+              boxes, and a duplicate control with no visible difference reads as
+              a bug. Naming what it is anchored to is the difference. */}
+          <span
+            className="badge"
+            title="every request goes to the top manager, whatever you are looking at"
+          >
             to: top manager
+          </span>
+          <span className="badge accent" title="what the top manager is told you were looking at">
+            about: {anchor.widget}
           </span>
           <input
             name="ask"
             autoComplete="off"
             disabled={asking}
-            placeholder={`Ask for anything - anchored to ${anchor.widget}`}
+            placeholder={`Ask about ${anchor.widget} - hover another widget to ask about that instead`}
           />
           <button className="chip on" disabled={asking}>
             {asking ? "sending" : "send"}
@@ -341,7 +353,8 @@ export function App() {
           ) : (
             <>
               The widget you type from is the anchor, never the destination. The top manager
-              decides where the work goes.
+              decides where the work goes - to say something unanchored, use the box inside the
+              Conversation widget.
             </>
           )}
         </p>

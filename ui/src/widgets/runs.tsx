@@ -29,7 +29,25 @@ type Run = {
   liveness: "live" | "stalled" | "likely_hung" | null;
   title: string | null;
   role: string | null;
+  /** Why it ended, when the record says. See `RunView::finished_reason`. */
+  finished_reason: string | null;
 };
+
+/**
+ * The outcome word, and the short form of why.
+ *
+ * `17 cell lifecycle` reaps a run whose farseer process is gone and marks it
+ * `failed`, which is right - it started, and what it did is unknown. A screen of
+ * bare `failed` after a restart still reads as a fleet that is broken, so the
+ * reason the record already holds is shown beside the word rather than folded
+ * into it.
+ */
+function why(run: Run): string | null {
+  if (!run.finished_reason) return null;
+  return run.finished_reason.includes("process that started this run is gone")
+    ? "farseer restarted"
+    : run.finished_reason.slice(0, 40);
+}
 
 /** What `05 run state model` permits, given where the run actually is. */
 function verbsFor(run: Run, steerable: (runner: string) => boolean): string[] {
@@ -137,6 +155,11 @@ export function RunsWidget({ bridge }: { bridge: Bridge }) {
               <span className={`kind ${TONE[run.outcome ?? ""] ?? ""}`}>
                 {run.outcome ?? run.lifecycle}
               </span>
+              {why(run) && (
+                <span className="dim small" title={run.finished_reason ?? undefined}>
+                  {why(run)}
+                </span>
+              )}
               {run.operator_touched && (
                 <span className="badge touched" title="a human intervened, per 07">
                   touched

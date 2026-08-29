@@ -189,6 +189,7 @@ export function ConversationWidget({ bridge }: { bridge: Bridge }) {
   const [turns, setTurns] = useState<Turn[]>([]);
   const [meta, setMeta] = useState<Meta>({});
   const [error, setError] = useState<string | null>(null);
+  const [showSilent, setShowSilent] = useState(false);
   const thread = useRef<HTMLOListElement>(null);
 
   useEffect(() => {
@@ -285,6 +286,12 @@ export function ConversationWidget({ bridge }: { bridge: Bridge }) {
   // The thread scrolls, not the widget body: a composer that scrolls away with
   // the messages is a composer the operator has to go looking for, and it is
   // the one control on this widget.
+  // Keyed on the newest turn rather than on how many there are. The thread is
+  // capped at 40, so **once it fills, the count stops changing** and an effect
+  // watching the length never fires again - the widget scrolled itself for the
+  // first forty turns and then quietly stopped, which is the worst version of
+  // this bug because it works while you are testing it.
+  const newest = turns.length > 0 ? turns[turns.length - 1]!.seq : 0;
   useEffect(() => {
     // After the frame, not during it: the thread takes what the flex column
     // leaves it, so its scroll height is not settled at the moment the turns
@@ -294,7 +301,7 @@ export function ConversationWidget({ bridge }: { bridge: Bridge }) {
       if (el) el.scrollTop = el.scrollHeight;
     });
     return () => cancelAnimationFrame(frame);
-  }, [turns.length]);
+  }, [newest]);
 
   // 75-90% is worth noticing and above 95% the next prompt may not fit, which
   // is the convention ACP's clients already settled on - farseer does not need
@@ -308,9 +315,7 @@ export function ConversationWidget({ bridge }: { bridge: Bridge }) {
           : ""
       : "";
 
-  const strip = (
-    <div className="meta">
-      {[
+  const fields: [string, string | undefined][] = [
         ["cell", meta.cell],
         ["runner", meta.runner],
         ["model", meta.model],
@@ -324,17 +329,42 @@ export function ConversationWidget({ bridge }: { bridge: Bridge }) {
         ["tokens", meta.tokens?.toLocaleString()],
         ["cost", typeof meta.cost === "number" ? usd(meta.cost) : undefined],
         ["last run", meta.outcome],
-      ].map(([label, value]) => (
-        <span
-          key={label}
-          className={[value ? "" : "absent", label === "context" ? pressure : ""]
-            .filter(Boolean)
-            .join(" ")}
-        >
+  ];
+  const reported = fields.filter(([, value]) => value !== undefined);
+  const silent = fields.filter(([, value]) => value === undefined);
+
+  // `10 runner inventory`'s rule is that a blank means the runner declined, and
+  // that is information. It is not information worth seven of the ten slots on
+  // the tallest element in the widget - most runners report almost nothing, so
+  // the strip was mostly a list of things that were never going to be there.
+  // Folded, counted, and one click away, which keeps the fact without paying
+  // full height for it every render.
+  const strip = (
+    <div className="meta">
+      {reported.map(([label, value]) => (
+        <span key={label} className={label === "context" ? pressure : ""}>
           <i>{label}</i>
-          <b className="mono">{value ?? "not reported"}</b>
+          <b className="mono">{value}</b>
         </span>
       ))}
+      {silent.length > 0 && (
+        <button
+          type="button"
+          className="chip"
+          aria-expanded={showSilent}
+          onClick={() => setShowSilent((current) => !current)}
+          title={silent.map(([label]) => label).join(", ")}
+        >
+          {showSilent ? "hide" : `${silent.length} not reported`}
+        </button>
+      )}
+      {showSilent &&
+        silent.map(([label]) => (
+          <span key={label} className="absent">
+            <i>{label}</i>
+            <b className="mono">not reported</b>
+          </span>
+        ))}
     </div>
   );
 
