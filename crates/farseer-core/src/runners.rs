@@ -178,18 +178,25 @@ account = "openai-plus"
     /// screen and took the desktop shell down with it when they closed it.
     #[test]
     fn a_usage_poll_happens_only_where_an_operator_asked_for_one() {
-        let config = RunnerConfig::load("[omp]
+        let config = RunnerConfig::load(
+            "[omp]
 usage_poll = true
 
 [pi]
 account = \"x\"
-")
-            .expect("parses");
+",
+        )
+        .expect("parses");
         assert!(config.polls_usage("omp"));
         assert!(!config.polls_usage("pi"), "declared, but not for this");
-        assert!(!config.polls_usage("goose"), "undeclared runners poll nothing");
         assert!(
-            !RunnerConfig::load("").expect("empty parses").polls_usage("omp"),
+            !config.polls_usage("goose"),
+            "undeclared runners poll nothing"
+        );
+        assert!(
+            !RunnerConfig::load("")
+                .expect("empty parses")
+                .polls_usage("omp"),
             "an absent config polls nothing at all"
         );
     }

@@ -6,11 +6,16 @@
 //! a canvas on top of both. All three assume an operator watching. A run that
 //! finishes or hangs at 3am reaches nobody.
 //!
-//! **This is not a gate, and must never become one.** `12 autonomy and deny
-//! list` refused mid-run approval outright: the deny list is not a security
-//! boundary, and autonomy is decided *before* a run through tool grants.
-//! Telling a person is not asking one for permission. Nothing here is
-//! answerable, and nothing waits on it.
+//! **This is not a gate, and must never become one.** Telling a person is not
+//! asking one for permission: nothing here is answerable, and nothing waits on
+//! it. What `35` refused is a bar that approves **shell commands** mid-run, on
+//! `12 autonomy and deny list`'s argument that `deny read .env` is defeated by
+//! `cat .env` - approving a command string is false assurance.
+//!
+//! That argument reaches command strings and stops there. `12` section 3 gates
+//! a *declared* tool at a *declared* irreversibility level, which `post` is and
+//! `cat` does not defeat, and this comment used to say `12` had refused mid-run
+//! approval outright. It had not. See `38 the tool verb`.
 //!
 //! **Off unless `FARSEER_NOTIFY_URL` is set.** The URL is the seam: anything
 //! that accepts an HTTP POST is a backend, so ntfy, Slack, Discord and an

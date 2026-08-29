@@ -220,6 +220,18 @@ pub enum Advisory {
     /// `13 harness build kit`: a definition with no workers is coherent, and the social cell being
     /// thinner than the coding cell is a fact about the domain, not a smell.
     NoWorkers,
+    /// `38 the tool verb`: a roster has three kinds and two verbs.
+    ///
+    /// `delegate_to_worker` reaches a `kind = "worker"` entry and `delegate_to_cell`
+    /// reaches a `kind = "cell"` one, both roster-checked. Nothing reaches a
+    /// `kind = "tool"` entry, because farseer serves no such tool. The entry is
+    /// still real - it is in the sealed contract and in the record, so two runs
+    /// of one contract are distinguishable by it - but it grants no reach.
+    ///
+    /// An advisory rather than an error, on `12 autonomy and deny list`'s own
+    /// precedent: a control that reads stronger than it is should **say so**,
+    /// not fail the definition that declares it.
+    ToolHasNoVerb { tool: String },
 }
 
 impl std::fmt::Display for Advisory {
@@ -230,6 +242,10 @@ impl std::fmt::Display for Advisory {
                 "tool `{shell_tool}` reaches a shell, so the deny list is advisory for this cell"
             ),
             Self::NoWorkers => f.write_str("roster declares no workers; this cell delegates only"),
+            Self::ToolHasNoVerb { tool } => write!(
+                f,
+                "tool `{tool}` is declared and recorded, and no verb reaches it: farseer serves no tool call, so it grants nothing and gates nothing"
+            ),
         }
     }
 }
@@ -309,10 +325,15 @@ impl CellDefinition {
                 }
                 RosterEntry::Tool {
                     name, grants_shell, ..
-                } if *grants_shell => {
-                    report.advisories.push(Advisory::DenyListIsAdvisory {
-                        shell_tool: name.clone(),
-                    });
+                } => {
+                    report
+                        .advisories
+                        .push(Advisory::ToolHasNoVerb { tool: name.clone() });
+                    if *grants_shell {
+                        report.advisories.push(Advisory::DenyListIsAdvisory {
+                            shell_tool: name.clone(),
+                        });
+                    }
                 }
                 _ => {}
             }
@@ -507,6 +528,22 @@ max_autonomy_ceiling = "undoable"
             cell.roster.first(),
             Some(RosterEntry::Cell { max_budget, .. }) if *max_budget == Budget::default()
         ));
+    }
+
+    /// `38 the tool verb`: a roster kind with no verb should say so where an
+    /// author reads it, rather than in a record nobody reconstructs.
+    #[test]
+    fn every_tool_entry_states_that_nothing_can_call_it() {
+        let (cell, advisories) = CellDefinition::load(CODING).unwrap();
+        for tool in cell.tool_grants() {
+            assert!(
+                advisories.contains(&Advisory::ToolHasNoVerb { tool: tool.clone() }),
+                "`{tool}` is declared and unreachable, and the report is silent about it"
+            );
+        }
+        // Not an error: `zero.toml` and `social.toml` both ship tool entries, and
+        // failing them would refuse the two definitions this repo runs on.
+        assert!(!cell.tool_grants().is_empty());
     }
 
     #[test]
