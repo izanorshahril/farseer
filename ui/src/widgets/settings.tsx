@@ -29,8 +29,11 @@ type Runner = {
 
 type TopManager = { cell_id: string; runner: string; file: string };
 
-export function SettingsWidget({ bridge: _bridge }: { bridge: Bridge }) {
+type Skill = { name: string; declared_by: string[] };
+
+export function SettingsWidget({ bridge }: { bridge: Bridge }) {
   const [runners, setRunners] = useState<Runner[] | null>(null);
+  const [skills, setSkills] = useState<Skill[]>([]);
   const [current, setCurrent] = useState<TopManager | null>(null);
   const [note, setNote] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -47,7 +50,15 @@ export function SettingsWidget({ bridge: _bridge }: { bridge: Bridge }) {
     } catch {
       setAvailable(false);
     }
-  }, []);
+    // Separate from the two above: a settings surface that vanishes because the
+    // skills read failed would be `13 harness build kit`'s bad direction again.
+    try {
+      const body = await bridge.read<{ skills: Skill[] }>("/skills");
+      setSkills(body.skills);
+    } catch {
+      setSkills([]);
+    }
+  }, [bridge]);
 
   useEffect(() => {
     void load();
@@ -131,6 +142,30 @@ export function SettingsWidget({ bridge: _bridge }: { bridge: Bridge }) {
           );
         })}
       </ul>
+      {/* `32 harness capability floor`'s third consequence, and its own fix
+          narrowed what belongs here: discovery is denied, so a cell may name
+          only a directory under this repository's `skills/`. Listing the twenty
+          a harness found on this machine would be a menu of things no cell can
+          order. */}
+      {skills.length > 0 && (
+        <>
+          <p className="dim small" style={{ margin: "12px 0 6px" }}>
+            Skills a cell may declare. Directories in <span className="mono">skills/</span>, passed
+            by path - never discovered from your home directory.
+          </p>
+          <ul className="skills">
+            {skills.map((skill) => (
+              <li key={skill.name}>
+                <span className="mono">{skill.name}</span>
+                <span className="grow" />
+                <span className="dim small">
+                  {skill.declared_by.length > 0 ? skill.declared_by.join(", ") : "declared by none"}
+                </span>
+              </li>
+            ))}
+          </ul>
+        </>
+      )}
       <p className="dim small" style={{ marginBottom: 0 }}>
         {note ?? (
           <>

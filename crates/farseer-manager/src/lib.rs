@@ -2078,10 +2078,20 @@ mod tests {
         assert_eq!(rebuilt.definition_of_done, contract.definition_of_done);
     }
 
+    /// Set when [`completed_turn_fixture`] has produced its terminal signal.
+    ///
+    /// The test below used to cancel after a fixed 200ms and hope the reader had
+    /// got there first. It passed alone and failed in a full `--workspace` run,
+    /// which is the shape of every sleep-based test: it encodes a machine's
+    /// speed rather than the thing it means to wait for. Only this test uses
+    /// this fixture, so one flag is enough.
+    static TURN_SEEN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
     fn completed_turn_fixture(line: &str) -> Result<Vec<RunnerSignal>, ParseError> {
         if line != "done" {
             return Ok(Vec::new());
         }
+        TURN_SEEN.store(true, Ordering::Release);
         Ok(vec![
             RunnerSignal::Output("ok".into()),
             RunnerSignal::Finished(farseer_runner::claude_code::FinishedSignal {
@@ -2147,6 +2157,7 @@ mod tests {
 
     #[test]
     fn cancelling_after_a_completed_turn_returns_cancelled_with_the_turn_report() {
+        TURN_SEEN.store(false, Ordering::Release);
         let store = Store::open_in_memory().unwrap();
         let contract = contract();
         let dir = tempfile::tempdir().unwrap();
@@ -2177,7 +2188,12 @@ mod tests {
         .unwrap();
         let token = started.cancel_token();
         std::thread::spawn(move || {
-            std::thread::sleep(std::time::Duration::from_millis(200));
+            // Wait for the turn, not for a duration. The bound is a backstop so
+            // a genuine hang fails the test rather than hanging the suite.
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+            while !TURN_SEEN.load(Ordering::Acquire) && std::time::Instant::now() < deadline {
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
             token.cancel();
         });
 

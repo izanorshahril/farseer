@@ -417,6 +417,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/v1/runs/{run_id}/rerun", post(rerun_run))
         .route("/v1/runs/{run_id}/rescope", post(rescope_run))
         .route("/v1/ui-state/{key}", get(get_ui_state).put(put_ui_state))
+        .route("/v1/skills", get(skills))
         .route("/v1/quota", get(quota))
         .route("/v1/analytics/cost", get(analytics_cost))
         .route("/v1/analytics/intervention", get(analytics_intervention))
@@ -1975,6 +1976,52 @@ async fn put_ui_state(
 /// spending it", rather than the one nobody can answer honestly.
 ///
 /// Accounting is keyed by **account** and display by **runner**, deliberately.
+/// The skills a cell may declare, and who declares each.
+///
+/// `32 harness capability floor`'s third consequence asked for the **menu** to
+/// show skills, on the grounds that they are the part of a harness an operator
+/// has actually customised and the part farseer was most blind to.
+///
+/// **`32`'s own fix made that menu the wrong one.** Since discovery was denied,
+/// a run reaches only what its cell names, and a cell may name only a directory
+/// under the repository's `skills/`. Listing the twenty-odd skills pi discovers
+/// on this machine would be a menu of things no cell can order - the failure
+/// `13 harness build kit` names as the worst direction, an author committing to
+/// something and finding out afterwards.
+///
+/// So the menu is the repository, and `also_declared_by` is the part an author
+/// actually asks: is anything using this, and what does it do there.
+async fn skills(State(state): State<Arc<AppState>>) -> ApiResult<Json<serde_json::Value>> {
+    let cells = state.cells();
+    let mut rows: Vec<serde_json::Value> = Vec::new();
+    let dir = state.repo_root().join("skills");
+    let mut names: Vec<String> = std::fs::read_dir(&dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter(|entry| entry.path().is_dir())
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .collect();
+    names.sort();
+    for name in names {
+        let declared_by: Vec<String> = cells
+            .values()
+            .filter(|cell| {
+                cell.manager.skills.contains(&name)
+                    || cell.roster.iter().any(|entry| match entry {
+                        farseer_core::RosterEntry::Worker { skills, .. } => {
+                            skills.contains(&name)
+                        }
+                        _ => false,
+                    })
+            })
+            .map(|cell| cell.cell_id.as_str().to_string())
+            .collect();
+        rows.push(serde_json::json!({ "name": name, "declared_by": declared_by }));
+    }
+    Ok(Json(serde_json::json!({ "skills": rows })))
+}
+
 async fn quota(State(state): State<Arc<AppState>>) -> ApiResult<Json<serde_json::Value>> {
     let config = state.runner_config();
     let windows = {
@@ -4441,6 +4488,37 @@ runner = "{runner}"
         assert_eq!(
             env.get("FARSEER_ENDPOINT").map(String::as_str),
             Some("http://127.0.0.1:8787")
+        );
+    }
+
+    /// `32 harness capability floor`'s third consequence, answered with the menu
+    /// a cell can actually order from rather than the one the harness discovered.
+    #[tokio::test]
+    async fn the_skills_menu_lists_the_repository_and_says_who_declares_each() {
+        let h = harness();
+        let dir = h.state.repo_root().join("skills");
+        std::fs::create_dir_all(dir.join("farseer-record")).unwrap();
+        std::fs::create_dir_all(dir.join("unused-one")).unwrap();
+        // A loose file beside them is not a skill, and must not read as one.
+        std::fs::write(dir.join("README.md"), b"not a skill").unwrap();
+
+        let (status, body) = h.get("/v1/skills").await;
+        assert_eq!(status, StatusCode::OK);
+        let names: Vec<&str> = body["skills"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|s| s["name"].as_str().unwrap())
+            .collect();
+        assert_eq!(names, ["farseer-record", "unused-one"], "{body}");
+
+        // The question an author actually asks: is anything using this?
+        assert!(
+            body["skills"][1]["declared_by"]
+                .as_array()
+                .unwrap()
+                .is_empty(),
+            "{body}"
         );
     }
 

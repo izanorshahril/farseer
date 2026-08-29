@@ -1,6 +1,6 @@
 # 32 harness capability floor
 
-**Status:** open, narrowed. A measurement, three things it changed, and one consequence left - the record still cannot say a skill was used.
+**Status:** closed 2026-08-29. A measurement, three things it changed, and four consequences worked through - the last of them answered by noticing this ticket had invalidated its own question.
 **Measured:** 2026-08-27, live, against `pi 0.84.3`, `omp 18.0.4`, `agy 1.1.13`, `codex-cli 0.149.1`.
 
 pi is the benchmark, because the operator picked it as the fleet default and because it is the runner farseer drives most completely. The question is what a coding harness is *expected* to do, and which of those things farseer can **see** - `10 runner inventory`'s rule holds throughout: observed, never advertised. Every row below is a captured line, not a help page.
@@ -87,7 +87,7 @@ Two of the four items below are discharged; struck through rather than deleted, 
 
 - **Skills consequence 1 - a cell cannot ask for a skill.** ~~Open.~~ **Closed 2026-08-28**: a cell declares `skills = [...]`, farseer passes them by path on the runners that take one, and refuses in front of a person on the ones that do not.
 - **Skills consequence 2 - the record does not say a skill was used.** **Half closed 2026-08-29**: `run_queued` now carries the skill **paths** a run was handed, so two runs of one contract that differ only in their skills are no longer identical in the record. What is still missing is *invocation* - farseer records what a run was given, not what it reached for, and a skill loaded and never used looks the same as one the model leaned on throughout.
-- **Skills consequence 3 - the menu cannot show them.** Still open. `13 harness build kit` made the inventory a menu, and skills are the part of a harness an operator has actually customised.
+- **Skills consequence 3 - the menu cannot show them.** **Closed 2026-08-29, and this ticket's own fix changed which menu was wanted.** `GET /v1/skills` lists the directories under the repository's `skills/` and says which cells declare each; the settings widget renders it. Listing what a *harness* discovered would be a menu of things **no cell can order**, because this ticket denied discovery - so a run reaches only what its cell names, and a cell may name only a repository directory. The original framing was written before its own consequence landed.
 - ~~omp's `hub` tool.~~ **Moved to `36 tool grant enforcement` 2026-08-28**: `task` and `hub` are tools, so whether an omp manager spawns its own subagents is a tool level somebody chose rather than a capability nobody did.
 - ~~Whether `agent_end`'s under-counting is fixed in the adapter or in `RunReport`.~~ **Fixed in the adapter 2026-08-28**, as `RunnerSignal::LegSpend`: the record keeps the event for a person and a separate signal carries the arithmetic, because money that only exists in a payload string is money the report cannot add up.
 
