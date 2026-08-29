@@ -110,6 +110,21 @@ An external protocol is spoken at a boundary, never shaped into internals.
 ## What runs today
 
 ```bash
+cargo run
+```
+
+Opens the desktop shell, which is what running farseer means: it attaches to a daemon already on this machine or starts one itself, serves the canvas on a loopback port of its own, and proxies `/v1` with the operator token attached on its side - so the page it loads is one origin and never holds a credential.
+It also puts the most constrained subscription window in the system tray. See [Tray](#tray).
+
+Build the canvas once first, or the shell has nothing to serve:
+
+```bash
+bun run --cwd ui build
+```
+
+The daemon can still be driven on its own, which is what CI and the tests do:
+
+```bash
 cargo run --bin farseer -- validate
 ```
 
@@ -126,7 +141,7 @@ Binds `127.0.0.1` only, opens the record, loads the definitions, and writes its 
 | --- | --- |
 | `GET /v1/cells`, `/v1/cells/{id}` | read definitions. There is deliberately **no edit path** - they are files in git |
 | `POST /v1/cells/reload` | re-read from disk, reporting broken files rather than dying on them |
-| `POST /v1/cells/{id}/instruct` | run the cell's manager against a goal; current native LLM runners require an explicit shell-capable roster grant; a Claude Code manager gets a generated strict MCP config outside the worktree, a codex-app-server manager gets the same MCP face configured in its `thread/start` handshake with the bearer named as an environment variable, and a pi or omp manager gets farseer's delegation extension and its credentials in the environment, so and a goose-acp or opencode-acp manager gets it in `session/new`'s `mcpServers` when the agent says it speaks HTTP MCP, so all four may delegate to named roster workers. No manager is ever told its own token: identity comes from the bearer the request already carried; every other manager is told its roster and told it cannot reach it; returns `202` with a `run_id` after setup is accepted |
+| `POST /v1/cells/{id}/instruct` | run the cell's manager against a goal; current native LLM runners require an explicit shell-capable roster grant; a Claude Code manager gets a generated strict MCP config outside the worktree, a codex-app-server manager gets the same MCP face configured in its `thread/start` handshake with the bearer named as an environment variable, and a pi or omp manager gets farseer's delegation extension and its credentials in the environment, and a goose-acp or opencode-acp manager gets it in `session/new`'s `mcpServers` when the agent says it speaks HTTP MCP - so all four transports may delegate to named roster workers. No manager is ever told its own token: identity comes from the bearer the request already carried; every other manager is told its roster and told it cannot reach it; returns `202` with a `run_id` after setup is accepted |
 | `GET /v1/events?cell=&run=&since=` | the cursor read. `since` is exclusive, so a client resumes with no gap and no duplicate |
 | `GET /v1/stream` | the same query as SSE, honouring `Last-Event-ID`. Attach and replay are one call with a different cursor |
 | `GET /v1/runs/{id}` | a run's row: lifecycle, outcome, cost, tokens, and `18`/`05`'s liveness - `live`/`stalled`/`likely_hung`, or `null` once nothing in memory can answer |
@@ -159,6 +174,25 @@ tools = "read"   # read | edit | shell (default)
 Absent is `shell`, which is what farseer has always done, now said out loud rather than happening because nothing was passed.
 The names farseer passes are its own probed table, never a string from a cell file, and a runner that cannot take an allowlist refuses the run instead of ignoring the field.
 See [36 tool grant enforcement](.scratch/farseer/issues/36-tool-grant-enforcement.md).
+
+### Tray
+
+The desktop shell puts one line in the system tray: the **most constrained** subscription window, because that is the only one that changes what an operator does next.
+Right-click lists every window, worst first, as readings rather than commands - the verbs stay on the canvas.
+
+A percentage there is always the **provider's own**. farseer never computes one, per [27 quota accounting](.scratch/farseer/issues/27-quota-accounting.md): its own spend is a lower bound on a window drained by sessions it cannot see, and a tray line is read in half a second and remembered as fact.
+A runner that states no percentage gets a line without one, never a `0%`.
+
+### Reading a quota nothing else exposes
+
+`omp usage --json` reports every account omp is signed into - including a Google Antigravity window no other runner on this machine exposes - and farseer can poll it on a timer, so the tray and `GET /v1/quota` say something while nothing is running.
+
+**Off unless you ask**, because it is farseer launching somebody else's binary:
+
+```toml
+[omp]
+usage_poll = true
+```
 
 ### Notifications
 

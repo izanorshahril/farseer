@@ -2013,7 +2013,21 @@ async fn quota(State(state): State<Arc<AppState>>) -> ApiResult<Json<serde_json:
 ///
 /// Started from `serve`, so nothing polls in a test: a unit test that shells out
 /// to a binary on the developer's machine is not testing farseer.
+///
+/// **Opt-in, and off by default.** Starting farseer used to launch `omp` whether
+/// or not the operator had asked for a cross-provider quota reading, which is
+/// farseer running somebody else's binary on its own initiative. `13 harness
+/// build kit` made the inventory a menu an author picks from, and a poll nobody
+/// chose is the opposite of that. Turn it on per runner in `runners.toml`:
+///
+/// ```toml
+/// [omp]
+/// usage_poll = true
+/// ```
 fn spawn_window_poll(state: Arc<AppState>) {
+    if !state.runner_config().polls_usage("omp") {
+        return;
+    }
     tokio::spawn(async move {
         // Windows move on the scale of hours. Anything faster would be a
         // process launch nobody asked for.
@@ -2052,8 +2066,24 @@ fn poll_windows() -> Vec<farseer_core::WindowObservation> {
     let Some(exe) = farseer_runner::resolve::resolve("omp") else {
         return Vec::new();
     };
-    std::process::Command::new(exe)
-        .args(farseer_runner::omp_usage::build_args())
+    let mut command = std::process::Command::new(exe);
+    command.args(farseer_runner::omp_usage::build_args());
+    // **`CREATE_NO_WINDOW`, for the reason `03 spike job objects` named it a
+    // root cause.** Without it this opened a console the operator could see and
+    // close - and closing it delivered `CTRL_CLOSE` to farseer's own process
+    // group, taking the daemon and the desktop shell down with it. A side
+    // channel that improves a view was killing the product.
+    //
+    // Every child farseer spawns goes through `SupervisedProcess`, which has
+    // always set this. This one did not, because it was written as "just run a
+    // command" rather than as spawning a process, and that distinction does not
+    // exist on Windows.
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(windows::Win32::System::Threading::CREATE_NO_WINDOW.0);
+    }
+    command
         .output()
         .ok()
         .filter(|output| output.status.success())

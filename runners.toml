@@ -8,6 +8,13 @@
 #            that two runners share a login, so it declines to guess and shows
 #            two windows until an operator says otherwise.
 #
+#   usage_poll
+#            whether farseer may run this runner's own usage command on a timer.
+#            Off unless written here. `omp usage --json` reads every account it
+#            is logged into - the only reading of a Google quota farseer has -
+#            and it is still farseer launching somebody else's binary, so the
+#            operator asks for it rather than discovering it running.
+#
 #   usd_micros_per_mtok
 #            what a million tokens costs here, per `26 routing policy`. Absent
 #            means farseer prices nothing, which is the default and the honest

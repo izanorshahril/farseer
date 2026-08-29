@@ -2,6 +2,12 @@
 resolver = "3"
 members = ["crates/*"]
 exclude = [".scratch"]
+# `cargo run` opens the desktop shell, because that is what running farseer
+# means: `28 operator surface` chose Tauri and demoted `farseer serve` to
+# optional - the shell attaches to a running daemon or starts one itself. A bare
+# `cargo run` used to pick the `farseer` binary, which has no default subcommand
+# and exits 2 on its usage text, so the first thing a new checkout did was fail.
+default-members = ["crates/farseer-shell"]
 
 [workspace.package]
 version = "0.1.0"
