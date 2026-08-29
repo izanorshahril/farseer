@@ -1983,6 +1983,19 @@ async fn quota(State(state): State<Arc<AppState>>) -> ApiResult<Json<serde_json:
     };
     let mut rows: Vec<serde_json::Value> = windows
         .into_iter()
+        // A window keyed by a runner's own name, when that runner now declares
+        // an account, is a **superseded reading and not a second subscription**.
+        //
+        // `27 quota accounting` keys a window by account and says the account is
+        // declared by the operator, never inferred - so an undeclared runner is
+        // keyed by its own name. The moment `runners.toml` gains
+        // `[codex-app-server] account = "chatgpt"`, every observation already in
+        // the record keeps the old key, and the widget showed one Codex
+        // subscription twice, with two percentages a day apart.
+        //
+        // Filtered rather than deleted: `02 record scope` makes the record
+        // append-only, and what those rows said was true when they were written.
+        .filter(|window| config.account_for(&window.account) == window.account)
         .map(|window| {
             let runners = config.runners_on(&window.account);
             let mut value = serde_json::to_value(&window).unwrap_or_default();

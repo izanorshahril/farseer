@@ -14,8 +14,10 @@ import type { Bridge } from "../bridge";
  * the provider's, beside farseer's spend rather than instead of it - and a
  * window whose runner says nothing still shows no percentage at all.
  *
- * One account can now have several windows: Codex reports a five-hour and a
- * weekly, so the list is keyed by account **and** limit.
+ * **Grouped by account, tiled by window.** One account has several windows at
+ * once - Codex reports a five-hour and a weekly - and listing them as separate
+ * rows made four readings of two subscriptions look like four subscriptions.
+ * The account is the thing an operator thinks in; the windows are its shape.
  */
 type Window = {
   account: string;
@@ -30,9 +32,38 @@ type Window = {
   farseer_usd_micros: number;
   farseer_tokens: number;
   runners: string[];
+  /** `record` for a window a run reported, or the poll that read it. */
+  source?: string;
 };
 
 const usd = (micros: number) => `$${(micros / 1_000_000).toFixed(2)}`;
+
+/**
+ * The window's own name for itself, shortened to what an operator reads.
+ *
+ * `10 runner inventory` transcribed `rateLimitType` rather than renaming it, so
+ * these are provider words - `primary`, `secondary`, `5h`, `7d`. A duration is
+ * more use than a rank when two sit side by side, so it wins when reported.
+ */
+function windowName(w: Window): string {
+  const mins = w.window_duration_mins;
+  if (mins) {
+    if (mins % (60 * 24) === 0) return `${mins / (60 * 24)} day`;
+    if (mins % 60 === 0) return `${mins / 60} hour`;
+  }
+  return w.rate_limit_type.replace(/[_:]/g, " ") || "window";
+}
+
+function countdown(resetsAt: number | null, now: number): string {
+  if (resetsAt === null) return "no reset reported";
+  const seconds = resetsAt - Math.floor(now / 1000);
+  if (seconds <= 0) return "reset due";
+  const days = Math.floor(seconds / 86_400);
+  if (days > 0) return `${days}d ${Math.floor((seconds % 86_400) / 3600)}h`;
+  const hours = Math.floor(seconds / 3600);
+  const minutes = Math.floor((seconds % 3600) / 60);
+  return hours > 0 ? `${hours}h ${minutes}m` : `${minutes}m`;
+}
 
 /**
  * A meter, for a number the provider stated.
@@ -43,9 +74,6 @@ const usd = (micros: number) => `$${(micros / 1_000_000).toFixed(2)}`;
  * near exhaustion, which is when an operator would trust it most. A bar reads as
  * a measurement whatever the caption says, so the rule is enforced by this
  * component taking a percentage and nothing else.
- *
- * Bands rather than a gradient: an operator reads position, and three states
- * they can name beat a hue they have to interpret.
  */
 function Meter({ percent, exhausted }: { percent: number; exhausted: boolean }) {
   const clamped = Math.max(0, Math.min(100, percent));
@@ -65,13 +93,44 @@ function Meter({ percent, exhausted }: { percent: number; exhausted: boolean }) 
   );
 }
 
-function countdown(resetsAt: number | null, now: number): string {
-  if (resetsAt === null) return "no reset reported";
-  const seconds = resetsAt - Math.floor(now / 1000);
-  if (seconds <= 0) return "reset due";
-  const hours = Math.floor(seconds / 3600);
-  const minutes = Math.floor((seconds % 3600) / 60);
-  return hours > 0 ? `resets in ${hours}h ${minutes}m` : `resets in ${minutes}m`;
+/** One window, as a tile: name, the provider's reading, and when it turns over. */
+function WindowTile({ window: w, now }: { window: Window; now: number }) {
+  return (
+    <div className="tile">
+      <div className="row">
+        <b className="small">{windowName(w)}</b>
+        <span className="grow" />
+        {w.is_using_overage && <span className="badge overage">overage</span>}
+        {w.status === "exhausted_until" ? (
+          <span className="badge exhausted_until">spent</span>
+        ) : w.used_percent !== undefined ? (
+          <span className="figure mono" title="reported by the provider">
+            {w.used_percent}%
+          </span>
+        ) : (
+          <span className="dim small" title="this runner states no percentage">
+            not stated
+          </span>
+        )}
+      </div>
+      {/* Absent for every runner that states nothing, which is most of them.
+          No bar at all is the honest rendering of "nobody said". */}
+      {w.used_percent !== undefined && (
+        <Meter percent={w.used_percent} exhausted={w.status === "exhausted_until"} />
+      )}
+      <div className="row dim small">
+        <span>{countdown(w.resets_at, now)}</span>
+        <span className="grow" />
+        {/* Per window rather than per account, because that is what the number
+            is: farseer's spend since **this** window was first seen. Two windows
+            on one account began at different moments, so adding them would
+            invent a total nothing measured. */}
+        <span title="farseer's spend since it first saw this window">
+          {usd(w.farseer_usd_micros)}
+        </span>
+      </div>
+    </div>
+  );
 }
 
 export function QuotaWidget({ bridge }: { bridge: Bridge }) {
@@ -107,50 +166,28 @@ export function QuotaWidget({ bridge }: { bridge: Bridge }) {
       </p>
     );
 
+  // Grouped in first-seen order rather than sorted, so the list does not
+  // reshuffle under the operator every thirty seconds.
+  const accounts: { account: string; runners: string[]; windows: Window[] }[] = [];
+  for (const w of windows) {
+    const found = accounts.find((a) => a.account === w.account);
+    if (found) found.windows.push(w);
+    else accounts.push({ account: w.account, runners: w.runners, windows: [w] });
+  }
+
   return (
-    <ul className="windows">
-      {windows.map((window) => (
-        <li key={`${window.account}/${window.rate_limit_type}`}>
+    <ul className="accounts">
+      {accounts.map((account) => (
+        <li key={account.account}>
           <div className="row">
-            <span className={`badge ${window.status}`}>{window.status.replace("_", " ")}</span>
-            <b className="mono">{window.account}</b>
-            {window.rate_limit_type && (
-              <span className="dim small">{window.rate_limit_type.replace("_", " ")}</span>
-            )}
-            {window.is_using_overage && <span className="badge overage">overage</span>}
+            <b className="mono">{account.account}</b>
             <span className="grow" />
-            {/* Stated, never derived. The wording says whose number it is,
-                because the one farseer could calculate is the one `27 quota
-                accounting` refused. */}
-            {window.used_percent !== undefined && (
-              <span className="figure mono" title="reported by the provider">
-                {window.used_percent}% used
-              </span>
-            )}
+            <span className="dim small">{account.runners.join(", ")}</span>
           </div>
-          {/* Absent for every runner that states nothing, which is most of them.
-              No bar at all is the honest rendering of "nobody said". */}
-          {window.used_percent !== undefined && (
-            <Meter
-              percent={window.used_percent}
-              exhausted={window.status === "exhausted_until"}
-            />
-          )}
-          <div className="row dim">
-            <span>{window.runners.join(", ")}</span>
-            <span className="grow" />
-            <span>{countdown(window.resets_at, now)}</span>
-          </div>
-          <div className="row">
-            <span className="figure mono">{usd(window.farseer_usd_micros)}</span>
-            <span className="dim">{window.farseer_tokens.toLocaleString()} tokens</span>
-            <span className="grow" />
-            {/* The label is load-bearing, not decoration. Two things it has to
-                get right: this is not a share of the window, and it is counted
-                from when farseer **first saw** the window rather than from when
-                the provider opened it - a run already in flight at that moment
-                is not in this number. */}
-            <span className="dim small">farseer's spend since it first saw this window</span>
+          <div className="tiles">
+            {account.windows.map((w) => (
+              <WindowTile key={w.rate_limit_type} window={w} now={now} />
+            ))}
           </div>
         </li>
       ))}

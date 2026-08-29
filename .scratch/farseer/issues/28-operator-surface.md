@@ -469,3 +469,35 @@ And absent stays absent: a runner that states no percentage renders `- no percen
 ### Cost
 
 One feature flag on a crate already in the tree - `tauri = { features = ["tray-icon"] }` - and no new dependency. The tray reads the same `/v1/quota` the canvas does, through the token the shell already holds, so it is a second **reader** of one surface rather than a second source of truth.
+
+## The windows widget, rebuilt on operator feedback, 2026-08-29
+
+Four complaints, and the first was not a layout problem at all.
+
+### "0% to 3% used is confusing"
+
+It was showing **one subscription twice**. `chatgpt primary 1%` and `codex-app-server primary 3%` are the same Codex five-hour window, read a day apart under two account keys.
+
+`27 quota accounting` keys a window by account and declares the account in `runners.toml`, never inferring it. The moment that file gained `[codex-app-server] account = "chatgpt"`, every observation already in the record kept the **old** key - a runner's own name, which is what an undeclared runner is keyed by. Nothing was wrong with either row; they were readings of the same thing filed under a name that had been superseded.
+
+`/v1/quota` now drops a window whose account is a runner name that runner config maps somewhere else. **Filtered, never deleted**: `02 record scope` makes the record append-only, and what those rows said was true when they were written.
+
+### "should just report 5h and weekly from the same provider as summary"
+
+Grouped by account, one tile per window. An account is the thing an operator thinks in and its windows are its shape - four rows for two subscriptions read as four subscriptions.
+
+Window names now prefer the **duration** the provider reported (`5 hour`, `7 day`) over its rank (`primary`, `secondary`), because when two sit side by side the duration is what distinguishes them.
+
+### "too vertical, wasting space"
+
+Tiles on a `repeat(auto-fit, minmax(160px, 1fr))` grid: one column in a narrow widget, four across a wide one, without a breakpoint to maintain.
+
+### "widget can't be dragged"
+
+The grip has been rendering since the first canvas and never moved anything. `24 ui state persistence` was already storing the mounted order through `PUT /v1/ui-state/canvas`, so this was a handler and a CSS cursor rather than a feature.
+
+Drag starts on the grip and drops on the whole widget - a 12px drop target is one nobody hits - and it **moves** rather than swaps, because an operator dragging a card past another expects the rest to close up behind it.
+
+### Spend stays per window
+
+Farseer's spend is counted from when it **first saw that window**, and two windows on one account began at different moments. Adding them would produce a total nothing measured, so each tile carries its own.

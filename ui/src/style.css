@@ -610,3 +610,35 @@ code {
   flex: none;
   text-align: right;
 }
+
+/* One account, its windows beside each other rather than stacked. Four rows for
+   two subscriptions read as four subscriptions - see `QuotaWidget`. */
+.accounts {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 14px;
+}
+.accounts > li + li {
+  border-top: 1px solid var(--line);
+  padding-top: 12px;
+}
+.tiles {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: 8px;
+  margin-top: 8px;
+}
+.tile {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 8px 10px;
+  min-width: 0;
+}
+.tile .meter { margin: 6px 0 4px; }
+
+/* The grip is a handle, so it has to look like one and the widget has to move. */
+.grip { cursor: grab; }
+.widget.dragging { opacity: 0.45; }
+.widget.drop-target { outline: 2px dashed var(--accent); outline-offset: 2px; }

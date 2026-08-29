@@ -74,6 +74,11 @@ export function App() {
   const [asking, setAsking] = useState(false);
   const [lastRun, setLastRun] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  // Which widget is being dragged, and which one it is currently over.
+  // `24 ui state persistence` already stores the order; the grip has looked
+  // like a handle since the first canvas and never moved anything.
+  const [dragging, setDragging] = useState<WidgetId | null>(null);
+  const [over, setOver] = useState<WidgetId | null>(null);
 
   useEffect(() => {
     bridge
@@ -165,12 +170,53 @@ export function App() {
           return (
             <section
               key={id}
-              className={wide ? "widget wide" : "widget"}
+              className={[
+                wide ? "widget wide" : "widget",
+                dragging === id ? "dragging" : "",
+                over === id && dragging !== id ? "drop-target" : "",
+              ]
+                .filter(Boolean)
+                .join(" ")}
               onFocus={() => setAnchor({ widget: widget.title })}
               onMouseEnter={() => setAnchor({ widget: widget.title })}
+              // Drop lands on the whole widget rather than the grip, because a
+              // 12px target is a target nobody hits.
+              onDragOver={(event) => {
+                if (!dragging) return;
+                event.preventDefault();
+                setOver(id);
+              }}
+              onDragLeave={() => setOver((current) => (current === id ? null : current))}
+              onDrop={(event) => {
+                event.preventDefault();
+                setOver(null);
+                const from = dragging;
+                setDragging(null);
+                if (!from || from === id) return;
+                // Move rather than swap: an operator dragging one card past
+                // another expects the rest to close up behind it.
+                persist((current) => {
+                  const order = current.mounted.filter((w) => w !== from);
+                  const at = order.indexOf(id);
+                  order.splice(at < 0 ? order.length : at, 0, from);
+                  return { ...current, mounted: order };
+                });
+              }}
+              draggable={dragging === id}
             >
               <div className="head">
-                <span className="grip" aria-hidden>
+                <span
+                  className="grip"
+                  title="drag to move this widget"
+                  // Draggable only while the grip is held, so selecting text in
+                  // a widget body does not start a drag.
+                  onMouseDown={() => setDragging(id)}
+                  onMouseUp={() => setDragging(null)}
+                  onDragEnd={() => {
+                    setDragging(null);
+                    setOver(null);
+                  }}
+                >
                   ⠿
                 </span>
                 <b>{widget.title}</b>
