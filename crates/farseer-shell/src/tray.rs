@@ -47,6 +47,10 @@ pub(crate) struct Window {
     /// The provider's own name for the window.
     #[serde(default)]
     pub label: Option<String>,
+    /// How long the window runs for, when the provider says. Orders the
+    /// readings on a provider's line - see [`lines`].
+    #[serde(default)]
+    pub window_duration_mins: Option<i64>,
 }
 
 /// What to call this window's owner in one or two words.
@@ -155,6 +159,14 @@ pub(crate) fn tooltip(windows: &[Window], now_secs: i64) -> String {
 /// much is left*, and the reset time is a thing to look up in the widget once
 /// the answer is "not much".
 ///
+/// **Shortest window first, always.** The lines rank worst-first, which is what
+/// makes the top one worth reading - but ranking *within* a line by pressure
+/// meant `anthropic` printed `7d` before `5h` while `openai codex` printed `5h`
+/// before `7d`, on the same screen, for no reason an operator could see. A
+/// glanceable surface is read by position, so position has to mean the same
+/// thing every time. Duration is the one ordering that never moves; a provider
+/// that states none - `cursor` - falls back to its own labels, alphabetically.
+///
 /// **A window the provider states no percentage for is not shown.** On a line
 /// that is percentages and nothing else it has nothing to contribute, and
 /// `cursor`'s request meter was spending a slot to print a dash.
@@ -180,7 +192,11 @@ pub(crate) fn lines(windows: &[Window]) -> Vec<String> {
 
     groups
         .into_iter()
-        .map(|(name, windows)| {
+        .map(|(name, mut windows)| {
+            // Shortest first; a window with no stated duration sorts after every
+            // window that has one, then by its own name so the order is fixed
+            // rather than however the source happened to list them.
+            windows.sort_by_key(|w| (w.window_duration_mins.unwrap_or(i64::MAX), what(w)));
             let parts: Vec<String> = windows
                 .iter()
                 .filter(|w| w.status == "exhausted_until" || w.used_percent.is_some())
@@ -196,10 +212,13 @@ pub(crate) fn lines(windows: &[Window]) -> Vec<String> {
                     }
                 })
                 .collect();
+            // The colon is the only punctuation on this line, and it is doing
+            // the work: without it `anthropic 5h 22% 7d 56%` is four things in a
+            // row and the eye has to find where the name stops.
             if parts.is_empty() {
-                return format!("{name}  no percentage reported");
+                return format!("{name}:  no percentage reported");
             }
-            format!("{name}  {}", parts.join("   "))
+            format!("{name}:  {}", parts.join("   "))
         })
         .collect()
 }
@@ -365,6 +384,7 @@ mod tests {
             runners: vec![account.to_string()],
             provider: None,
             label: None,
+            window_duration_mins: None,
         }
     }
 
@@ -380,6 +400,19 @@ mod tests {
             runners: vec!["omp".to_string()],
             provider: Some(provider.to_string()),
             label: Some(label.to_string()),
+            window_duration_mins: duration_mins(label),
+        }
+    }
+
+    /// What omp reports for these labels, so the fixture orders like the real
+    /// thing rather than like whatever the test happened to list.
+    fn duration_mins(label: &str) -> Option<i64> {
+        match label {
+            l if l.contains("5 Hour") || l.contains("5 hours") => Some(300),
+            l if l.contains("7 Day") || l.contains("7 days") => Some(10_080),
+            l if l.contains("Weekly") => Some(10_080),
+            l if l.starts_with("Usage") => Some(1_440),
+            _ => None,
         }
     }
 
@@ -392,9 +425,9 @@ mod tests {
             polled("openai-codex", "5 hours", 98),
             polled("xai-oauth", "SuperGrok Weekly Credits", 3),
         ]);
-        assert_eq!(lines[0], "openai codex  5h 98%");
+        assert_eq!(lines[0], "openai codex:  5h 98%");
         assert_eq!(
-            lines[1], "xai  1w 3%",
+            lines[1], "xai:  1w 3%",
             "the sign-in method is not the provider's name, and a weekly credit              window is `1w`"
         );
         // The email appears nowhere: it is the one thing these two windows share.
@@ -462,23 +495,51 @@ mod tests {
     /// what the widget is for, once the answer is "not much".
     #[test]
     fn a_provider_gets_one_line_however_many_windows_it_has() {
+        // Listed longest-first and lowest-pressure-last on purpose: the order
+        // out must come from the window's duration, not from how the source
+        // happened to list them or from which one is fullest.
         let lines = lines(&[
-            polled("anthropic", "Claude 5 Hour", 20),
             polled("anthropic", "Claude 7 Day", 55),
+            polled("anthropic", "Claude 5 Hour", 20),
             polled("google-antigravity", "Usage (Google)", 0),
             polled("google-antigravity", "Usage (Anthropic)", 4),
         ]);
         assert_eq!(lines.len(), 2, "one line per provider: {lines:?}");
         assert!(
-            lines.contains(&"anthropic  7d 55%   5h 20%".to_string()),
+            lines.contains(&"anthropic:  5h 20%   7d 55%".to_string()),
             "{lines:?}"
         );
         assert!(
-            lines.contains(&"google antigravity  Anthropic 4%   Google 0%".to_string()),
+            lines.contains(&"google antigravity:  Anthropic 4%   Google 0%".to_string()),
             "`Usage (Google)` is `Google` - the provider is already in the heading: {lines:?}"
         );
         // No countdown anywhere: the tray is percentages.
         assert!(lines.iter().all(|line| !line.contains("resets")));
+    }
+
+    /// Two providers with the same two windows print them in the same order.
+    ///
+    /// The lines rank worst-first, and ranking *within* a line the same way put
+    /// `7d` before `5h` on one provider and `5h` before `7d` on another, on the
+    /// same screen. A surface read by position has to mean the same thing in the
+    /// same place every time.
+    #[test]
+    fn every_provider_orders_its_windows_the_same_way() {
+        let lines = lines(&[
+            polled("anthropic", "Claude 7 Day", 55),
+            polled("anthropic", "Claude 5 Hour", 20),
+            polled("openai-codex", "5 hours", 1),
+            polled("openai-codex", "7 days", 0),
+        ]);
+        let order: Vec<Vec<&str>> = lines
+            .iter()
+            .map(|line| {
+                line.split_whitespace()
+                    .filter(|part| *part == "5h" || *part == "7d")
+                    .collect()
+            })
+            .collect();
+        assert_eq!(order, [["5h", "7d"], ["5h", "7d"]], "{lines:?}");
     }
 
     /// A window the provider states no percentage for has nothing to say on a
@@ -488,7 +549,7 @@ mod tests {
         let mut silent = polled("cursor", "gpt-4 requests", 0);
         silent.used_percent = None;
         let lines = lines(&[silent, polled("cursor", "Cursor Models", 6)]);
-        assert_eq!(lines, ["cursor  Cursor 6%"]);
+        assert_eq!(lines, ["cursor:  Cursor 6%"]);
     }
 
     /// ...but a provider whose windows are *all* silent still gets a line.
@@ -497,6 +558,6 @@ mod tests {
     fn a_provider_that_states_nothing_says_so_rather_than_disappearing() {
         let mut silent = polled("cursor", "gpt-4 requests", 0);
         silent.used_percent = None;
-        assert_eq!(lines(&[silent]), ["cursor  no percentage reported"]);
+        assert_eq!(lines(&[silent]), ["cursor:  no percentage reported"]);
     }
 }
