@@ -82,26 +82,31 @@ An external protocol is spoken at a boundary, never shaped into internals.
 │  ├─ farseer-runner/  runners: Claude Code, Codex, cursor-agent and goose, PATHEXT resolution, Job-Object spawn, stream-json mapping, worktree lifecycle
 │  ├─ farseer-manager/ runs one sealed contract, captures terminal text, and records what happened
 │  ├─ farseer/         the binary: runtime and CLI in one
-│  └─ farseer-shell/   the desktop shell: finds a farseer, serves the canvas, holds the token, and puts the most constrained quota window in the tray
+│  └─ farseer-shell/   the desktop shell: finds a farseer, serves the canvas and its widgets, holds the token, remembers the window, and puts each provider's quota in the tray
 ├─ ui/                 the canvas: the operator surface, a client of /v1 like any other
 │  ├─ src/bridge.ts    everything a widget may reach, and nothing else
-│  └─ src/widgets/     runs, activity, quota, fleet - plus whatever cell zero writes
+│  ├─ src/stream.ts    one SSE connection for the whole page, fanned out
+│  ├─ src/selection.ts which run the canvas is looking at - the one fact that crosses widgets
+│  ├─ src/widgets/     conversation, delegation, runs, run detail, activity, quota, runners, fleet, settings
+│  ├─ plugins/         the widget host: gate 1's keep-or-undo and gate 2's import allowlist
+│  └─ scripts/         compiles agent widgets into the build, so the desktop app has them too
 ├─ widgets/            agent-authored widgets, in git, compiled and sandboxed by the canvas
-│  └─ AGENTS.md        the contract a manager reads before writing one
+│  ├─ AGENTS.md        the contract a manager reads before writing one
+│  └─ sandbox-probe/   tries the seven things a widget must not be able to do, from inside
 ├─ skills/             test skills a cell may declare; never discovered from the operator's home
 ├─ extensions/         runner extensions farseer supplies
 │  └─ pi/              delegation tools for pi and omp, which have no MCP client
 ├─ cells/              cell definitions, hand-written, in git
 │  ├─ zero.toml        cell #0, the builder harness
 │  └─ social.toml      the second cell, thinner on purpose
-├─ runners.toml        machine-wide runner facts: which account each signs in with
+├─ runners.toml        machine-wide runner facts: which account each signs in with, and where quota is read
 ├─ BRIEF.md            landscape research, Windows failure catalogue, operator questions
 ├─ ARCHITECTURE.md     the cell model this map decided on
 ├─ HARNESS.md          what eight harnesses taught farseer, written as the contract a farseer-native one would meet
 ├─ AGENTS.md           conventions for agents working here (CLAUDE.md points at it)
 └─ .scratch/farseer/
    ├─ map.md           the decision route: destination, decisions, fog, out of scope
-   ├─ issues/          28 decision tickets, all closed
+   ├─ issues/          38 decision tickets, one open
    ├─ research/        compaction, hang detection, headless UI boundary
    ├─ prototypes/      one operator turn, end to end
    └─ spikes/          jobspike, wsspike, storebench
