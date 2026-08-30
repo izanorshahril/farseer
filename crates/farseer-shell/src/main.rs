@@ -47,7 +47,7 @@ fn run() -> anyhow::Result<()> {
             let binary = runtime::sidecar_path().ok_or_else(|| {
                 anyhow::anyhow!("no farseer binary beside this executable, and none running")
             })?;
-            let owned = runtime::spawn(&binary, &repo_relative("cells"), &repo_root())?;
+            let owned = runtime::spawn(&binary, &cells_dir(), &repo_root())?;
             println!("farseer-shell: started farseer on {}", owned.runtime.port);
             AttachedRuntime {
                 port: owned.runtime.port,
@@ -62,7 +62,7 @@ fn run() -> anyhow::Result<()> {
         .build()?;
     let origin = tokio.block_on(serve::start(
         canvas,
-        repo_relative("cells"),
+        cells_dir(),
         attached.port,
         attached.token.clone(),
     ))?;
@@ -180,4 +180,44 @@ fn repo_root() -> PathBuf {
 
 fn repo_relative(name: &str) -> PathBuf {
     repo_root().join(name)
+}
+
+/// Where the cell definitions are, for a shell that may not be in a repository.
+///
+/// **An installed farseer found none at all.** The shell asked for `cells/`
+/// relative to the working directory, which is the repository root during
+/// development and the installation directory from a Start Menu shortcut. The
+/// application opened, the canvas rendered, and there was no top manager to
+/// talk to - a fleet console with an empty fleet, saying nothing about why.
+///
+/// Three places, in the order that makes each one right:
+///
+/// 1. **The working directory**, which is the repository when farseer is run
+///    from one and the project when an operator opens it in theirs.
+/// 2. **Beside the executable**, which is where an installer puts the
+///    definitions it shipped.
+/// 3. **The operator's own data directory**, beside the record, which is where
+///    definitions they wrote live once farseer is installed rather than cloned.
+///
+/// Nothing is created here and nothing is copied. `01 cell primitive` made a
+/// definition a plain file the operator edits and `13 harness build kit` warned
+/// against farseer having opinions nobody asked for; seeding a directory with
+/// cells somebody did not write is both. An empty answer is returned as an empty
+/// answer, and the canvas says so.
+fn cells_dir() -> PathBuf {
+    let candidates = [
+        Some(repo_relative("cells")),
+        std::env::current_exe()
+            .ok()
+            .and_then(|exe| exe.parent().map(|dir| dir.join("cells"))),
+        farseer_api::runtime_file_path()
+            .parent()
+            .map(|dir| dir.join("cells")),
+    ];
+    for candidate in candidates.into_iter().flatten() {
+        if candidate.is_dir() {
+            return candidate;
+        }
+    }
+    repo_relative("cells")
 }

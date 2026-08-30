@@ -130,6 +130,30 @@ cargo test --workspace
 
 `bun run --cwd ui build` also compiles every widget under `widgets/` into `ui/dist/widgets/`, which is where the desktop shell serves them from - so a new agent-authored widget appears in the packaged app after a build, and immediately under `bun run --cwd ui dev`.
 
+## Packaging
+
+```bash
+bun run --cwd ui build && cargo build --release --workspace && cargo tauri build
+```
+
+In that order, and the order is the whole recipe: `cargo tauri build` bundles `ui/dist` as `canvas` and `cells/` as `cells` beside the executable, and neither exists until the two builds before it have run. The `tauri` CLI is not vendored - `cargo install tauri-cli` or `bunx @tauri-apps/cli` - because nothing in the normal loop needs it.
+
+An installed shell looks for its cell definitions in three places, in order: **the working directory**, **beside the executable**, then **its own data directory** next to the record. Nothing is seeded and nothing is copied: `01 cell primitive` makes a definition a plain file the operator edits, and a directory farseer filled with cells nobody wrote is `13 harness build kit`'s warning about opinions nobody asked for. When it finds none, the canvas says which three places it looked.
+
+### Signing, and what happens without it
+
+The NSIS installer is **unsigned**, and Windows SmartScreen will say so: a blue "Windows protected your PC" screen, with the run button behind *More info*. That is not a bug to work around and there is no flag that removes it - reputation is bought with a certificate and accrues over downloads.
+
+To sign, an operator supplies their own certificate; farseer holds none and asks for none:
+
+```bash
+$env:TAURI_SIGNING_PRIVATE_KEY = "<path to .pfx>"
+$env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD = "<password>"
+cargo tauri build
+```
+
+An EV certificate clears SmartScreen immediately; an OV one clears it after enough installs. Both are a purchase and an identity check, which is why this is a recipe rather than a step in the build.
+
 `.github/workflows/check.yml` runs exactly those commands on `windows-latest`, plus `cargo fmt --all --check`, `cargo clippy --workspace --all-targets` with warnings denied, and `bun run build` for the canvas.
 
 **Windows only, and not as a preference.** `rust-toolchain.toml` pins `x86_64-pc-windows-msvc` as the only target, and the two bugs this project has shipped were both Windows ones - a missing `CREATE_NO_WINDOW` and a console close reaching a whole process group. A green Linux runner would be green for code that cannot run on the machine farseer runs on.

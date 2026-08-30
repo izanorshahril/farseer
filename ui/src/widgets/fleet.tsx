@@ -66,7 +66,20 @@ export function FleetWidget({ bridge }: { bridge: Bridge }) {
 
   if (error) return <p className="empty">cells unavailable - {error}</p>;
   if (!cells) return <p className="empty">reading cells...</p>;
-  if (cells.length === 0) return <p className="empty">No cell definitions loaded.</p>;
+  // **Not just "none".** An installed farseer that finds no `cells/` opens a
+  // console with an empty fleet and a composer whose every message will fail,
+  // and the old wording described that as though it were a state the operator
+  // had chosen. `01 cell primitive` makes a definition a plain file, so the
+  // answer is a path - and the operator can act on a path.
+  if (cells.length === 0)
+    return (
+      <p className="empty">
+        No cell definitions loaded, so there is no top manager to talk to. farseer looks for a{" "}
+        <span className="mono">cells/</span> directory in the working directory, then beside the
+        executable, then in its own data directory. Put a <span className="mono">.toml</span>{" "}
+        definition in one of those and use <b>reload</b> on the Settings widget.
+      </p>
+    );
 
   return (
     <ul className="cells">
