@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useState } from "react";
 import type { Bridge } from "../bridge";
 import { currentProject, onProject, setProject } from "../project";
+import { confirmGrantWithdrawal } from "../confirm";
+import { meaningOf } from "../meaning";
 
 /**
  * The folders farseer may work in, and the projects inside them.
@@ -24,6 +26,30 @@ import { currentProject, onProject, setProject } from "../project";
 type Project = { name: string; path: string; git: boolean };
 type Root = { path: string; missing: boolean; projects: Project[] };
 
+/**
+ * Past this many projects under one root, the list gets a filter.
+ *
+ * A filter over six entries is a control asking to be ignored; over two dozen -
+ * which this widget's own width exists for - a flat list is something the
+ * operator scans instead of queries.
+ */
+const FILTER_AT = 12;
+
+/**
+ * Whether a project path sits under a root, by path segment.
+ *
+ * The same comparison the runtime makes, and the same reason for making it this
+ * way rather than with a string prefix: `D:\Dev` does not contain
+ * `D:\Development`. The runtime canonicalizes first; here both strings came
+ * from the runtime already canonical.
+ */
+function isInside(root: string, project: string): boolean {
+  if (project === root) return true;
+  if (!project.startsWith(root)) return false;
+  const tail = project.slice(root.length);
+  return tail.startsWith("\\") || tail.startsWith("/");
+}
+
 export function ProjectsWidget({ bridge }: { bridge: Bridge }) {
   const [roots, setRoots] = useState<Root[] | null>(null);
   const [note, setNote] = useState<string | null>(null);
@@ -34,6 +60,8 @@ export function ProjectsWidget({ bridge }: { bridge: Bridge }) {
   const [newName, setNewName] = useState("");
   const [newGit, setNewGit] = useState(true);
   const [selected, setSelected] = useState(currentProject());
+  /** Narrows the chip lists. See [`FILTER_AT`]. */
+  const [filter, setFilter] = useState("");
 
   const load = useCallback(
     () =>
@@ -48,6 +76,21 @@ export function ProjectsWidget({ bridge }: { bridge: Bridge }) {
     void load();
     return onProject(setSelected);
   }, [load]);
+
+  /**
+   * Withdrawing a root clears a project selected **inside** it.
+   *
+   * Without this the grant goes and the composer keeps saying where work is
+   * headed, so the refusal arrives one instruction later, detached from the
+   * click that caused it - the worst shape an error can have for the operator
+   * this console is built for.
+   */
+  const withdraw = (root: Root) => {
+    const losing = selected && isInside(root.path, selected) ? selected : null;
+    if (!confirmGrantWithdrawal(root.path, losing)) return;
+    if (losing) setProject(null);
+    void act(() => bridge.del("/projects/roots", { path: root.path }));
+  };
 
   const act = async (work: () => Promise<unknown>) => {
     setBusy(true);
@@ -98,21 +141,10 @@ export function ProjectsWidget({ bridge }: { bridge: Bridge }) {
               >
                 new project
               </button>
-              <button
-                className="chip danger"
-                disabled={busy}
-                onClick={() => {
-                  // Named, and named as a grant: the whole risk of this button
-                  // is that it reads as a delete of the operator's work.
-                  if (
-                    confirm(
-                      `Stop farseer working in ${root.path}?\n\nThe folder and everything in it stays exactly where it is.`,
-                    )
-                  ) {
-                    void act(() => bridge.del("/projects/roots", { path: root.path }));
-                  }
-                }}
-              >
+              {/* Named as a grant, through `confirm.ts` rather than an inline
+                  dialog here, so the two dangerous actions on this canvas
+                  cannot come to disagree about wording a second time. */}
+              <button className="chip danger" disabled={busy} onClick={() => withdraw(root)}>
                 withdraw
               </button>
             </div>
@@ -168,8 +200,30 @@ export function ProjectsWidget({ bridge }: { bridge: Bridge }) {
               <p className="empty small">Nothing in this folder yet.</p>
             )}
 
+            {root.projects.length > FILTER_AT && (
+              <div className="row project-filter">
+                <input
+                  aria-label={`filter projects in ${root.path}`}
+                  placeholder={`filter ${root.projects.length} projects`}
+                  value={filter}
+                  onChange={(e) => setFilter(e.currentTarget.value)}
+                />
+                {filter && (
+                  <button className="chip" onClick={() => setFilter("")}>
+                    clear
+                  </button>
+                )}
+              </div>
+            )}
+
             <ul className="project-list">
-              {root.projects.map((project) => {
+              {root.projects
+                .filter(
+                  (project) =>
+                    root.projects.length <= FILTER_AT ||
+                    project.name.toLowerCase().includes(filter.trim().toLowerCase()),
+                )
+                .map((project) => {
                 const here = selected === project.path;
                 return (
                   <li key={project.path}>
@@ -198,6 +252,9 @@ export function ProjectsWidget({ bridge }: { bridge: Bridge }) {
       </ul>
 
       <div className="row add-root">
+        <span className="dim small" title={meaningOf("root")}>
+          root
+        </span>
         <input
           aria-label="folder to authorize"
           placeholder={String.raw`a folder farseer may work in, e.g. D:\Dev`}
@@ -230,6 +287,12 @@ export function ProjectsWidget({ bridge }: { bridge: Bridge }) {
           <>
             Work goes to <span className="mono">{selected}</span>.
           </>
+        ) : roots.length > 0 ? (
+          // Said here rather than only in the footer: an operator who has just
+          // authorized a folder and picked nothing is one click from the state
+          // they wanted, and the sentence that names the click belongs next to
+          // the chips it is about.
+          <>No project picked - pick one above, or work goes to the folder farseer was started in.</>
         ) : (
           <>No project picked - work goes to the folder farseer itself was started in.</>
         )}

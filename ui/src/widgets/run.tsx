@@ -3,6 +3,7 @@ import type { Bridge } from "../bridge";
 import { follow, type RecordEvent } from "../stream";
 import { onSelection, selectRun, selectedRun } from "../selection";
 import { confirmVerb } from "../confirm";
+import { meaningOf } from "../meaning";
 
 /**
  * One run, whole: what it was told to do, everything it did, and how it ended.
@@ -120,29 +121,16 @@ const TONE: Record<string, string> = {
  * The vocabulary here is load-bearing and invented - `cell`, `ceiling`, `tool
  * level`, `sealed contract` - and it was explained only in source comments,
  * which the operator never sees. The same discipline this codebase applies to
- * numbers it did not observe applies to words it did not teach.
+ * numbers it did not observe applies to words it did not teach. The dictionary
+ * itself now lives in `meaning.ts`, because the words are used on widgets this
+ * one does not own.
  */
-const MEANING: Record<string, string> = {
-  cell: "The definition this run belongs to - its roster, policy and manager, as a file in `cells/`",
-  role: "manager: a conversation you can steer. worker: a job a manager handed off",
-  runner: "The binary that actually ran, from farseer's own inventory",
-  state: "Where the run is, or how it ended",
-  took: "Wall time from queued to finished",
-  cost: "What the runner said it spent - not every runner says",
-  tokens: "What the runner said it used - not every runner says",
-  "tool level": "How much of the runner's own tool set this run got: read, edit or shell",
-  ceiling: "The most irreversible action allowed without asking a person",
-  "tool grants": "Cell-level capabilities the roster named. Recorded, and reaching them is not built yet",
-  skills: "Instruction directories handed to the runner by path, never discovered from your home directory",
-  budget: "The ceiling on what this run may spend before farseer stops it",
-  "done when": "The cell's own definition of finished, checked by the cell's tools rather than by farseer",
-};
 
 /** A labelled fact, absent-aware, because a blank and a zero are not the same. */
 function Fact({ label, value }: { label: string; value: string | undefined }) {
   return (
     <span className={value ? "" : "absent"}>
-      <i title={MEANING[label]}>{label}</i>
+      <i title={meaningOf(label)}>{label}</i>
       <b className="mono">{value ?? "not stated"}</b>
     </span>
   );

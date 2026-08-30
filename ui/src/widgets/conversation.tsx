@@ -59,7 +59,14 @@ function context(meta: Meta): string | undefined {
 type Turn = {
   seq: number;
   run: string;
-  who: "operator" | "manager";
+  /**
+   * `farseer` is the runtime's own voice, and it exists because the runtime's
+   * voice was being put in the manager's mouth. A run that died before the
+   * model ever spoke ends with farseer's error as its text - a spawn failure,
+   * a workspace that could not be made - and rendering that under "top manager"
+   * claims an agent said something no agent was alive to say.
+   */
+  who: "operator" | "manager" | "farseer";
   text: string;
   ts: number;
   outcome?: string;
@@ -108,10 +115,15 @@ function turnFrom(event: RecordEvent): Turn | null {
     if (typeof text !== "string" || !text.trim()) return null;
     // A run whose last answer is already in the thread should not repeat it
     // when it finally exits; the outcome is what is new by then.
+    const failed = payload["outcome"] === "failed";
     return {
       seq: event.seq,
       run: event.run_id,
-      who: "manager",
+      // Kept verbatim rather than replaced with a friendlier sentence: the
+      // operator needs the exe and the argv to fix it, and `02 record scope`'s
+      // whole argument is that the record says what happened. What changes is
+      // **who is credited with saying it**.
+      who: failed ? "farseer" : "manager",
       text,
       ts: event.ts,
       final: true,
@@ -391,7 +403,7 @@ export function ConversationWidget({ bridge }: { bridge: Bridge }) {
       {turns.map((turn) => (
         <li key={turn.seq} className={turn.who}>
           <div className="row small">
-            <b>{turn.who === "operator" ? "you" : "top manager"}</b>
+            <b>{turn.who === "operator" ? "you" : turn.who === "farseer" ? "farseer" : "top manager"}</b>
             <span className="faint mono">{time(turn.ts)}</span>
             <span className="faint mono">{turn.run.slice(0, 8)}</span>
             {turn.outcome && turn.outcome !== "ok" && (

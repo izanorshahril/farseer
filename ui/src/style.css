@@ -1034,3 +1034,41 @@ code {
   padding: 4px 0 0 10px;
   font-size: 11px;
 }
+
+/* farseer's own voice in a conversation.
+   A run that died before the model spoke ends with farseer's error as its text -
+   a spawn failure, a workspace that could not be made - and that was rendered
+   under "top manager", which claims an agent said something no agent was alive
+   to say. The text stays verbatim, because the operator needs the exe and the
+   argv; what changes is who is credited with it. */
+.thread li.farseer > .row > b {
+  color: var(--warn);
+}
+.thread li.farseer p {
+  border-left: 2px solid var(--warn);
+  padding-left: 8px;
+  font-family: var(--mono);
+  font-size: 12px;
+}
+
+/* The filter over a root with two dozen projects in it. */
+.project-filter {
+  margin: 6px 0 0 10px;
+  gap: 8px;
+}
+.project-filter input {
+  flex: 1;
+  max-width: 260px;
+  min-height: 28px;
+  font: inherit;
+  font-size: 12px;
+  color: inherit;
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 5px 8px;
+}
+.project-filter input:focus {
+  outline: none;
+  border-color: var(--accent);
+}

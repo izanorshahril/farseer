@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import type { Bridge } from "../bridge";
+import { meaningOf } from "../meaning";
 import { follow, type RecordEvent } from "../stream";
 
 /**
@@ -139,7 +140,7 @@ export function DelegationWidget({ bridge }: { bridge: Bridge }) {
       {exchanges.map((exchange) => (
         <li key={exchange.run}>
           <div className="row small">
-            <b>to a worker</b>
+            <b title={meaningOf("worker")}>to a worker</b>
             <span className="faint mono">{time(exchange.queued)}</span>
             <span className="faint mono">{exchange.run.slice(0, 8)}</span>
             {exchange.runner && <span className="badge">{exchange.runner}</span>}
