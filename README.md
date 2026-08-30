@@ -128,6 +128,12 @@ bun run --cwd ui build
 cargo test --workspace
 ```
 
+`.github/workflows/check.yml` runs exactly those commands on `windows-latest`, plus `cargo fmt --all --check`, `cargo clippy --workspace --all-targets` with warnings denied, and `bun run build` for the canvas.
+
+**Windows only, and not as a preference.** `rust-toolchain.toml` pins `x86_64-pc-windows-msvc` as the only target, and the two bugs this project has shipped were both Windows ones - a missing `CREATE_NO_WINDOW` and a console close reaching a whole process group. A green Linux runner would be green for code that cannot run on the machine farseer runs on.
+
+The 27 `#[ignore]`d tests do not run there: they need `pi`, `omp`, `codex`, `goose` and `opencode` installed and they spend a real subscription. CI says so in its own output rather than leaving a green tick to imply otherwise.
+
 The daemon can still be driven on its own, which is what CI and the tests do:
 
 ```bash

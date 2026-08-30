@@ -132,6 +132,7 @@ bun run --cwd ui check
 ```
 
 `cargo clippy --workspace --all-targets` is expected to be silent, and `cargo fmt --all` is applied before every commit.
+`.github/workflows/check.yml` runs both on `windows-latest` with `RUSTFLAGS: -D warnings`, so a warning fails the build rather than accumulating.
 
 Ten tests in `farseer-api` are `#[ignore]`d: seven spawn a real headless `claude` process, one spawns Goose, and the full manager-loop and cross-cell tests spawn both.
 The "a one-word prompt cost $0.32 loading plugins" finding means the Claude tests are real minutes and real cost, not a hang.
