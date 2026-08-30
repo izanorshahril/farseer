@@ -71,9 +71,24 @@ fn who(window: &Window) -> String {
 }
 
 /// This window's own short name, under a heading that already says the provider.
+///
+/// **Two or three characters where the provider gave a sentence.** A tray line
+/// holds one provider and all its windows, so `SuperGrok Weekly Credits` and
+/// `Claude 7 Day` have to become `1w` and `7d` or there is room for one window
+/// per provider and no more. Everything dropped here is either a duration said
+/// in words - which `5h` says in two characters - or the provider repeating its
+/// own name under a heading that already carries it.
 fn what(window: &Window) -> String {
     if let Some(label) = &window.label {
-        return label.clone();
+        let short = label
+            // `Usage (Google)` -> `Google`, which is the only part that differs
+            // between Antigravity's three windows.
+            .trim_start_matches("Usage ")
+            .trim_matches(['(', ')'])
+            // `Cursor Models` -> `Cursor`, `Other Models` -> `Other`.
+            .trim_end_matches(" Models")
+            .trim();
+        return duration_word(short).unwrap_or_else(|| short.to_string());
     }
     let id = match &window.provider {
         Some(provider) => window
@@ -82,7 +97,27 @@ fn what(window: &Window) -> String {
             .unwrap_or(&window.rate_limit_type),
         None => &window.rate_limit_type,
     };
-    id.replace(['_', ':'], " ")
+    duration_word(id).unwrap_or_else(|| id.replace(['_', ':'], " "))
+}
+
+/// `5 hours`, `Claude 7 Day`, `credits:1w` -> `5h`, `7d`, `1w`.
+///
+/// Returns `None` for a name that says no duration, so a window called something
+/// else keeps the provider's own word rather than being forced into a shape it
+/// does not have.
+fn duration_word(name: &str) -> Option<String> {
+    let lower = name.to_ascii_lowercase();
+    let unit = ["hour", "day", "week", "month"]
+        .into_iter()
+        .find(|unit| lower.contains(unit))?;
+    // The number beside it, defaulting to one: `Claude 7 Day` says seven and
+    // `Weekly` says one without writing it down.
+    let count: String = lower
+        .split(|c: char| !c.is_ascii_digit())
+        .find(|part| !part.is_empty())
+        .unwrap_or("1")
+        .to_string();
+    Some(format!("{count}{}", &unit[..1]))
 }
 
 /// The one line a tray tooltip has room for.
@@ -112,33 +147,59 @@ pub(crate) fn tooltip(windows: &[Window], now_secs: i64) -> String {
     line
 }
 
-/// One menu line per window, in the same order the tooltip picked from.
-pub(crate) fn lines(windows: &[Window], now_secs: i64) -> Vec<String> {
+/// One menu line per **provider**, in the same order the tooltip picked from.
+///
+/// A line per window put eleven rows in the tray, eight of them beginning with
+/// the same email, each carrying a name, a percentage and a countdown. A tray is
+/// read at a glance while doing something else: the question it answers is *how
+/// much is left*, and the reset time is a thing to look up in the widget once
+/// the answer is "not much".
+///
+/// **A window the provider states no percentage for is not shown.** On a line
+/// that is percentages and nothing else it has nothing to contribute, and
+/// `cursor`'s request meter was spending a slot to print a dash.
+///
+/// A provider whose windows are all silent still gets its line, saying so -
+/// absent is absent, and a provider vanishing from the menu would read as a
+/// provider farseer had stopped watching.
+pub(crate) fn lines(windows: &[Window]) -> Vec<String> {
     let mut ranked: Vec<&Window> = windows.iter().collect();
     ranked.sort_by_key(|w| std::cmp::Reverse(pressure(w)));
-    ranked
-        .iter()
-        .map(|w| {
-            let limit = match what(w) {
-                name if name.is_empty() => String::new(),
-                name => format!(" {name}"),
-            };
-            let state = if w.status == "exhausted_until" {
-                "exhausted".to_string()
-            } else {
-                match w.used_percent {
-                    Some(percent) => format!("{percent}%"),
-                    None => "-".to_string(),
-                }
-            };
-            // Bare `4h 38m` rather than `resets in 4h 38m`: eleven lines of a
-            // tray menu have no room to repeat the same three words eleven
-            // times, and the tooltip above still spells it out once.
-            let reset = w
-                .resets_at
-                .map(|r| format!("  {}", countdown(r, now_secs).replace("resets in ", "")))
-                .unwrap_or_default();
-            format!("{}{}  {}{}", who(w), limit, state, reset)
+
+    // Grouped in the order the ranking produced, so the provider holding the
+    // most constrained window is the first line - the same rule the tooltip
+    // uses to pick its one window, applied to the menu.
+    let mut groups: Vec<(String, Vec<&Window>)> = Vec::new();
+    for window in ranked {
+        let name = who(&window.clone());
+        match groups.iter_mut().find(|(n, _)| *n == name) {
+            Some((_, held)) => held.push(window),
+            None => groups.push((name, vec![window])),
+        }
+    }
+
+    groups
+        .into_iter()
+        .map(|(name, windows)| {
+            let parts: Vec<String> = windows
+                .iter()
+                .filter(|w| w.status == "exhausted_until" || w.used_percent.is_some())
+                .map(|w| {
+                    let state = if w.status == "exhausted_until" {
+                        "spent".to_string()
+                    } else {
+                        format!("{}%", w.used_percent.unwrap_or_default())
+                    };
+                    match what(w) {
+                        label if label.is_empty() => state,
+                        label => format!("{label} {state}"),
+                    }
+                })
+                .collect();
+            if parts.is_empty() {
+                return format!("{name}  no percentage reported");
+            }
+            format!("{name}  {}", parts.join("   "))
         })
         .collect()
 }
@@ -238,7 +299,7 @@ pub(crate) fn install<R: Runtime>(
                 .unwrap_or_default();
 
             let _ = tray.set_tooltip(Some(tooltip(&windows, now)));
-            if let Ok(menu) = rebuild(&handle, &windows, now) {
+            if let Ok(menu) = rebuild(&handle, &windows) {
                 let _ = tray.set_menu(Some(menu));
             }
         }
@@ -246,16 +307,12 @@ pub(crate) fn install<R: Runtime>(
     Ok(())
 }
 
-/// The menu, with one **disabled** line per window above the actions.
+/// The menu, with one **disabled** line per provider above the actions.
 ///
 /// Disabled because they are readings rather than commands. `28 operator
 /// surface` keeps the verbs on the canvas, and a tray that can act is a second
 /// control surface to keep in step with the first.
-fn rebuild<R: Runtime>(
-    app: &AppHandle<R>,
-    windows: &[Window],
-    now: i64,
-) -> anyhow::Result<Menu<R>> {
+fn rebuild<R: Runtime>(app: &AppHandle<R>, windows: &[Window]) -> anyhow::Result<Menu<R>> {
     let mut items: Vec<Box<dyn tauri::menu::IsMenuItem<R>>> = Vec::new();
     if windows.is_empty() {
         items.push(Box::new(MenuItem::with_id(
@@ -266,7 +323,7 @@ fn rebuild<R: Runtime>(
             None::<&str>,
         )?));
     }
-    for (index, line) in lines(windows, now).iter().enumerate() {
+    for (index, line) in lines(windows).iter().enumerate() {
         items.push(Box::new(MenuItem::with_id(
             app,
             format!("w{index}"),
@@ -331,22 +388,14 @@ mod tests {
     /// sign-in suffix is not part of the provider's name.
     #[test]
     fn a_polled_window_is_named_by_its_provider_rather_than_its_login() {
-        let lines = lines(
-            &[
-                polled("openai-codex", "5 hours", 98),
-                polled("xai-oauth", "SuperGrok Weekly Credits", 3),
-            ],
-            1_000,
-        );
-        assert!(
-            lines[0].starts_with("openai codex 5 hours"),
-            "{:?}",
-            lines[0]
-        );
-        assert!(
-            lines[1].starts_with("xai SuperGrok Weekly Credits"),
-            "the sign-in method is not the provider's name: {:?}",
-            lines[1]
+        let lines = lines(&[
+            polled("openai-codex", "5 hours", 98),
+            polled("xai-oauth", "SuperGrok Weekly Credits", 3),
+        ]);
+        assert_eq!(lines[0], "openai codex  5h 98%");
+        assert_eq!(
+            lines[1], "xai  1w 3%",
+            "the sign-in method is not the provider's name, and a weekly credit              window is `1w`"
         );
         // The email appears nowhere: it is the one thing these two windows share.
         assert!(lines.iter().all(|line| !line.contains('@')));
@@ -391,18 +440,63 @@ mod tests {
         assert!(!line.contains('%'), "{line}");
     }
 
-    /// Every window gets a line, worst first, so the menu answers the question
+    /// Every provider gets a line, worst first, so the menu answers the question
     /// the tooltip had to compress.
     #[test]
-    fn the_menu_lists_every_window_worst_first() {
+    fn the_menu_lists_every_provider_worst_first() {
         let windows = vec![
             window("codex", "allowed", Some(2)),
             window("anthropic-max", "exhausted_until", Some(100)),
         ];
-        let lines = lines(&windows, 1_000);
+        let lines = lines(&windows);
         assert_eq!(lines.len(), 2);
         assert!(lines[0].starts_with("anthropic-max"), "{lines:?}");
-        assert!(lines[0].contains("exhausted"), "{lines:?}");
+        assert!(lines[0].contains("spent"), "{lines:?}");
         assert!(lines[1].contains("2%"), "{lines:?}");
+    }
+
+    /// One line per provider, however many windows it has.
+    ///
+    /// Eleven windows produced eleven rows, eight of them starting with the same
+    /// email. A tray answers *how much is left* at a glance; the reset time is
+    /// what the widget is for, once the answer is "not much".
+    #[test]
+    fn a_provider_gets_one_line_however_many_windows_it_has() {
+        let lines = lines(&[
+            polled("anthropic", "Claude 5 Hour", 20),
+            polled("anthropic", "Claude 7 Day", 55),
+            polled("google-antigravity", "Usage (Google)", 0),
+            polled("google-antigravity", "Usage (Anthropic)", 4),
+        ]);
+        assert_eq!(lines.len(), 2, "one line per provider: {lines:?}");
+        assert!(
+            lines.contains(&"anthropic  7d 55%   5h 20%".to_string()),
+            "{lines:?}"
+        );
+        assert!(
+            lines.contains(&"google antigravity  Anthropic 4%   Google 0%".to_string()),
+            "`Usage (Google)` is `Google` - the provider is already in the heading: {lines:?}"
+        );
+        // No countdown anywhere: the tray is percentages.
+        assert!(lines.iter().all(|line| !line.contains("resets")));
+    }
+
+    /// A window the provider states no percentage for has nothing to say on a
+    /// line made of percentages, so it does not take a slot.
+    #[test]
+    fn a_window_with_no_percentage_is_left_off_rather_than_printed_as_a_dash() {
+        let mut silent = polled("cursor", "gpt-4 requests", 0);
+        silent.used_percent = None;
+        let lines = lines(&[silent, polled("cursor", "Cursor Models", 6)]);
+        assert_eq!(lines, ["cursor  Cursor 6%"]);
+    }
+
+    /// ...but a provider whose windows are *all* silent still gets a line.
+    /// Vanishing from the menu would read as farseer having stopped watching.
+    #[test]
+    fn a_provider_that_states_nothing_says_so_rather_than_disappearing() {
+        let mut silent = polled("cursor", "gpt-4 requests", 0);
+        silent.used_percent = None;
+        assert_eq!(lines(&[silent]), ["cursor  no percentage reported"]);
     }
 }

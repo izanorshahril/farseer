@@ -54,6 +54,17 @@ pub const USAGE_SOURCES: [&str; 1] = ["omp"];
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RunnerEntry {
+    /// Which **provider** this runner's account is, in the usage source's own
+    /// id - `openai-codex`, `anthropic`.
+    ///
+    /// Declared, never inferred, for the same reason [`Self::account`] is: the
+    /// operator named their account `chatgpt` and omp calls the same
+    /// subscription `openai-codex`, and nothing farseer can observe joins those
+    /// two strings. Without the declaration the widget showed one Codex
+    /// subscription twice - once from the record and once from the poll - with
+    /// two different names and two different readings of the same window.
+    #[serde(default)]
+    pub provider: Option<String>,
     /// Runners sharing this string share one subscription window.
     ///
     /// `26 routing policy`'s price table belongs beside this when `26` is built.
@@ -176,6 +187,19 @@ impl RunnerConfig {
                 .runners
                 .get(runner)
                 .is_some_and(|entry| entry.usage_poll)
+    }
+
+    /// Which provider an **account** belongs to, when the operator said.
+    ///
+    /// Keyed by account rather than by runner because that is how a window is
+    /// keyed: `27 quota accounting` merges runners onto an account, and this is
+    /// the next join outwards - the account onto the provider a usage source
+    /// reports it under.
+    pub fn provider_for_account(&self, account: &str) -> Option<&str> {
+        self.runners
+            .values()
+            .find(|entry| entry.account.as_deref() == Some(account) && entry.provider.is_some())
+            .and_then(|entry| entry.provider.as_deref())
     }
 
     /// The source farseer will read windows from while idle, if any.

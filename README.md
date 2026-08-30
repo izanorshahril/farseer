@@ -160,7 +160,7 @@ Binds `127.0.0.1` only, opens the record, loads the definitions, and writes its 
 | `/v1/mcp` | the streamable-HTTP MCP face nested into this router and guard; all three tools - `read_memory`, `write_memory`, and `delegate_to_worker` - derive identity from an active manager capability, and no raw event append exists because "an agent that can forge events can rewrite its own history" |
 | `POST /v1/manager/delegate/{worker,cell}` | the same two delegation verbs as plain JSON, for a manager whose runner has no MCP client. It calls the same functions the MCP tools call, so the roster, the worker cap and the budget are one implementation rather than two |
 | `GET /v1/skills` | the skills a cell may declare - directories in `skills/`, with which cells declare each. Deliberately **not** what a harness discovered on this machine: discovery is denied, so that would be a menu of things no cell can order |
-| `GET /v1/quota` | recorded windows from runs, plus a live `omp usage --json` snapshot labelled `source: "omp usage"` - the only reading of a Google Antigravity quota farseer has, and the only sight of any window while nothing is running |
+| `GET /v1/quota` | recorded windows from runs, plus a live `omp usage --json` snapshot labelled `source: "omp usage"` - the live reading supersedes farseer's own record of the same window, matched on the provider an account declares - the only reading of a Google Antigravity quota farseer has, and the only sight of any window while nothing is running |
 | `POST /v1/quota/refresh` | run that snapshot **now** rather than waiting for the five-minute poll, then answer like the read. Refuses, naming the line to add, when `[usage] source` is unset |
 
 Every request must arrive on a loopback `Host`.

@@ -3,6 +3,14 @@
 #
 # Two kinds of declaration live here, and they are different acts:
 #
+#   provider what the usage source calls this account - `openai-codex` for the
+#            ChatGPT subscription, `anthropic` for Claude. Declared for the same
+#            reason `account` is: the operator named their account `chatgpt` and
+#            omp calls the same subscription `openai-codex`, and nothing farseer
+#            can observe joins those two strings. Without it the widget shows one
+#            subscription twice - once from the record, once from the live poll -
+#            under two names, with two readings of the same window.
+#
 #   account  which subscription a runner spends, per `27 quota accounting`.
 #            Declared, never inferred - nothing farseer can observe tells it
 #            that two runners share a login, so it declines to guess and shows
@@ -51,6 +59,7 @@ source = "omp"
 
 [codex]
 account = "chatgpt"
+provider = "openai-codex"
 model = "gpt-5.6-luna"
 effort = "low"
 

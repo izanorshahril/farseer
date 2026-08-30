@@ -2072,7 +2072,7 @@ async fn quota(State(state): State<Arc<AppState>>) -> ApiResult<Json<serde_json:
         let store = state.store();
         store.windows(|account| config.runners_on(account))?
     };
-    let mut rows: Vec<serde_json::Value> = windows
+    let rows: Vec<(farseer_store::WindowRow, serde_json::Value)> = windows
         .into_iter()
         // A window keyed by a runner's own name, when that runner now declares
         // an account, is a **superseded reading and not a second subscription**.
@@ -2089,12 +2089,16 @@ async fn quota(State(state): State<Arc<AppState>>) -> ApiResult<Json<serde_json:
         .filter(|window| config.account_for(&window.account) == window.account)
         .map(|window| {
             let runners = config.runners_on(&window.account);
+            let provider = config.provider_for_account(&window.account);
             let mut value = serde_json::to_value(&window).unwrap_or_default();
             if let Some(object) = value.as_object_mut() {
                 object.insert("runners".into(), serde_json::json!(runners));
                 object.insert("source".into(), serde_json::json!("record"));
+                if let Some(provider) = provider {
+                    object.insert("provider".into(), serde_json::json!(provider));
+                }
             }
-            value
+            (window, value)
         })
         .collect();
     let polled = state
@@ -2102,6 +2106,36 @@ async fn quota(State(state): State<Arc<AppState>>) -> ApiResult<Json<serde_json:
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .clone();
+
+    // **The live reading supersedes farseer's own record of the same window.**
+    //
+    // Both are true and they are the same subscription: the record holds what a
+    // run was told when it ran, and the poll holds what the provider says now.
+    // Shown side by side they read as two subscriptions with two different
+    // percentages, which is what the widget did until the operator pointed at
+    // it - `chatgpt 5 hour 1%` above `openai codex 5 hours 1%`.
+    //
+    // Matched on the provider the operator **declared** plus the window's own
+    // duration, so nothing is dropped on a guess: an account with no declared
+    // provider keeps both rows, which is the same failure `27 quota accounting`
+    // already chose - two windows shown where there is one, visible and fixable
+    // with one line of config.
+    let live: Vec<(&str, Option<i64>)> = polled
+        .iter()
+        .filter_map(|w| Some((w.provider.as_deref()?, w.window_duration_mins)))
+        .collect();
+    let mut rows: Vec<serde_json::Value> = rows
+        .into_iter()
+        .filter(|(window, value)| {
+            let Some(provider) = value.get("provider").and_then(serde_json::Value::as_str) else {
+                return true;
+            };
+            !live
+                .iter()
+                .any(|(p, mins)| *p == provider && *mins == window.window_duration_mins)
+        })
+        .map(|(_, value)| value)
+        .collect();
     rows.extend(polled.into_iter().map(|window| {
         let mut value = serde_json::to_value(&window).unwrap_or_default();
         if let Some(object) = value.as_object_mut() {
