@@ -167,6 +167,9 @@ function Composer({ bridge }: { bridge: Bridge }) {
         ref={field}
         rows={2}
         disabled={sending}
+        // Named, not just prompted: a placeholder vanishes on the first
+        // keystroke, so a control carrying only one has no name at all.
+        aria-label="Say something to the top manager"
         placeholder="Say something to the top manager - Enter sends, Shift+Enter for a new line"
         // A textarea rather than an input, because a goal is usually a
         // paragraph. Enter still sends, since the common case is one line.

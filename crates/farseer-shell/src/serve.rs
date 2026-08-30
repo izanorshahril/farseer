@@ -245,15 +245,24 @@ async fn proxy(State(shell): State<Arc<Shell>>, request: Request) -> Response {
 /// The canvas build output, next to the executable when installed and under the
 /// repository during development.
 pub fn canvas_dir() -> Option<PathBuf> {
+    // **The repository's own build wins where there is one.** Bundling `ui/dist`
+    // as a Tauri resource also stages a copy into `target/<profile>/canvas` at
+    // compile time, and that copy is only as fresh as the last `cargo build` -
+    // so a developer who ran `bun run build` and reloaded got the *older* canvas
+    // and no indication that they had. Checking here first costs an `exists` and
+    // means the live build is the one on screen.
+    //
+    // An installed application has no `CARGO_MANIFEST_DIR` on disk, so this
+    // branch simply fails there and the staged copy beside the executable is
+    // used - which is the only one that exists.
+    let repo = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(|p| p.parent())
+        .map(|root| root.join("ui").join("dist"));
+    if let Some(repo) = repo.filter(|dir| dir.join("index.html").exists()) {
+        return Some(repo);
+    }
     let exe = std::env::current_exe().ok()?;
     let beside = exe.parent()?.join("canvas");
-    if beside.join("index.html").exists() {
-        return Some(beside);
-    }
-    let repo = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .parent()?
-        .parent()?
-        .join("ui")
-        .join("dist");
-    repo.join("index.html").exists().then_some(repo)
+    beside.join("index.html").exists().then_some(beside)
 }

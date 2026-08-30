@@ -120,7 +120,12 @@ function Meter({ percent, exhausted }: { percent: number; exhausted: boolean }) 
       aria-label="reported by the provider"
       title={`${clamped}% used, reported by the provider`}
     >
-      <span className={`meter-fill ${band}`} style={{ width: `${clamped}%` }} />
+      {/* Scaled, not resized: animating `width` re-runs layout every frame and
+          a transform is composited. The bar is identical on screen. */}
+      <span
+        className={`meter-fill ${band}`}
+        style={{ transform: `scaleX(${clamped / 100})` }}
+      />
     </div>
   );
 }

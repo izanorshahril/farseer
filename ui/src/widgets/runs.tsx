@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import type { Bridge } from "../bridge";
 import { follow } from "../stream";
 import { selectRun } from "../selection";
+import { confirmVerb } from "../confirm";
 
 /**
  * The fleet, with `05 run state model`'s verbs on the line.
@@ -173,14 +174,30 @@ export function RunsWidget({ bridge }: { bridge: Bridge }) {
                   touched
                 </span>
               )}
-              <span className="mono faint small">{usd(run.usd_micros)}</span>
+              {/* `$0.00` is a claim; most runners report no cost at all and
+                  this rendered their silence as a number. The rest of this
+                  codebase says `not stated` and this line did not. */}
+              {run.usd_micros > 0 ? (
+                <span className="mono faint small">{usd(run.usd_micros)}</span>
+              ) : (
+                <span className="faint small" title="this runner reported no cost">
+                  -
+                </span>
+              )}
               <span className="grow" />
               {verbs.map((verb) => (
                 <button
                   key={verb}
                   className={verb === "cancel" ? "chip danger" : "chip"}
                   disabled={busy !== null}
-                  onClick={() => void act(run, verb)}
+                  onClick={() => {
+                    // Named, not "are you sure": the risk here is having hit the
+                    // wrong row in a list of twenty-five, and a dialog that does
+                    // not name the row cannot catch that.
+                    if (confirmVerb(verb, run.title ?? run.run_id.slice(0, 8))) {
+                      void act(run, verb);
+                    }
+                  }}
                 >
                   {busy === `${run.run_id}:${verb}` ? "..." : verb}
                 </button>

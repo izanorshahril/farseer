@@ -95,6 +95,44 @@ const DEFAULT_LAYOUT: Layout = {
   wide: ["conversation", "delegation", "runs", "run"],
 };
 
+/**
+ * One widget's mount toggle.
+ *
+ * Lifted out of the header's map so the two groups - what farseer ships, what a
+ * cell wrote - render the same control rather than two copies of it that can
+ * drift apart.
+ */
+function WidgetChip({
+  id,
+  title,
+  layout,
+  persist,
+}: {
+  id: WidgetId;
+  title: string;
+  layout: Layout;
+  persist: (change: (current: Layout) => Layout) => void;
+}) {
+  const mounted = layout.mounted.includes(id);
+  return (
+    <button
+      className={mounted ? "chip on" : "chip"}
+      aria-pressed={mounted}
+      title={mounted ? `hide ${title}` : `show ${title}`}
+      onClick={() =>
+        persist((current) => ({
+          ...current,
+          mounted: current.mounted.includes(id)
+            ? current.mounted.filter((m) => m !== id)
+            : [...current.mounted, id],
+        }))
+      }
+    >
+      {title}
+    </button>
+  );
+}
+
 export function App() {
   const [layout, setLayout] = useState<Layout | null>(null);
   const [agentWidgets, setAgentWidgets] = useState<AgentWidget[]>([]);
@@ -195,22 +233,26 @@ export function App() {
           canvas - arrangement saved to farseer, not to this browser
         </span>
         <span className="grow" />
-        {available.map(({ id, title }) => (
-          <button
-            key={id}
-            className={layout.mounted.includes(id) ? "chip on" : "chip"}
-            onClick={() =>
-              persist((current) => ({
-                ...current,
-                mounted: current.mounted.includes(id)
-                  ? current.mounted.filter((m) => m !== id)
-                  : [...current.mounted, id],
-              }))
-            }
-          >
-            {title}
-          </button>
-        ))}
+        {/* Two groups, not one row of twelve. What farseer ships and what a cell
+            wrote are different kinds of thing - one is the product and the other
+            is something an agent made last week - and the list only grows in the
+            second half. The row wraps rather than pushing the page sideways. */}
+        <div className="chips">
+          {built.map(({ id, title }) => (
+            <WidgetChip key={id} id={id} title={title} layout={layout} persist={persist} />
+          ))}
+          {authored.length > 0 && (
+            <>
+              <span className="divider" aria-hidden />
+              <span className="group-label" title="written into widgets/ by a cell, compiled and sandboxed">
+                authored
+              </span>
+              {authored.map(({ id, title }) => (
+                <WidgetChip key={id} id={id} title={title} layout={layout} persist={persist} />
+              ))}
+            </>
+          )}
+        </div>
       </header>
 
       <GateBar />
@@ -357,6 +399,10 @@ export function App() {
             name="ask"
             autoComplete="off"
             disabled={asking}
+            // A placeholder is not a name: it disappears the moment anyone types
+            // into it, and a screen reader announcing nothing is what a control
+            // with only a placeholder amounts to.
+            aria-label={`Ask the top manager about ${anchor.widget}`}
             placeholder={`Ask about ${anchor.widget} - hover another widget to ask about that instead`}
           />
           <button className="chip on" disabled={asking}>

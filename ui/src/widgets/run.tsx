@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import type { Bridge } from "../bridge";
 import { follow, type RecordEvent } from "../stream";
 import { onSelection, selectRun, selectedRun } from "../selection";
+import { confirmVerb } from "../confirm";
 
 /**
  * One run, whole: what it was told to do, everything it did, and how it ended.
@@ -112,11 +113,36 @@ const TONE: Record<string, string> = {
   rate_limit_event: "warn",
 };
 
+/**
+ * What the words on this screen mean, for somebody reading them for the first
+ * time.
+ *
+ * The vocabulary here is load-bearing and invented - `cell`, `ceiling`, `tool
+ * level`, `sealed contract` - and it was explained only in source comments,
+ * which the operator never sees. The same discipline this codebase applies to
+ * numbers it did not observe applies to words it did not teach.
+ */
+const MEANING: Record<string, string> = {
+  cell: "The definition this run belongs to - its roster, policy and manager, as a file in `cells/`",
+  role: "manager: a conversation you can steer. worker: a job a manager handed off",
+  runner: "The binary that actually ran, from farseer's own inventory",
+  state: "Where the run is, or how it ended",
+  took: "Wall time from queued to finished",
+  cost: "What the runner said it spent - not every runner says",
+  tokens: "What the runner said it used - not every runner says",
+  "tool level": "How much of the runner's own tool set this run got: read, edit or shell",
+  ceiling: "The most irreversible action allowed without asking a person",
+  "tool grants": "Cell-level capabilities the roster named. Recorded, and reaching them is not built yet",
+  skills: "Instruction directories handed to the runner by path, never discovered from your home directory",
+  budget: "The ceiling on what this run may spend before farseer stops it",
+  "done when": "The cell's own definition of finished, checked by the cell's tools rather than by farseer",
+};
+
 /** A labelled fact, absent-aware, because a blank and a zero are not the same. */
 function Fact({ label, value }: { label: string; value: string | undefined }) {
   return (
     <span className={value ? "" : "absent"}>
-      <i>{label}</i>
+      <i title={MEANING[label]}>{label}</i>
       <b className="mono">{value ?? "not stated"}</b>
     </span>
   );
@@ -243,7 +269,12 @@ export function RunWidget({ bridge }: { bridge: Bridge }) {
       {/* **The contract, on screen.** `28`'s condition for offering re-scope at
           all, and `05`'s reason for sealing it: one answer to what this worker
           was allowed to do, not a timeline of answers. */}
-      <h4 className="section">the contract it was sealed with</h4>
+      <h4
+        className="section"
+        title="Sealed when the run started and immutable for its life, so `what was this allowed to do` has one answer rather than a timeline of them"
+      >
+        the contract it was sealed with
+      </h4>
       {queued ? (
         <>
           <p className="asked">{contract.goal ?? "no goal recorded"}</p>
@@ -298,7 +329,13 @@ export function RunWidget({ bridge }: { bridge: Bridge }) {
 
       <div className="row" style={{ marginTop: 10 }}>
         {running && (
-          <button className="chip danger" disabled={busy !== null} onClick={() => void act("cancel")}>
+          <button
+            className="chip danger"
+            disabled={busy !== null}
+            onClick={() => {
+              if (confirmVerb("cancel", run.title ?? run.run_id.slice(0, 8))) void act("cancel");
+            }}
+          >
             {busy === "cancel" ? "..." : "cancel"}
           </button>
         )}
