@@ -1223,6 +1223,10 @@ fn observe_window(
             // measured that - and farseer never computes one.
             used_percent: None,
             window_duration_mins: None,
+            // A run's own window names a runner, not a provider. Same rule as
+            // the adapters: transcribe what was said, leave the rest absent.
+            provider: None,
+            label: None,
         });
     }
     observations.extend(report.into_iter().flat_map(|report| {
@@ -2106,7 +2110,15 @@ async fn quota(State(state): State<Arc<AppState>>) -> ApiResult<Json<serde_json:
         }
         value
     }));
-    Ok(Json(serde_json::json!({ "windows": rows })))
+    // The surface must never offer a source the runtime cannot read, which is
+    // `13 harness build kit`'s menu rule applied to a toggle: the widget lists
+    // what is here and marks which one is on, rather than hard-coding a list
+    // that goes stale the day a second source lands.
+    Ok(Json(serde_json::json!({
+        "windows": rows,
+        "sources": farseer_core::runners::USAGE_SOURCES,
+        "source": config.usage_source(),
+    })))
 }
 
 /// Read every window omp can see **now**, then answer like [`quota`].
@@ -2128,9 +2140,9 @@ async fn quota(State(state): State<Arc<AppState>>) -> ApiResult<Json<serde_json:
 /// something farseer was never given permission to do is the failure mode this
 /// repository keeps naming: silence around a missing capability.
 async fn refresh_quota(State(state): State<Arc<AppState>>) -> ApiResult<Json<serde_json::Value>> {
-    if !state.runner_config().polls_usage("omp") {
+    if state.runner_config().usage_source().is_none() {
         return Err(ApiError::BadRequest(
-            "no runner is configured to poll its usage; set `usage_poll = true` under [omp] in runners.toml",
+            "no usage source is configured; set `source = \"omp\"` under [usage] in runners.toml",
         ));
     }
     let windows = tokio::task::spawn_blocking(poll_windows)
@@ -4265,7 +4277,7 @@ grants_shell = true
     /// capability** - a control that appears to work, changes nothing, and
     /// leaves the operator with no way to learn why.
     #[tokio::test]
-    async fn forcing_a_quota_read_refuses_by_name_when_no_runner_polls() {
+    async fn forcing_a_quota_read_refuses_by_name_when_no_source_is_configured() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("zero.toml"), CELL).unwrap();
         let runs_dir = tempfile::tempdir().unwrap();
@@ -4303,7 +4315,7 @@ account = \"chatgpt\"
         assert_eq!(status, StatusCode::BAD_REQUEST);
         let said = body["error"].as_str().unwrap_or_default();
         assert!(
-            said.contains("usage_poll") && said.contains("runners.toml"),
+            said.contains("[usage]") && said.contains("runners.toml"),
             "the refusal must name the line to add, not just refuse: {said}"
         );
     }
@@ -4363,6 +4375,8 @@ account = "anthropic-max"
             is_using_overage: false,
             used_percent: None,
             window_duration_mins: None,
+            provider: None,
+            label: None,
         };
         let observe = |observation: &WindowObservation, ts| {
             h.state
@@ -4678,6 +4692,8 @@ runner = "{runner}"
             is_using_overage: false,
             used_percent: None,
             window_duration_mins: None,
+            provider: None,
+            label: None,
         };
         assert!(
             h.state

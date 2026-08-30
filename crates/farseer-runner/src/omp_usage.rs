@@ -49,6 +49,14 @@ pub fn parse(document: &str) -> Vec<WindowObservation> {
 }
 
 fn report(report: &Value) -> Vec<WindowObservation> {
+    // The provider's own id, which is what an operator recognises and what the
+    // account cannot supply: on this machine four of five reports carry the same
+    // email, so `abah.intelek@gmail.com` names a login that spans Codex, Cursor,
+    // xAI and Claude at once.
+    let provider = report
+        .get("provider")
+        .and_then(Value::as_str)
+        .map(str::to_string);
     // Stated by the provider, not inferred by farseer - the same standing
     // `27 quota accounting` gives `used_percent`. Falling back to the provider
     // id keeps a login farseer cannot name from silently joining another one's
@@ -66,13 +74,13 @@ fn report(report: &Value) -> Vec<WindowObservation> {
         .map(|limits| {
             limits
                 .iter()
-                .filter_map(|limit| observation(&account, limit))
+                .filter_map(|limit| observation(&account, provider.as_deref(), limit))
                 .collect()
         })
         .unwrap_or_default()
 }
 
-fn observation(account: &str, limit: &Value) -> Option<WindowObservation> {
+fn observation(account: &str, provider: Option<&str>, limit: &Value) -> Option<WindowObservation> {
     let id = limit.get("id").and_then(Value::as_str)?;
     // Milliseconds here; `10 runner inventory` transcribed Claude Code's
     // `resetsAt` as **seconds** and the record is in seconds, so this is the one
@@ -82,13 +90,18 @@ fn observation(account: &str, limit: &Value) -> Option<WindowObservation> {
         .and_then(Value::as_i64)
         .map(|ms| ms / 1_000);
 
-    let ok = limit.get("status").and_then(Value::as_str) == Some("ok");
-    let availability = match (ok, resets_at) {
-        (true, resets_at) => Availability::Allowed { resets_at },
-        // Anything that is not `ok` is treated as exhausted, which is the call
-        // `27 quota accounting` already made for every other runner.
-        (false, Some(resets_at)) => Availability::ExhaustedUntil { resets_at },
-        (false, None) => Availability::Unknown,
+    // **Exhaustion is a claim, so only a stated one counts.** A limit omp
+    // reports without a `status` at all - `cursor:requests:gpt-4`, whose meter
+    // is requests rather than percent - was reading as not-ok and rendering as
+    // `spent`, which is farseer turning silence into the most alarming thing it
+    // could have meant. `10 runner inventory`'s rule, in the one place where
+    // getting it wrong tells an operator their quota is gone.
+    let availability = match limit.get("status").and_then(Value::as_str) {
+        Some("ok") | None => Availability::Allowed { resets_at },
+        Some(_) => match resets_at {
+            Some(resets_at) => Availability::ExhaustedUntil { resets_at },
+            None => Availability::Unknown,
+        },
     };
 
     Some(WindowObservation {
@@ -104,6 +117,16 @@ fn observation(account: &str, limit: &Value) -> Option<WindowObservation> {
             .pointer("/window/durationMs")
             .and_then(Value::as_i64)
             .map(|ms| ms / 60_000),
+        provider: provider.map(str::to_string),
+        // omp's own label for the window. Transcribed rather than composed: the
+        // three Antigravity windows all run for a day and differ only by the
+        // model behind them, which `Usage (Google)`, `Usage (Anthropic)` and
+        // `Usage (OpenAI)` says and `1 day` three times does not.
+        label: limit
+            .get("label")
+            .or_else(|| limit.pointer("/window/label"))
+            .and_then(Value::as_str)
+            .map(str::to_string),
     })
 }
 
@@ -134,6 +157,33 @@ mod tests {
            "amount":{"used":0,"limit":100,"unit":"percent"},"status":"ok"}],
          "metadata":{"email":"izanorshahril.ibrahim@gmail.com"}}
       ]}"#;
+
+    /// A limit omp states no `status` for is not an exhausted one.
+    ///
+    /// `cursor:requests:gpt-4` is metered in requests rather than percent and
+    /// carries no status at all. Reading that as not-ok rendered it `spent` in
+    /// the widget - farseer turning silence into the most alarming reading
+    /// available, on the one surface where being wrong sends an operator
+    /// looking for a quota that never ran out.
+    #[test]
+    fn a_limit_with_no_stated_status_is_not_exhausted() {
+        let windows = parse(
+            r#"{"reports":[{"provider":"cursor","metadata":{"email":"a@b.c"},"limits":[
+              {"id":"cursor:requests:gpt-4","label":"gpt-4 requests",
+               "window":{"id":"month","resetsAt":1789736707676},
+               "amount":{"used":0,"unit":"requests"}}]}]}"#,
+        );
+        assert_eq!(windows.len(), 1);
+        assert!(
+            matches!(windows[0].availability, Availability::Allowed { .. }),
+            "silence is not exhaustion: {:?}",
+            windows[0].availability
+        );
+        // And still no percentage, because the meter is not one.
+        assert_eq!(windows[0].used_percent, None);
+        assert_eq!(windows[0].provider.as_deref(), Some("cursor"));
+        assert_eq!(windows[0].label.as_deref(), Some("gpt-4 requests"));
+    }
 
     /// The answer `33 google quota` said did not exist.
     #[test]

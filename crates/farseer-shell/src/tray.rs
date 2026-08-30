@@ -41,6 +41,48 @@ pub(crate) struct Window {
     pub used_percent: Option<i64>,
     #[serde(default)]
     pub runners: Vec<String>,
+    /// The provider's own id, when the source named one.
+    #[serde(default)]
+    pub provider: Option<String>,
+    /// The provider's own name for the window.
+    #[serde(default)]
+    pub label: Option<String>,
+}
+
+/// What to call this window's owner in one or two words.
+///
+/// The account was an **email** for every window omp reports, and eleven lines
+/// each beginning `abah.intelek@gmail.com` is a menu whose first column carries
+/// no information at all. The provider is the part that differs.
+fn who(window: &Window) -> String {
+    if let Some(provider) = &window.provider {
+        return provider
+            .rsplit_once('-')
+            .filter(|(_, tail)| matches!(*tail, "oauth" | "device" | "api" | "cli"))
+            .map(|(head, _)| head)
+            .unwrap_or(provider)
+            .replace('-', " ");
+    }
+    window
+        .runners
+        .first()
+        .cloned()
+        .unwrap_or_else(|| window.account.clone())
+}
+
+/// This window's own short name, under a heading that already says the provider.
+fn what(window: &Window) -> String {
+    if let Some(label) = &window.label {
+        return label.clone();
+    }
+    let id = match &window.provider {
+        Some(provider) => window
+            .rate_limit_type
+            .strip_prefix(&format!("{provider}:"))
+            .unwrap_or(&window.rate_limit_type),
+        None => &window.rate_limit_type,
+    };
+    id.replace(['_', ':'], " ")
 }
 
 /// The one line a tray tooltip has room for.
@@ -54,12 +96,7 @@ pub(crate) fn tooltip(windows: &[Window], now_secs: i64) -> String {
         // difference between a quiet fleet and a broken poller.
         return "farseer - no window reported yet".to_string();
     };
-    let who = window
-        .runners
-        .first()
-        .cloned()
-        .unwrap_or_else(|| window.account.clone());
-    let mut line = format!("farseer - {who}");
+    let mut line = format!("farseer - {}", who(window));
     if window.status == "exhausted_until" {
         line.push_str(" exhausted");
     } else if let Some(percent) = window.used_percent {
@@ -82,10 +119,9 @@ pub(crate) fn lines(windows: &[Window], now_secs: i64) -> Vec<String> {
     ranked
         .iter()
         .map(|w| {
-            let limit = if w.rate_limit_type.is_empty() {
-                String::new()
-            } else {
-                format!(" {}", w.rate_limit_type)
+            let limit = match what(w) {
+                name if name.is_empty() => String::new(),
+                name => format!(" {name}"),
             };
             let state = if w.status == "exhausted_until" {
                 "exhausted".to_string()
@@ -95,11 +131,14 @@ pub(crate) fn lines(windows: &[Window], now_secs: i64) -> Vec<String> {
                     None => "-".to_string(),
                 }
             };
+            // Bare `4h 38m` rather than `resets in 4h 38m`: eleven lines of a
+            // tray menu have no room to repeat the same three words eleven
+            // times, and the tooltip above still spells it out once.
             let reset = w
                 .resets_at
-                .map(|r| format!(", {}", countdown(r, now_secs)))
+                .map(|r| format!("  {}", countdown(r, now_secs).replace("resets in ", "")))
                 .unwrap_or_default();
-            format!("{}{}  {}{}", w.account, limit, state, reset)
+            format!("{}{}  {}{}", who(w), limit, state, reset)
         })
         .collect()
 }
@@ -267,7 +306,50 @@ mod tests {
             rate_limit_type: "primary".to_string(),
             used_percent: percent,
             runners: vec![account.to_string()],
+            provider: None,
+            label: None,
         }
+    }
+
+    /// A window as omp reports one: a provider id, a label, and an email for an
+    /// account that four other providers share.
+    fn polled(provider: &str, label: &str, percent: i64) -> Window {
+        Window {
+            account: "abah.intelek@gmail.com".to_string(),
+            status: "allowed".to_string(),
+            resets_at: Some(1_000 + 3_600),
+            rate_limit_type: format!("{provider}:primary"),
+            used_percent: Some(percent),
+            runners: vec!["omp".to_string()],
+            provider: Some(provider.to_string()),
+            label: Some(label.to_string()),
+        }
+    }
+
+    /// Eleven lines that all begin with the same email is a first column
+    /// carrying no information. The provider is the part that differs, and the
+    /// sign-in suffix is not part of the provider's name.
+    #[test]
+    fn a_polled_window_is_named_by_its_provider_rather_than_its_login() {
+        let lines = lines(
+            &[
+                polled("openai-codex", "5 hours", 98),
+                polled("xai-oauth", "SuperGrok Weekly Credits", 3),
+            ],
+            1_000,
+        );
+        assert!(
+            lines[0].starts_with("openai codex 5 hours"),
+            "{:?}",
+            lines[0]
+        );
+        assert!(
+            lines[1].starts_with("xai SuperGrok Weekly Credits"),
+            "the sign-in method is not the provider's name: {:?}",
+            lines[1]
+        );
+        // The email appears nowhere: it is the one thing these two windows share.
+        assert!(lines.iter().all(|line| !line.contains('@')));
     }
 
     /// The tooltip has room for one window, so it must be the one that changes

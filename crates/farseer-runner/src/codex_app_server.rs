@@ -336,6 +336,12 @@ impl RateLimits {
                     is_using_overage: false,
                     used_percent: Some(window.used_percent),
                     window_duration_mins: window.window_duration_mins,
+                    // Left absent on purpose: the app-server names a window and
+                    // never a provider, and filling this in with `openai-codex`
+                    // would be farseer inferring what it was not told. The same
+                    // rule that leaves `account` empty two fields up.
+                    provider: None,
+                    label: None,
                 })
             })
             .collect()

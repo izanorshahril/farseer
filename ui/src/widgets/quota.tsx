@@ -34,7 +34,31 @@ type Window = {
   runners: string[];
   /** `record` for a window a run reported, or the poll that read it. */
   source?: string;
+  /** The provider's own id - `openai-codex`, `anthropic`, `cursor`. */
+  provider?: string;
+  /** The provider's own name for the window - `5 hours`, `Usage (Google)`. */
+  label?: string;
 };
+
+/**
+ * A provider id, as an operator reads it.
+ *
+ * omp's ids are already the right words - `openai-codex`, `google-antigravity`,
+ * `xai-oauth` - so this unhyphenates them and stops. Farseer used to show
+ * `chatgpt` here, which is the **account name from `runners.toml`**: a string
+ * the operator invented to join two runners onto one subscription, doing duty
+ * as the name of a provider it does not name.
+ *
+ * The suffixes go because they are about how omp signed in rather than who the
+ * provider is, and a heading that says `oauth` is answering a question nobody
+ * on this screen asked.
+ */
+function providerName(id: string): string {
+  return id
+    .replace(/-(oauth|device|api|cli)$/, "")
+    .split("-")
+    .join(" ");
+}
 
 const usd = (micros: number) => `$${(micros / 1_000_000).toFixed(2)}`;
 
@@ -46,12 +70,20 @@ const usd = (micros: number) => `$${(micros / 1_000_000).toFixed(2)}`;
  * more use than a rank when two sit side by side, so it wins when reported.
  */
 function windowName(w: Window): string {
+  // The provider's own label wins outright. Composing one from the duration
+  // gave `1 day` to all three Antigravity windows, which differ by the model
+  // behind them and which omp calls `Usage (Google)`, `Usage (Anthropic)` and
+  // `Usage (OpenAI)` - three names farseer was throwing away to invent one.
+  if (w.label) return w.label;
   const mins = w.window_duration_mins;
   if (mins) {
     if (mins % (60 * 24) === 0) return `${mins / (60 * 24)} day`;
     if (mins % 60 === 0) return `${mins / 60} hour`;
   }
-  return w.rate_limit_type.replace(/[_:]/g, " ") || "window";
+  // Strip the provider prefix the id carries: under a provider heading,
+  // `cursor:usd:individual-auto` only needs its tail.
+  const id = w.provider ? w.rate_limit_type.replace(`${w.provider}:`, "") : w.rate_limit_type;
+  return id.replace(/[_:]/g, " ") || "window";
 }
 
 function countdown(resetsAt: number | null, now: number): string {
@@ -93,12 +125,23 @@ function Meter({ percent, exhausted }: { percent: number; exhausted: boolean }) 
   );
 }
 
-/** One window, as a tile: name, the provider's reading, and when it turns over. */
+/**
+ * One window, as a tile.
+ *
+ * **Three lines became two.** Eleven windows across five providers is the real
+ * shape of this screen now, and the old tile spent a whole line on farseer's own
+ * spend - a number that means nothing for a polled window, because farseer never
+ * ran anything on that provider. It moved to the title attribute of the line it
+ * belongs to, and only for the windows a run actually reported.
+ */
 function WindowTile({ window: w, now }: { window: Window; now: number }) {
+  const spent = w.source === "record" && w.farseer_usd_micros > 0;
   return (
     <div className="tile">
       <div className="row">
-        <b className="small">{windowName(w)}</b>
+        <b className="small" title={w.rate_limit_type}>
+          {windowName(w)}
+        </b>
         <span className="grow" />
         {w.is_using_overage && <span className="badge overage">overage</span>}
         {w.status === "exhausted_until" ? (
@@ -109,7 +152,7 @@ function WindowTile({ window: w, now }: { window: Window; now: number }) {
           </span>
         ) : (
           <span className="dim small" title="this runner states no percentage">
-            not stated
+            -
           </span>
         )}
       </div>
@@ -118,16 +161,20 @@ function WindowTile({ window: w, now }: { window: Window; now: number }) {
       {w.used_percent !== undefined && (
         <Meter percent={w.used_percent} exhausted={w.status === "exhausted_until"} />
       )}
-      <div className="row dim small">
+      <div className="row faint small">
         <span>{countdown(w.resets_at, now)}</span>
-        <span className="grow" />
-        {/* Per window rather than per account, because that is what the number
-            is: farseer's spend since **this** window was first seen. Two windows
-            on one account began at different moments, so adding them would
-            invent a total nothing measured. */}
-        <span title="farseer's spend since it first saw this window">
-          {usd(w.farseer_usd_micros)}
-        </span>
+        {spent && (
+          <>
+            <span className="grow" />
+            {/* Per window rather than per account, because that is what the
+                number is: farseer's spend since **this** window was first seen.
+                Two windows on one account began at different moments, so adding
+                them would invent a total nothing measured. */}
+            <span title="farseer's spend since it first saw this window">
+              {usd(w.farseer_usd_micros)}
+            </span>
+          </>
+        )}
       </div>
     </div>
   );
@@ -163,14 +210,22 @@ export function QuotaWidget({ bridge }: { bridge: Bridge }) {
   const [intervalSecs, setIntervalSecs] = useState(DEFAULT_INTERVAL);
   /** When the numbers on screen were last fetched, so "live" is checkable. */
   const [readAt, setReadAt] = useState<number | null>(null);
+  /** Sources the runtime can read while idle, and which one is on. */
+  const [sources, setSources] = useState<string[]>([]);
+  const [source, setSource] = useState<string | null>(null);
   const [polling, setPolling] = useState(false);
 
   const load = useCallback(
     () =>
       bridge
-        .read<{ windows: Window[] }>("/quota")
+        .read<{ windows: Window[]; sources: string[]; source: string | null }>("/quota")
         .then((body) => {
           setWindows(body.windows);
+          // Listed by the runtime, never hard-coded here: a surface that names
+          // its own sources offers one the day the runtime drops it, which is
+          // `13 harness build kit`'s menu rule.
+          setSources(body.sources ?? []);
+          setSource(body.source ?? null);
           setReadAt(Date.now());
           setError(null);
         })
@@ -229,6 +284,19 @@ export function QuotaWidget({ bridge }: { bridge: Bridge }) {
         {polling ? "asking the runner" : "refresh now"}
       </button>
       <span className="grow" />
+      {/* Which source the numbers came from, and what else the runtime could
+          read. One entry today, so this states rather than offers - a select
+          with a single option is a control that cannot do anything. */}
+      <span
+        className={source ? "badge" : "badge overage"}
+        title={
+          sources.length > 0
+            ? `farseer can read windows from: ${sources.join(", ")}`
+            : "this build reads no idle-time source"
+        }
+      >
+        {source ? `via ${source}` : "no idle source"}
+      </span>
       <span className="faint">
         {readAt === null
           ? "not read yet"
@@ -255,35 +323,56 @@ export function QuotaWidget({ bridge }: { bridge: Bridge }) {
   // with nothing to click afterwards.
   if (!windows && !error) return <p className="empty">reading windows...</p>;
 
-  // Grouped in first-seen order rather than sorted, so the list does not
-  // reshuffle under the operator every thirty seconds.
-  const accounts: { account: string; runners: string[]; windows: Window[] }[] = [];
+  // **Grouped by provider, not by account.** One login spans several providers -
+  // four of the five omp reports here carry the same email - so grouping by
+  // account filed a Cursor window, an xAI window and a Claude window under one
+  // heading and called it a subscription.
+  //
+  // A window with no provider keeps the old key: a run's `rate_limit_event`
+  // names a runner and a limit, never a provider, and inventing one would be
+  // the guess `27 quota accounting` refuses. Those still group by account,
+  // which is what they are.
+  //
+  // First-seen order rather than sorted, so the list does not reshuffle under
+  // the operator every thirty seconds.
+  const groups: { key: string; title: string; under: string; windows: Window[] }[] = [];
   for (const w of windows ?? []) {
-    const found = accounts.find((a) => a.account === w.account);
+    const key = w.provider ?? w.account;
+    const found = groups.find((g) => g.key === key);
     if (found) found.windows.push(w);
-    else accounts.push({ account: w.account, runners: w.runners, windows: [w] });
+    else
+      groups.push({
+        key,
+        title: w.provider ? providerName(w.provider) : w.account,
+        // The login underneath, which is the thing two providers can share and
+        // the reason the heading is no longer allowed to be it.
+        under: w.provider ? w.account : w.runners.join(", "),
+        windows: [w],
+      });
   }
 
   return (
     <>
       {controls}
       {error && <p className="empty bad">{error}</p>}
-      {accounts.length === 0 && !error && (
+      {groups.length === 0 && !error && (
         <p className="empty">
           No window observed yet. A window appears the first time a runner reports one, which is
           after its first successful run.
         </p>
       )}
       <ul className="accounts">
-      {accounts.map((account) => (
-        <li key={account.account}>
+      {groups.map((group) => (
+        <li key={group.key}>
           <div className="row">
-            <b className="mono">{account.account}</b>
+            <b>{group.title}</b>
             <span className="grow" />
-            <span className="dim small">{account.runners.join(", ")}</span>
+            <span className="faint small mono" title={group.under}>
+              {group.under}
+            </span>
           </div>
           <div className="tiles">
-            {account.windows.map((w) => (
+            {group.windows.map((w) => (
               <WindowTile key={w.rate_limit_type} window={w} now={now} />
             ))}
           </div>

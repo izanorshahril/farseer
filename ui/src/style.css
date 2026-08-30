@@ -652,17 +652,36 @@ code {
 }
 .tiles {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
-  gap: 8px;
-  margin-top: 8px;
+  /* Narrower than it was: eleven windows across five providers is the real
+     shape of this screen, and 160px tiles wrapped to one per row in a narrow
+     card - which is a list wearing a grid's clothes. */
+  grid-template-columns: repeat(auto-fit, minmax(126px, 1fr));
+  gap: 6px;
+  margin-top: 6px;
 }
 .tile {
   border: 1px solid var(--line);
-  border-radius: 8px;
-  padding: 8px 10px;
+  border-radius: 6px;
+  padding: 5px 7px;
   min-width: 0;
 }
-.tile .meter { margin: 6px 0 4px; }
+.tile .meter { margin: 4px 0 3px; }
+/* The window name is the only text here that can run long - `Usage (Anthropic)`,
+   `SuperGrok Weekly Credits` - and a tile that grows to fit it breaks the grid
+   for every tile beside it. The full id is on the title attribute. */
+.tile > .row > b {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* Providers stack tightly: five headings with a rule between each was more
+   border than content once the tiles shrank. */
+.accounts {
+  gap: 10px;
+}
+.accounts > li + li {
+  padding-top: 9px;
+}
 
 /* The grip is a handle, so it has to look like one and the widget has to move. */
 .grip { cursor: grab; }

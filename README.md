@@ -161,7 +161,7 @@ Binds `127.0.0.1` only, opens the record, loads the definitions, and writes its 
 | `POST /v1/manager/delegate/{worker,cell}` | the same two delegation verbs as plain JSON, for a manager whose runner has no MCP client. It calls the same functions the MCP tools call, so the roster, the worker cap and the budget are one implementation rather than two |
 | `GET /v1/skills` | the skills a cell may declare - directories in `skills/`, with which cells declare each. Deliberately **not** what a harness discovered on this machine: discovery is denied, so that would be a menu of things no cell can order |
 | `GET /v1/quota` | recorded windows from runs, plus a live `omp usage --json` snapshot labelled `source: "omp usage"` - the only reading of a Google Antigravity quota farseer has, and the only sight of any window while nothing is running |
-| `POST /v1/quota/refresh` | run that snapshot **now** rather than waiting for the five-minute poll, then answer like the read. Refuses, naming the line to add, when no runner has `usage_poll = true` |
+| `POST /v1/quota/refresh` | run that snapshot **now** rather than waiting for the five-minute poll, then answer like the read. Refuses, naming the line to add, when `[usage] source` is unset |
 
 Every request must arrive on a loopback `Host`.
 Operator routes require the process-wide bearer; `/v1/mcp` and `/v1/manager/` additionally accept an active manager's per-run bearer, which is invalid everywhere else.

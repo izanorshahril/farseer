@@ -8,12 +8,18 @@
 #            that two runners share a login, so it declines to guess and shows
 #            two windows until an operator says otherwise.
 #
-#   usage_poll
-#            whether farseer may run this runner's own usage command on a timer.
-#            Off unless written here. `omp usage --json` reads every account it
-#            is logged into - the only reading of a Google quota farseer has -
-#            and it is still farseer launching somebody else's binary, so the
-#            operator asks for it rather than discovering it running.
+#   [usage] source
+#            where farseer reads subscription windows while nothing is running.
+#            Off unless written. `omp usage --json` reads every provider omp is
+#            signed into - five of them here, including the only reading of a
+#            Google quota farseer has - and it is still farseer launching
+#            somebody else's binary, so the operator asks for it rather than
+#            discovering it running.
+#
+#            It is **not** a runner setting, which is what it used to be
+#            (`usage_poll = true` under `[omp]`). omp reports five providers and
+#            farseer launches one of them, so filing the knob under a runner made
+#            Cursor, xAI and Anthropic windows reachable and unaskable.
 #
 #   usd_micros_per_mtok
 #            what a million tokens costs here, per `26 routing policy`. Absent
@@ -37,6 +43,12 @@
 # One ChatGPT subscription, three faces of it. Without these three lines the
 # quota widget shows three separate windows at 1% each, which is not wrong so
 # much as unreadable: it is one window being reported three times.
+# Every provider omp is signed into - openai-codex, anthropic, cursor, xai and
+# google-antigravity here - read on a five-minute timer and on demand from the
+# Windows widget. Comment this out to stop farseer launching omp at all.
+[usage]
+source = "omp"
+
 [codex]
 account = "chatgpt"
 model = "gpt-5.6-luna"

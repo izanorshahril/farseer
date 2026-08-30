@@ -18,9 +18,38 @@ use serde::{Deserialize, Serialize};
 /// accounting, not a precondition for running anything.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RunnerConfig {
+    /// Where farseer reads subscription windows while nothing is running.
+    ///
+    /// **Its own section, because it is not a runner setting.** It used to be
+    /// `usage_poll = true` under `[omp]`, which said "poll the runner omp" - but
+    /// omp reports five providers here and farseer launches one of them. Cursor,
+    /// xAI and Anthropic windows were reachable and unaskable, because the knob
+    /// that turned the read on was filed under a runner the operator may never
+    /// use for work.
+    #[serde(default)]
+    pub usage: UsageConfig,
     #[serde(default, flatten)]
     pub runners: BTreeMap<String, RunnerEntry>,
 }
+
+/// Where the idle-time window reading comes from.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct UsageConfig {
+    /// `"omp"` shells out to `omp usage --json`; absent or `"off"` reads
+    /// nothing while idle, which stays the default - farseer launching another
+    /// vendor's binary is a thing an operator asks for, per `13 harness build
+    /// kit`.
+    #[serde(default)]
+    pub source: Option<String>,
+}
+
+/// A source farseer knows how to read windows from while nothing is running.
+///
+/// Named rather than free text so a surface can offer the list and the runtime
+/// can refuse anything else: `13 harness build kit`'s menu, applied to a config
+/// value instead of a runner.
+pub const USAGE_SOURCES: [&str; 1] = ["omp"];
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -137,10 +166,27 @@ impl RunnerConfig {
     }
 
     /// Whether the operator asked farseer to poll this runner for usage.
+    ///
+    /// Two spellings, one answer: `[usage] source = "omp"` is the current one,
+    /// and `usage_poll = true` under the runner is the older one this kept
+    /// working rather than failing a file somebody already wrote.
     pub fn polls_usage(&self, runner: &str) -> bool {
-        self.runners
-            .get(runner)
-            .is_some_and(|entry| entry.usage_poll)
+        self.usage.source.as_deref() == Some(runner)
+            || self
+                .runners
+                .get(runner)
+                .is_some_and(|entry| entry.usage_poll)
+    }
+
+    /// The source farseer will read windows from while idle, if any.
+    ///
+    /// An unknown name reads as **off** rather than as an error: a typo in a
+    /// config file should not stop farseer starting, and the surface lists the
+    /// names it accepts.
+    pub fn usage_source(&self) -> Option<&'static str> {
+        USAGE_SOURCES
+            .into_iter()
+            .find(|source| self.polls_usage(source))
     }
 
     pub fn runners_on(&self, account: &str) -> Vec<String> {
