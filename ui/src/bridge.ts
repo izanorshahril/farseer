@@ -33,7 +33,7 @@ export type Bridge = {
    * **deliberately absent from the sandbox bridge** in `SandboxWidget.tsx`: a
    * widget the operator did not write can show a run, and cannot cancel one.
    */
-  post: (path: string, body?: unknown) => Promise<void>;
+  post: (path: string, body?: unknown) => Promise<unknown>;
   /**
    * Send a request to the **top manager**, anchored to where it came from.
    *
@@ -86,6 +86,12 @@ export function createBridge(): Bridge {
           .catch(() => undefined);
         throw new Error(said ?? `${path}: ${response.status}`);
       }
+      // The body, for the verbs that answer with one. `rerun` and `rescope`
+      // return the **new** run's id - they start a run rather than change this
+      // one - and a caller that cannot see it has no way to follow what it just
+      // started. `204` and an unparseable body are both `undefined`, which is
+      // what `cancel` and `steer` have always effectively returned.
+      return await response.json().catch(() => undefined);
     },
 
     ask: async (anchor, text) => {

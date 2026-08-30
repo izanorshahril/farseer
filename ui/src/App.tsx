@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { createBridge, type Anchor } from "./bridge";
+import { onSelection } from "./selection";
 import { QuotaWidget } from "./widgets/quota";
 import { FleetWidget } from "./widgets/fleet";
 import { ActivityWidget } from "./widgets/activity";
@@ -8,6 +9,7 @@ import { RunnersWidget } from "./widgets/runners";
 import { SettingsWidget } from "./widgets/settings";
 import { ConversationWidget } from "./widgets/conversation";
 import { DelegationWidget } from "./widgets/delegation";
+import { RunWidget } from "./widgets/run";
 import { SandboxWidget } from "./SandboxWidget";
 import { GateBar } from "./GateBar";
 
@@ -53,6 +55,7 @@ const REGISTRY = {
     render: RunnersWidget,
   },
   runs: { title: "Runs", subtitle: "with 05's verbs", render: RunsWidget },
+  run: { title: "Run", subtitle: "one run, whole", render: RunWidget },
   settings: { title: "Settings", subtitle: "the harness in front", render: SettingsWidget },
 } as const;
 
@@ -76,7 +79,7 @@ type AgentWidget = { id: string; title: string; subtitle: string; cell?: string 
  */
 type Layout = { v?: number; mounted: WidgetId[]; wide: WidgetId[] };
 
-const LAYOUT_VERSION = 2;
+const LAYOUT_VERSION = 3;
 
 /**
  * The two conversations first, side by side, and everything else below them.
@@ -88,8 +91,8 @@ const LAYOUT_VERSION = 2;
  */
 const DEFAULT_LAYOUT: Layout = {
   v: LAYOUT_VERSION,
-  mounted: ["conversation", "delegation", "runs", "activity", "quota", "runners", "fleet"],
-  wide: ["conversation", "delegation", "runs"],
+  mounted: ["conversation", "delegation", "runs", "run", "activity", "quota", "runners", "fleet"],
+  wide: ["conversation", "delegation", "runs", "run"],
 };
 
 export function App() {
@@ -137,6 +140,24 @@ export function App() {
       return next;
     });
   }, []);
+
+  // Selecting a run has to *show* one. A click that opens a widget the operator
+  // has unmounted looks like a click that did nothing, which is the same class
+  // of failure as the grip that rendered a handle and moved nothing.
+  useEffect(
+    () =>
+      onSelection((runId) => {
+        if (!runId) return;
+        persist((current) =>
+          current.mounted.includes("run")
+            ? current
+            : { ...current, mounted: [...current.mounted, "run"] },
+        );
+      }),
+    // `persist` is stable, and re-subscribing on every layout change would drop
+    // a selection made between renders.
+    [persist],
+  );
 
   const ask = useCallback(
     async (text: string) => {

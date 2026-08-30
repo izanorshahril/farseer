@@ -938,7 +938,28 @@ fn manager_run_options(
         prompt.push_str("\n\nCell manager instructions:\n");
         prompt.push_str(&cell.manager.prompt);
     }
-    options.append_system_prompt = Some(prompt);
+    // **Handed over as a file where the runner reads one.** The prompt is
+    // multi-line by construction - farseer's own identity paragraph, then the
+    // cell's manager instructions - and a multi-line argument cannot be passed
+    // to a Windows `.CMD` shim at all: Rust refuses, with `batch file arguments
+    // are invalid` and no indication of which argument. pi shipped an update on
+    // 2026-08-30 that replaced its `.exe` with exactly such a shim, and every
+    // manager run on this machine stopped working between one morning and the
+    // next without a line of farseer changing.
+    //
+    // Keeping it off the argv is worth doing anyway: a command line is readable
+    // by every process listing on the machine, which is the same argument `31
+    // manager delegation reach` used to keep a credential out of one.
+    options.append_system_prompt = Some(
+        if farseer_runner::pi::reads_prompt_from_file(&contract.runner) {
+            let path = security::manager_prompt_path(&contract.run_id.to_string());
+            security::write_user_only_file(&path, prompt.as_bytes())
+                .map_err(|_| ApiError::Corrupt("could not write the manager prompt"))?;
+            path.display().to_string()
+        } else {
+            prompt
+        },
+    );
 
     match reach {
         Reach::Mcp => {
@@ -1139,6 +1160,7 @@ pub(crate) fn spawn_run(
         Ok(options) => options,
         Err(error) => {
             let _ = std::fs::remove_file(security::manager_config_path(&run_id.to_string()));
+            let _ = std::fs::remove_file(security::manager_prompt_path(&run_id.to_string()));
             let _ =
                 farseer_runner::workspace::teardown_workspace(&cwd, repo_for_teardown.as_deref());
             return Err(error);
@@ -4593,9 +4615,26 @@ runner = "{runner}"
             &RuntimeToken::generate(),
         )
         .expect("options build");
-        options
-            .append_system_prompt
-            .expect("every manager is told who it is")
+        // What the manager is actually told, wherever farseer put it. For a
+        // runner that reads a file - pi, omp - the option carries a **path**,
+        // because a multi-line argument cannot be passed to a Windows `.CMD`
+        // shim at all. The test asks the same question either way rather than
+        // asserting the delivery mechanism twice.
+        told(
+            runner,
+            &options
+                .append_system_prompt
+                .expect("every manager is told who it is"),
+        )
+    }
+
+    /// Read what a manager was told, following a path when that is what it is.
+    fn told(runner: &str, prompt: &str) -> String {
+        if farseer_runner::pi::reads_prompt_from_file(runner) {
+            return std::fs::read_to_string(prompt)
+                .unwrap_or_else(|e| panic!("{runner} was given `{prompt}`, unreadable: {e}"));
+        }
+        prompt.to_string()
     }
 
     /// `31 manager delegation reach`: this used to return early for every
@@ -4647,9 +4686,12 @@ runner = "{runner}"
         let options =
             manager_run_options(&h.state, &contract, &cell, &token).expect("options build");
 
-        let prompt = options
-            .append_system_prompt
-            .expect("a manager is told who it is");
+        let prompt = told(
+            "pi",
+            &options
+                .append_system_prompt
+                .expect("a manager is told who it is"),
+        );
         assert!(prompt.contains("delegate_to_worker"), "{prompt}");
         assert!(!prompt.contains("CANNOT reach"), "{prompt}");
         assert!(!prompt.contains(token.as_str()), "{prompt}");

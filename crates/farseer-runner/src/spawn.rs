@@ -39,8 +39,21 @@ use windows::core::PCWSTR;
 
 #[derive(Debug, thiserror::Error)]
 pub enum SpawnError {
-    #[error("spawning the child process failed: {0}")]
-    Io(#[from] std::io::Error),
+    /// **Names the executable and the arguments, not just the failure.**
+    ///
+    /// Windows resolves most Node-installed runners to a `.CMD` shim, and Rust
+    /// refuses to spawn a batch file with an argument it cannot safely quote -
+    /// answering `batch file arguments are invalid` and nothing else. That
+    /// message says a run failed and gives an operator no way at all to find
+    /// out which argument did it, which is how one broken flag looks identical
+    /// to a broken runner.
+    #[error("spawning `{exe}` failed: {source}
+  args: {}", args.join(" "))]
+    Io {
+        exe: String,
+        args: Vec<String>,
+        source: std::io::Error,
+    },
     #[error("job object setup failed: {0}")]
     Job(#[from] windows::core::Error),
 }
@@ -176,7 +189,12 @@ impl SupervisedProcess {
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
             .creation_flags(CREATE_NO_WINDOW.0)
-            .spawn()?;
+            .spawn()
+            .map_err(|source| SpawnError::Io {
+                exe: exe.display().to_string(),
+                args: args.to_vec(),
+                source,
+            })?;
 
         let job = unsafe { CreateJobObjectW(None, PCWSTR::null())? };
         let mut limits = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();

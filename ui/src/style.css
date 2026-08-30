@@ -831,3 +831,30 @@ code {
   padding: 4px 6px;
   cursor: pointer;
 }
+
+/* A run's name is the way into its detail view, so it has to look like a way
+   in. `28 operator surface` held `re-run` and `re-scope` back until the
+   contract is on screen; this is the click that puts it there. */
+.run-title.link {
+  padding: 0;
+  background: none;
+  border: 0;
+  font: inherit;
+  color: var(--fg);
+  text-align: left;
+  cursor: pointer;
+}
+.run-title.link:hover {
+  color: var(--accent);
+  text-decoration: underline;
+}
+
+/* The detail view's own headings. Small, quiet, and doing one job: saying which
+   half of the run you are looking at - what it was told, and what it did. */
+.section {
+  margin: 12px 0 6px;
+  font: 600 11px/1.4 var(--mono);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--faint);
+}

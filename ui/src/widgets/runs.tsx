@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import type { Bridge } from "../bridge";
 import { follow } from "../stream";
+import { selectRun } from "../selection";
 
 /**
  * The fleet, with `05 run state model`'s verbs on the line.
@@ -147,9 +148,16 @@ export function RunsWidget({ bridge }: { bridge: Bridge }) {
                 className={`dot ${run.liveness ?? (run.lifecycle === "running" ? "live" : "done")}`}
                 title={run.liveness ?? run.lifecycle}
               />
-              <span className="run-title" title={run.run_id}>
+              {/* The way into the detail view. `28 operator surface` held
+                  `re-run` and `re-scope` back until the contract is on screen;
+                  this is the click that puts it there. */}
+              <button
+                className="run-title link"
+                title={`open ${run.run_id}`}
+                onClick={() => selectRun(run.run_id)}
+              >
                 {run.title ?? run.run_id.slice(0, 8)}
-              </span>
+              </button>
               <span className="badge">{run.cell_id}</span>
               <span className="dim mono small">{run.runner}</span>
               <span className={`kind ${TONE[run.outcome ?? ""] ?? ""}`}>

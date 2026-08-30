@@ -131,6 +131,48 @@ fn opencode_still_runs_pure_and_goose_still_offers_nothing_that_subtracts() {
     }
 }
 
+/// A runner that resolves to a Windows `.CMD` cannot be handed a newline.
+///
+/// This is the only test here that watches something other than a flag, and it
+/// exists because a flag was never what broke. On 2026-08-30 pi shipped an
+/// update whose shims no longer include an `.exe`, so farseer resolved `pi.CMD`.
+/// Rust refuses to spawn a batch file with an argument containing a newline,
+/// answering `batch file arguments are invalid` and naming nothing, so every
+/// manager run on the machine stopped working overnight without a line of
+/// farseer changing.
+///
+/// So the fact worth watching is **what kind of file each runner resolves to**.
+/// A runner on a batch shim may only be passed single-line arguments, which is
+/// why `pi::reads_prompt_from_file` exists and why the manager prompt is handed
+/// over as a path.
+#[test]
+#[ignore = "reads installed runners' help output; costs nothing, needs them present"]
+fn a_runner_on_a_batch_shim_still_reads_its_prompt_from_a_file() {
+    for runner in ["pi", "omp"] {
+        let Some(path) = farseer_runner::resolve::resolve(runner) else {
+            continue;
+        };
+        let batch = path
+            .extension()
+            .and_then(|e| e.to_str())
+            .is_some_and(|e| e.eq_ignore_ascii_case("cmd") || e.eq_ignore_ascii_case("bat"));
+        if !batch {
+            continue;
+        }
+        assert!(
+            farseer_runner::pi::reads_prompt_from_file(runner),
+            "{runner} now resolves to {}, a batch file, which cannot take a              multi-line argument - and farseer has no file route for its prompt.              Re-probe `--append-system-prompt` and update `reads_prompt_from_file`.",
+            path.display()
+        );
+        if let Some(text) = help(runner, &[]) {
+            assert!(
+                text.contains("file contents"),
+                "{runner} no longer says `--append-system-prompt` takes file contents,                  and it is on a batch shim - farseer's prompt has nowhere to go"
+            );
+        }
+    }
+}
+
 /// `30 codex app server`: the app-server generates its own protocol schema,
 /// which is the one runner surface farseer does not have to transcribe. If this
 /// subcommand disappears, every payload shape goes back to being a guess.

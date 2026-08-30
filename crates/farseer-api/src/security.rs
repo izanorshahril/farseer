@@ -107,6 +107,23 @@ pub fn runtime_file_path() -> PathBuf {
 /// `10 runner inventory`: keep a manager's generated bearer-bearing MCP
 /// config outside the git worktree and delete it independently when the run
 /// exits, so neither the secret nor cleanup depends on workspace teardown.
+/// Where a run's system prompt is written, for the runners that read one.
+///
+/// Beside the generated MCP config and for the same two reasons. **An argument
+/// is public**: every process listing on this machine can read a command line,
+/// which `31 manager delegation reach` already refused to put a credential on.
+/// And **an argument cannot hold a newline** when the runner resolves to a
+/// Windows `.CMD` shim - Rust refuses to spawn a batch file with one, which is
+/// how a runner that had worked for weeks stopped the morning it shipped an
+/// update that replaced its `.exe` with a `.cmd`.
+pub(crate) fn manager_prompt_path(run_id: &str) -> PathBuf {
+    runtime_file_path()
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join("manager-configs")
+        .join(format!("{run_id}.prompt.txt"))
+}
+
 pub(crate) fn manager_config_path(run_id: &str) -> PathBuf {
     runtime_file_path()
         .parent()

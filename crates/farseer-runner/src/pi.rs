@@ -248,6 +248,25 @@ pub fn build_args(
     args
 }
 
+/// Whether this runner reads `--append-system-prompt` as a **file path** as
+/// well as literal text.
+///
+/// Probed 2026-08-30, from each binary's own help: pi says "Append text or file
+/// contents to the system prompt", omp says the same, and both were confirmed
+/// live by handing them a file and asking for the codeword inside it.
+///
+/// It matters for two reasons, and the second one is why this exists at all.
+/// A system prompt on the argv is readable by every process listing on the
+/// machine. And **an argument cannot hold a newline when the runner resolves to
+/// a Windows `.CMD`**: Rust refuses to spawn a batch file with one, so a
+/// multi-line manager prompt is not merely untidy on the command line, it is
+/// unspawnable. `10 runner inventory`'s observed-never-advertised rule cuts both
+/// ways here - a runner that ships a `.cmd` shim where it used to ship an `.exe`
+/// changes what farseer may pass it, without changing a single flag.
+pub fn reads_prompt_from_file(runner: &str) -> bool {
+    matches!(runner, "pi" | "omp")
+}
+
 /// Tools farseer refuses to let an unattended run reach.
 ///
 /// One entry, and it is not a capability: `ask_question` blocks the turn on a
