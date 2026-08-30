@@ -128,6 +128,8 @@ bun run --cwd ui build
 cargo test --workspace
 ```
 
+`bun run --cwd ui build` also compiles every widget under `widgets/` into `ui/dist/widgets/`, which is where the desktop shell serves them from - so a new agent-authored widget appears in the packaged app after a build, and immediately under `bun run --cwd ui dev`.
+
 `.github/workflows/check.yml` runs exactly those commands on `windows-latest`, plus `cargo fmt --all --check`, `cargo clippy --workspace --all-targets` with warnings denied, and `bun run build` for the canvas.
 
 **Windows only, and not as a preference.** `rust-toolchain.toml` pins `x86_64-pc-windows-msvc` as the only target, and the two bugs this project has shipped were both Windows ones - a missing `CREATE_NO_WINDOW` and a console close reaching a whole process group. A green Linux runner would be green for code that cannot run on the machine farseer runs on.

@@ -29,6 +29,8 @@ pub struct Shell {
     pub client: reqwest::Client,
     /// Where the cell definitions the operator edits actually live.
     pub cells: PathBuf,
+    /// The built canvas, which also holds the compiled agent widgets.
+    pub canvas: PathBuf,
 }
 
 /// Serve the canvas and proxy `/v1`, on a port the OS chooses.
@@ -46,6 +48,7 @@ pub async fn start(
         token,
         client: reqwest::Client::new(),
         cells,
+        canvas: canvas.clone(),
     });
 
     // Any unknown path falls back to the canvas entry point, because the page
@@ -59,7 +62,9 @@ pub async fn start(
             "/__settings/top-manager",
             get(read_top_manager).put(write_top_manager),
         )
-        .fallback_service(ServeDir::new(canvas).fallback(ServeFile::new(index)))
+        .route("/__widgets", get(list_widgets))
+        .route("/__widgets/{id}/bundle", get(widget_bundle))
+        .fallback_service(ServeDir::new(canvas.clone()).fallback(ServeFile::new(index)))
         .with_state(state);
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
@@ -70,6 +75,62 @@ pub async fn start(
         }
     });
     Ok(format!("http://127.0.0.1:{}", addr.port()))
+}
+
+/// The agent-authored widgets this build compiled, if any.
+///
+/// **This route existed only under `bun run dev` until now**, as a Vite plugin,
+/// so the shipped application answered `/__widgets` with `index.html`, the
+/// canvas failed to parse it, and swallowed the error. `28 operator surface`'s
+/// whole third gate was therefore absent from the desktop app and looked
+/// exactly like an operator who had written no widgets - which is the failure
+/// mode this repository keeps naming: **silence around a missing capability**.
+///
+/// Read from the build rather than compiled here on demand. Gate 2 is an import
+/// allowlist enforced *at compile*, and the alternative would be shipping a
+/// bundler inside the desktop app so it could re-decide that at runtime.
+///
+/// An absent directory answers an empty list, not an error: a build with no
+/// widgets is the normal case.
+async fn list_widgets(State(shell): State<Arc<Shell>>) -> Response {
+    let path = shell.canvas.join("widgets").join("index.json");
+    match std::fs::read_to_string(&path) {
+        Ok(body) => ([(header::CONTENT_TYPE, "application/json")], body).into_response(),
+        Err(_) => Json(Vec::<serde_json::Value>::new()).into_response(),
+    }
+}
+
+/// One widget's compiled bundle, as text for the sandbox frame to import.
+///
+/// The id is checked against the manifest rather than trusted into a path.
+/// `28`'s gate 3 keeps a widget inside an opaque origin; nothing about that
+/// stops the *host* being asked for `../../../etc/passwd`, and a served file is
+/// the host's decision.
+async fn widget_bundle(
+    State(shell): State<Arc<Shell>>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> Response {
+    if !id
+        .chars()
+        .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+    {
+        return (StatusCode::BAD_REQUEST, "not a widget id").into_response();
+    }
+    let path = shell.canvas.join("widgets").join(format!("{id}.js"));
+    match std::fs::read_to_string(&path) {
+        Ok(code) => (
+            [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
+            code,
+        )
+            .into_response(),
+        Err(_) => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({
+                "error": "this widget is not in the build - `bun run --cwd ui build` compiles                           the ones in `widgets/`"
+            })),
+        )
+            .into_response(),
+    }
 }
 
 /// What this machine could actually run, per `10 runner inventory`'s rule that

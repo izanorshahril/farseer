@@ -86,3 +86,28 @@ The branch lives in the operator's repository after your worktree is gone.
 The canvas shows it as a pending widget with **keep** and **undo**, which is the operator's decision and not yours.
 
 Do not merge it, do not touch `main`, and do not edit anything outside `widgets/`.
+
+## Where a widget runs, and when it appears
+
+Two places, and they are not the same:
+
+- **`bun run --cwd ui dev`** compiles a widget on request, so a file you write appears on the next reload. Gate 1's keep-or-undo lives here too - the canvas can stage, keep and undo what is under `widgets/`, because that is git and the dev server can run git.
+- **The desktop app** serves widgets compiled into `ui/dist/widgets/` by `bun run --cwd ui build`. **A new widget needs that build before it appears**, because gate 2's import allowlist is enforced *at compile* and the shipped application does not carry a bundler to re-decide it at runtime.
+
+That is a real limit, stated rather than hidden: authoring is a dev-server loop, and the packaged app shows what the build compiled.
+
+## What the sandbox actually refuses
+
+`widgets/sandbox-probe/` asserts the boundary from the inside rather than describing it, and publishes its verdict through `saveState` so it is checkable from outside a frame that is deliberately unreadable from outside. It is not mounted by default; add it from the header when you want to see it.
+
+| tried | result |
+| --- | --- |
+| reach the host page | denied by the browser - opaque origin |
+| read `localStorage` | denied - there is none |
+| `fetch('/v1/runs')` directly | denied - an opaque origin fails CORS everywhere |
+| `farseer.read('/runs')` | allowed - the sanctioned channel |
+| `farseer.read('/ui-state/canvas')` | **denied by the host** - see below |
+| `saveState` then `loadState` | allowed, and scoped to this widget |
+| `loadState('../cost-today.x')` | allowed, and reaches nothing - keys are prefixed with your id |
+
+`ui-state` is the one read the host refuses. `saveState` is namespaced per widget so one widget cannot overwrite another's slice **or the canvas layout**; a generic read walked straight past that, and namespacing the write while leaving the read open protects nothing.

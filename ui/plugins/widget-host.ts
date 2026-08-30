@@ -50,7 +50,7 @@ async function git(repo: string, args: string[]) {
   return stdout;
 }
 
-async function manifests(widgetsDir: string): Promise<WidgetManifest[]> {
+export async function manifests(widgetsDir: string): Promise<WidgetManifest[]> {
   let entries: string[];
   try {
     entries = (await readdir(widgetsDir, { withFileTypes: true }))
@@ -85,7 +85,7 @@ async function manifests(widgetsDir: string): Promise<WidgetManifest[]> {
  * gate 3 runs it in an opaque-origin frame that cannot fetch anything at all.
  * The bundle has to be self-contained or it cannot run.
  */
-async function bundle(widgetsDir: string, id: string, hostDir: string): Promise<string> {
+export async function bundle(widgetsDir: string, id: string, hostDir: string): Promise<string> {
   const root = path.join(widgetsDir, id);
   const result = await build({
     entryPoints: [path.join(root, "widget.tsx")],
