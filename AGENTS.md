@@ -38,15 +38,18 @@ The `a_manager_reaches_another_cell_through_farseers_mcp_face` test proves the l
 Verified MCP launch wiring for non-Claude managers remains open.
 A `Worktree` cell uses the repository named by `--repo`, which defaults to the directory where `farseer serve` started because `13 harness build kit` keeps git paths out of `CellDefinition`.
 
-The operator surface is decided but not built: `28 operator surface` made the **canvas the home screen**, and anything that is not the canvas a **widget** on it.
+The operator surface is built: `28 operator surface` made the **canvas the home screen**, and anything that is not the canvas a **widget** on it.
 A widget is a **cell's face** - it renders, and the cell behind it thinks - so there is no second place agents run and no new API operation.
 A widget **displays** a cell and never **addresses** one: every AI input from every widget goes to the **top manager**, which decides where the work goes, while operator verbs on a run stay direct.
 That made cross-cell delegation a **blocking dependency** of the operator surface rather than merely open, since a widget fronting any cell but zero needs the top manager to reach outward, and it is why `delegate_to_cell` was built before the canvas.
 Widget code is authored by cell zero into `widgets/` in git and farseer never stores it, which keeps `01 cell primitive`'s no-plugin-ABI ruling intact: the loader lives in the client, and the runtime still loads nothing.
+The dev server compiles a widget on request; `bun run --cwd ui build` compiles them into `ui/dist/widgets/`, which is where the **desktop shell** serves them from - so a new widget appears immediately under `bun run dev` and after a build in the packaged app.
+`widgets/sandbox-probe/` asserts the seven boundaries from inside the frame and publishes its verdict through `saveState`, because the frame is deliberately unreadable from outside.
 
 `27 quota accounting` is wired: a runner's `rate_limit_event` becomes a `WindowObservation` keyed by the **account** declared in `runners.toml` (`farseer serve --runners`), appended to the record **on change only** with `actor: system`, and current state derives from the latest event exactly as liveness derives from a timestamp.
 `GET /v1/quota` reports `allowed` / `exhausted_until` / `unknown`, a `resets_at` countdown, farseer's own spend since the window opened, and the runners sharing that account.
-**It never reports a percentage**, and tests assert its absence: farseer's own spend is a lower bound on a window drained by sessions it cannot see, so a percentage would be most wrong exactly near exhaustion. An undeclared runner is its own account, which declines to merge rather than guessing at a shared login.
+**It never computes a percentage**, and tests assert its absence: farseer's own spend is a lower bound on a window drained by sessions it cannot see, so a derived percentage would be most wrong exactly near exhaustion. A percentage the **provider** states travels as-is, which is a different number reached a different way. An undeclared runner is its own account, which declines to merge rather than guessing at a shared login.
+`[usage] source = "omp"` in `runners.toml` reads every provider omp is signed into while nothing is running - five here, including the only Google quota farseer can see - and windows are grouped by the **provider** rather than the login, because one login spans several providers.
 
 `GET /v1/runs` lists recent runs, newest first, sharing one view builder with `GET /v1/runs/{id}` so a list row and a single read can never disagree.
 The **Runs** widget draws `05 run state model`'s verbs on that line and derives which ones to offer from lifecycle, control and the runner's steering path - a finished run offers none, and `steer` never appears for a runner that cannot take one.
