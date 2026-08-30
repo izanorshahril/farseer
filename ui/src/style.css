@@ -938,3 +938,99 @@ code {
   letter-spacing: 0.06em;
   color: var(--faint);
 }
+
+/* The Projects widget. `39 what an installed farseer points at` made the folder
+   list a thing on screen rather than a property of the process, so it needs the
+   same density as the rest of the console: a root is a heading, its projects are
+   chips under it, and the two controls that change authorization sit apart from
+   the ones that pick where work goes. */
+.projects {
+  display: grid;
+  gap: 10px;
+}
+.roots {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 12px;
+}
+.root-path {
+  /* A long path truncates rather than wrapping the row it is in. The title
+     attribute holds the whole of it. */
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+}
+.project-list {
+  list-style: none;
+  margin: 4px 0 0;
+  padding: 0 0 0 10px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  border-left: 1px solid var(--line);
+}
+.project {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 24px;
+  padding: 3px 9px;
+  font: inherit;
+  color: inherit;
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  cursor: pointer;
+}
+.project:hover {
+  border-color: var(--accent);
+}
+/* The picked project is where every instruction goes, which is a fact worth a
+   filled chip rather than a checkmark somewhere else on the screen. */
+.project.on {
+  color: var(--accent);
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 14%, var(--panel-2));
+}
+.project-name {
+  font-family: var(--mono);
+  font-size: 12px;
+}
+.new-project,
+.add-root {
+  gap: 8px;
+  margin-top: 6px;
+}
+.new-project input[type="text"],
+.new-project input:not([type]),
+.add-root input {
+  flex: 1;
+  min-height: 28px;
+  font: inherit;
+  font-size: 12px;
+  color: inherit;
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 5px 8px;
+}
+.new-project input:focus,
+.add-root input:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+.add-root {
+  padding-top: 8px;
+  border-top: 1px solid var(--line);
+}
+.badge.bad {
+  color: var(--bad);
+  border-color: var(--bad);
+}
+.empty.small {
+  padding: 4px 0 0 10px;
+  font-size: 11px;
+}

@@ -78,6 +78,20 @@ CREATE INDEX IF NOT EXISTS rescoped_parent ON rescoped_from(parent);
 
 -- `24 ui state persistence`: an opaque blob farseer never parses. Mutable, last-write-wins, no
 -- `seq`, no scrub, and no event emitted on write - a cursor drag is not history.
+-- `39 what an installed farseer points at`: the directories the operator has
+-- authorized farseer to work inside. A **root**, not a project - projects are
+-- the directories found inside a root, and are never registered, so this list
+-- cannot drift from the disk. Farseer may create a project inside a root and
+-- may never create a root: creating one is the act of granting access, and an
+-- application that can widen its own authorization has none.
+--
+-- The path is stored canonicalized, because a check against the string a caller
+-- sent is not a check.
+CREATE TABLE IF NOT EXISTS roots (
+    path  TEXT PRIMARY KEY,
+    ts    INTEGER NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS ui_state (
     key   TEXT PRIMARY KEY,
     blob  BLOB NOT NULL,

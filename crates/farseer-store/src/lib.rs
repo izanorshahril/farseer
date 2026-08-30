@@ -22,6 +22,7 @@ use farseer_core::{
 mod analytics;
 mod memory;
 mod quota;
+mod roots;
 mod schema;
 mod ui_state;
 

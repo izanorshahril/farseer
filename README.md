@@ -77,7 +77,7 @@ An external protocol is spoken at a boundary, never shaped into internals.
 .
 ├─ crates/
 │  ├─ farseer-core/    domain model: cells, policy, run state, scrubbing. Pure, no I/O
-│  ├─ farseer-store/   the record: one append-only SQLite log, memory, UI state
+│  ├─ farseer-store/   the record: one append-only SQLite log, memory, UI state, authorized roots
 │  ├─ farseer-api/     local HTTP plus SSE on 127.0.0.1, token and loopback guard; nests the MCP face at /v1/mcp; pushes notifications out
 │  ├─ farseer-runner/  runners: Claude Code, Codex, cursor-agent and goose, PATHEXT resolution, Job-Object spawn, stream-json mapping, worktree lifecycle
 │  ├─ farseer-manager/ runs one sealed contract, captures terminal text, and records what happened
@@ -87,7 +87,8 @@ An external protocol is spoken at a boundary, never shaped into internals.
 │  ├─ src/bridge.ts    everything a widget may reach, and nothing else
 │  ├─ src/stream.ts    one SSE connection for the whole page, fanned out
 │  ├─ src/selection.ts which run the canvas is looking at - the one fact that crosses widgets
-│  ├─ src/widgets/     conversation, delegation, runs, run detail, activity, quota, runners, fleet, settings
+│  ├─ src/project.ts   which project work goes to, remembered across restarts
+│  ├─ src/widgets/     conversation, delegation, runs, run detail, activity, quota, runners, fleet, projects, settings
 │  ├─ plugins/         the widget host: gate 1's keep-or-undo and gate 2's import allowlist
 │  └─ scripts/         compiles agent widgets into the build, so the desktop app has them too
 ├─ widgets/            agent-authored widgets, in git, compiled and sandboxed by the canvas

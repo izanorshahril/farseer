@@ -13,6 +13,8 @@
  * Claude Design component returning to the main agent.
  */
 
+import { currentProject } from "./project";
+
 /** Which cell farseer's operator talks to. `01 cell primitive` made it the address. */
 const TOP_MANAGER = "zero";
 
@@ -34,6 +36,15 @@ export type Bridge = {
    * widget the operator did not write can show a run, and cannot cancel one.
    */
   post: (path: string, body?: unknown) => Promise<unknown>;
+  /**
+   * Withdraw something. One entry today - a project root - and the same
+   * allowlist discipline as `post`.
+   *
+   * A separate verb rather than a `POST /remove`, because `39 what an installed
+   * farseer points at` makes revoking a grant the operator's act and it should
+   * read as one wherever it is written down.
+   */
+  del: (path: string, body?: unknown) => Promise<void>;
   /**
    * Send a request to the **top manager**, anchored to where it came from.
    *
@@ -63,7 +74,15 @@ export function createBridge(): Bridge {
       //
       // `quota/refresh` launches a poll the operator has already enabled in
       // `runners.toml`; the runtime refuses it when they have not.
-      const allowed = [/^\/runs\/[0-9a-f-]+\/(steer|cancel|rerun|rescope)$/, /^\/quota\/refresh$/];
+      const allowed = [
+        /^\/runs\/[0-9a-f-]+\/(steer|cancel|rerun|rescope)$/,
+        /^\/quota\/refresh$/,
+        // `39 what an installed farseer points at`: authorizing a folder and
+        // creating a project inside one. Neither widens farseer's reach on its
+        // own - the runtime refuses a path outside every authorized root.
+        /^\/projects$/,
+        /^\/projects\/roots$/,
+      ];
       if (!allowed.some((pattern) => pattern.test(path))) {
         throw new Error(`${path} is not a verb this bridge offers`);
       }
@@ -94,6 +113,24 @@ export function createBridge(): Bridge {
       return await response.json().catch(() => undefined);
     },
 
+    del: async (path, body) => {
+      if (path !== "/projects/roots") {
+        throw new Error(`${path} is not a verb this bridge offers`);
+      }
+      const response = await fetch(`/v1${path}`, {
+        method: "DELETE",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(body ?? {}),
+      });
+      if (!response.ok) {
+        const said = await response
+          .json()
+          .then((body: { error?: string }) => body.error)
+          .catch(() => undefined);
+        throw new Error(said ?? `${path}: ${response.status}`);
+      }
+    },
+
     ask: async (anchor, text) => {
       // The anchor rides in the goal as prose because the reader is an LLM.
       // `16 local api surface`'s additive-only promise leaves room for a
@@ -102,7 +139,13 @@ export function createBridge(): Bridge {
       const body = await json<{ run_id: string }>(`/v1/cells/${TOP_MANAGER}/instruct`, {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ goal: `[from the ${where} widget]\n${text}` }),
+        body: JSON.stringify({
+          goal: `[from the ${where} widget]\n${text}`,
+          // `39 what an installed farseer points at`: which project this goes
+          // to, or nothing at all - which the runtime reads as farseer's own
+          // working directory.
+          project: currentProject(),
+        }),
       });
       return body.run_id;
     },

@@ -229,6 +229,17 @@ pub struct RunOptions {
     /// per million tokens. `None` means farseer prices nothing and a run that
     /// reported no currency stays blank - see [`estimated_cost`].
     pub usd_micros_per_mtok: Option<i64>,
+    /// The project this run works in - the directory a `Worktree` run's
+    /// worktree was cut from, and the repository its skills were resolved
+    /// against.
+    ///
+    /// `39 what an installed farseer points at` made this per run: farseer
+    /// points at projects rather than living inside one, so "which repository"
+    /// stopped being a property of the process. `None` means the run used the
+    /// process's own working directory, which is what the CLI still does.
+    /// Recorded on the queued event because `02 record scope` cannot answer
+    /// "where did this happen" from a run row that never said.
+    pub project: Option<PathBuf>,
     /// Absolute paths to runner extensions farseer itself supplies.
     ///
     /// Separate from [`Self::skills`] because they are different grants: a
@@ -265,6 +276,7 @@ impl Default for RunOptions {
             runner_env: Vec::new(),
             extensions: Vec::new(),
             skills: Vec::new(),
+            project: None,
         }
     }
 }
@@ -1512,6 +1524,12 @@ pub fn run_worker(
         // Paths, because that is what reached the argv. A name is what the cell
         // wrote down; a path is what the process opened, and `32` exists because
         // the two came apart.
+        if let Some(project) = &options.project {
+            payload.insert(
+                "project".into(),
+                serde_json::Value::String(project.display().to_string()),
+            );
+        }
         if !options.skills.is_empty() {
             payload.insert(
                 "skills".into(),

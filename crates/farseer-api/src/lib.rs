@@ -44,6 +44,7 @@ use farseer_store::{RunRow, ScanFilter, Store, StoreError, UI_STATE_CAP_BYTES};
 
 mod mcp;
 mod notify;
+mod projects;
 pub mod security;
 
 pub use security::{RuntimeToken, runtime_file_path, write_runtime_file};
@@ -121,6 +122,10 @@ struct RunHandle {
 struct ManagerContext {
     contract: WorkerContract,
     cell: CellDefinition,
+    /// The project this manager is working in, inherited by every worker and
+    /// cell it delegates to. A delegation that landed in a different repository
+    /// from its manager would be a second answer to "where did this happen".
+    project: Option<PathBuf>,
     /// A per-manager capability used both as the MCP bearer and as the identity bound to every manager-scoped tool call.
     manager_token: RuntimeToken,
     /// Serialized across tool calls so two concurrent delegations cannot both
@@ -417,6 +422,14 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/v1/runs/{run_id}/rerun", post(rerun_run))
         .route("/v1/runs/{run_id}/rescope", post(rescope_run))
         .route("/v1/ui-state/{key}", get(get_ui_state).put(put_ui_state))
+        .route(
+            "/v1/projects",
+            get(projects::list_projects).post(projects::create_project),
+        )
+        .route(
+            "/v1/projects/roots",
+            post(projects::add_root).delete(projects::remove_root),
+        )
         .route("/v1/skills", get(skills))
         .route("/v1/quota", get(quota))
         .route("/v1/quota/refresh", post(refresh_quota))
@@ -588,6 +601,11 @@ async fn reload_cells(State(state): State<Arc<AppState>>) -> Json<ReloadReport> 
 #[derive(Debug, Deserialize)]
 pub struct InstructBody {
     pub goal: String,
+    /// Which project to work in, per `39 what an installed farseer points at`.
+    /// Absent means the process's own working directory, which is farseer run
+    /// from inside a checkout.
+    #[serde(default)]
+    pub project: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -679,7 +697,12 @@ async fn instruct_cell(
         budget: cell.budget,
         definition_of_done: String::new(),
     });
-    let run_id = spawn_run(&state, contract, RunRole::Manager, cell)?;
+    let project = body
+        .project
+        .as_deref()
+        .map(|path| projects::resolve(&state, path))
+        .transpose()?;
+    let run_id = spawn_run(&state, contract, RunRole::Manager, cell, project)?;
 
     Ok((
         StatusCode::ACCEPTED,
@@ -728,17 +751,19 @@ pub(crate) fn create_workspace(
     state: &AppState,
     strategy: WorkspaceStrategy,
     run_id: RunId,
+    project: Option<&Path>,
 ) -> ApiResult<(PathBuf, Option<PathBuf>)> {
     let name = run_id.to_string();
+    // `39 what an installed farseer points at`: the repository is the run's
+    // project when the launch named one, and the process's own working
+    // directory when it did not - which is farseer run from inside a checkout,
+    // and is what the CLI still does.
+    let repo = project.unwrap_or(state.repo_root.as_path());
     match strategy {
         WorkspaceStrategy::Worktree => {
-            let cwd = farseer_runner::workspace::create_worktree(
-                &state.repo_root,
-                &state.runs_dir,
-                &name,
-            )
-            .map_err(|e| ApiError::Workspace(e.to_string()))?;
-            Ok((cwd, Some(state.repo_root.clone())))
+            let cwd = farseer_runner::workspace::create_worktree(repo, &state.runs_dir, &name)
+                .map_err(|e| ApiError::Workspace(e.to_string()))?;
+            Ok((cwd, Some(repo.to_path_buf())))
         }
         WorkspaceStrategy::PlainDirectory => {
             let cwd = state.runs_dir.join(&name);
@@ -786,11 +811,13 @@ fn manager_run_options(
     contract: &WorkerContract,
     cell: &CellDefinition,
     manager_token: &RuntimeToken,
+    project: Option<PathBuf>,
 ) -> ApiResult<RunOptions> {
     let mut options = RunOptions {
         actor: farseer_core::Actor::Operator,
         role: RunRole::Manager,
         manager_cell: Some(cell.clone()),
+        project,
         claude_mcp_config: None,
         append_system_prompt: None,
         runner_env: Vec::new(),
@@ -1088,6 +1115,7 @@ pub(crate) fn spawn_run(
     contract: WorkerContract,
     role: RunRole,
     pinned_cell: CellDefinition,
+    project: Option<PathBuf>,
 ) -> ApiResult<RunId> {
     ensure_runner_authority(&pinned_cell, &contract.runner)?;
     if let Some(dimension) = unenforceable_budget_dimension(&contract.runner, contract.budget) {
@@ -1112,7 +1140,8 @@ pub(crate) fn spawn_run(
         None
     };
     let run_id = contract.run_id;
-    let (cwd, repo_for_teardown) = create_workspace(state, contract.workspace, run_id)?;
+    let (cwd, repo_for_teardown) =
+        create_workspace(state, contract.workspace, run_id, project.as_deref())?;
     let cancel_requested = Arc::new(AtomicBool::new(false));
     let manager_context = (role == RunRole::Manager).then(|| ManagerContext {
         manager_token: RuntimeToken::generate(),
@@ -1121,9 +1150,16 @@ pub(crate) fn spawn_run(
         cancel_requested: Arc::clone(&cancel_requested),
         contract: contract.clone(),
         cell: pinned_cell.clone(),
+        project: project.clone(),
     });
     let options = if let Some(context) = &manager_context {
-        manager_run_options(state, &contract, &context.cell, &context.manager_token)
+        manager_run_options(
+            state,
+            &contract,
+            &context.cell,
+            &context.manager_token,
+            project.clone(),
+        )
     } else {
         Ok(RunOptions {
             actor: farseer_core::Actor::Operator,
@@ -1134,6 +1170,7 @@ pub(crate) fn spawn_run(
             runner_env: Vec::new(),
             mcp: None,
             extensions: Vec::new(),
+            project: project.clone(),
             account: Some(state.runner_config().account_for(&contract.runner)),
             usd_micros_per_mtok: state.runner_config().price_for(&contract.runner),
             // A run reached without a manager context - a rerun, or a
@@ -1383,6 +1420,10 @@ struct OriginalRun {
     spec: WorkerContractSpec,
     role: RunRole,
     manager_cell: Option<CellDefinition>,
+    /// Where the original ran. A re-run in a different project is a different
+    /// run, so this comes out of the record rather than out of whatever the
+    /// process happens to be pointed at now.
+    project: Option<PathBuf>,
 }
 
 fn original_run(state: &AppState, run_id: RunId) -> ApiResult<OriginalRun> {
@@ -1414,10 +1455,16 @@ fn original_run(state: &AppState, run_id: RunId) -> ApiResult<OriginalRun> {
         .map(serde_json::from_value)
         .transpose()
         .map_err(|_| ApiError::Corrupt("manager cell snapshot"))?;
+    let project = queued
+        .payload
+        .get("project")
+        .and_then(serde_json::Value::as_str)
+        .map(PathBuf::from);
     Ok(OriginalRun {
         spec,
         role,
         manager_cell,
+        project,
     })
 }
 
@@ -1479,6 +1526,7 @@ async fn respawn(
         WorkerContract::seal(original.spec),
         original.role,
         pinned_cell,
+        original.project,
     )?;
     Ok((
         StatusCode::ACCEPTED,
@@ -2505,6 +2553,46 @@ grants_shell = true
         harness_with_cell(CELL)
     }
 
+    /// `39 what an installed farseer points at`: the roots list is the fence,
+    /// and it is checked after canonicalization so a path that walks out of a
+    /// root with `..` is refused by where it **lands**, not by how it is
+    /// spelled.
+    #[test]
+    fn a_project_outside_every_authorized_root_is_refused() {
+        let h = harness();
+        let root = tempfile::tempdir().unwrap();
+        let inside = root.path().join("a-project");
+        std::fs::create_dir(&inside).unwrap();
+        let outside = tempfile::tempdir().unwrap();
+
+        let refused = projects::resolve(&h.state, &inside.display().to_string());
+        assert!(
+            refused.is_err(),
+            "a directory is not authorized until a root containing it is"
+        );
+
+        h.state
+            .store()
+            .authorize_root(
+                &projects::display(&std::fs::canonicalize(root.path()).unwrap()),
+                0,
+            )
+            .unwrap();
+
+        projects::resolve(&h.state, &inside.display().to_string())
+            .expect("a directory inside an authorized root resolves");
+
+        assert!(
+            projects::resolve(&h.state, &outside.path().display().to_string()).is_err(),
+            "a sibling of the root is not inside it"
+        );
+        assert!(
+            projects::resolve(&h.state, &inside.join("..").join("..").display().to_string())
+                .is_err(),
+            "`..` out of the root must be refused by where it lands"
+        );
+    }
+
     fn register_manager(h: &Harness) -> (RunId, TaskId, String) {
         let cell = h.state.cells().get(&CellId::new("zero")).cloned().unwrap();
         let run_id = RunId::new();
@@ -2533,6 +2621,7 @@ grants_shell = true
                 cancel_requested: Arc::new(AtomicBool::new(false)),
                 contract,
                 cell,
+                project: None,
             },
         );
         (run_id, task_id, token_text)
@@ -3012,6 +3101,7 @@ grants_shell = true
             &manager.contract,
             &manager.cell,
             &manager.manager_token,
+            None,
         )
         .unwrap();
         let config_path = options.claude_mcp_config.unwrap();
@@ -4613,6 +4703,7 @@ runner = "{runner}"
             &contract,
             &cell_with(runner),
             &RuntimeToken::generate(),
+            None,
         )
         .expect("options build");
         // What the manager is actually told, wherever farseer put it. For a
@@ -4684,7 +4775,7 @@ runner = "{runner}"
         });
         let token = RuntimeToken::generate();
         let options =
-            manager_run_options(&h.state, &contract, &cell, &token).expect("options build");
+            manager_run_options(&h.state, &contract, &cell, &token, None).expect("options build");
 
         let prompt = told(
             "pi",
@@ -4839,7 +4930,7 @@ runner = "{runner}"
             });
             let token = RuntimeToken::generate();
             let options =
-                manager_run_options(&h.state, &contract, &cell, &token).expect("options build");
+                manager_run_options(&h.state, &contract, &cell, &token, None).expect("options build");
             let prompt = options
                 .append_system_prompt
                 .expect("a manager is told who it is");

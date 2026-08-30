@@ -291,10 +291,15 @@ impl FarseerMcp {
         // checked by the caller - this function has the contract but not the
         // roster entry it came from.
         skill_dirs: &[std::path::PathBuf],
+        // The manager's project, inherited: `39 what an installed farseer
+        // points at` makes the project a per-run fact, and a worker that landed
+        // in a different repository from the manager that delegated it would be
+        // a second answer to where the work happened.
+        project: Option<&std::path::Path>,
     ) -> Result<farseer_manager::RunReport, McpError> {
         let run_id = contract.run_id;
         let (cwd, repo_for_teardown) =
-            create_workspace(&self.state, contract.workspace, run_id).map_err(api_error)?;
+            create_workspace(&self.state, contract.workspace, run_id, project).map_err(api_error)?;
 
         let result = execute_run(
             &self.state,
@@ -309,6 +314,7 @@ impl FarseerMcp {
                 runner_env: Vec::new(),
                 mcp: None,
                 extensions: Vec::new(),
+                project: project.map(std::path::Path::to_path_buf),
                 account: Some(self.state.runner_config().account_for(&contract.runner)),
                 usd_micros_per_mtok: self.state.runner_config().price_for(&contract.runner),
                 skills: skill_dirs.to_vec(),
@@ -586,6 +592,7 @@ impl FarseerMcp {
                 &manager.cell,
                 &manager.cancel_requested,
                 &skill_dirs,
+                manager.project.as_deref(),
             )
         }) {
             Ok(report) => report,
@@ -744,7 +751,13 @@ impl FarseerMcp {
         reserve(&mut remaining_budget, budget);
         drop(remaining_budget);
 
-        let run_id = match spawn_run(&self.state, contract, RunRole::Manager, callee) {
+        let run_id = match spawn_run(
+            &self.state,
+            contract,
+            RunRole::Manager,
+            callee,
+            manager.project.clone(),
+        ) {
             Ok(run_id) => run_id,
             Err(error) => {
                 let mut pool = manager

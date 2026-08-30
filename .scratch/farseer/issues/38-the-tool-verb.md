@@ -104,3 +104,45 @@ Not decided today, because there is no declared server to proxy yet and inventin
 Recorded here because it is the transferable part: `12`'s gate was theatre while every run held a shell, and `36 tool grant enforcement` ended that on 2026-08-28 by making `ToolLevel` expressible. Nobody revisited the refusal, because a refusal is written down and the capability that lifts it is not cross-referenced.
 
 The re-check condition, stated in `33 google quota`'s terms - **name the capability, not the tool**: a gate on a declared tool becomes worth building the day farseer serves a tool call at all, for any cell whose `ToolLevel` is below `shell`.
+
+---
+
+## Resolution of questions 1 and 2, 2026-08-30: neither fork, because farseer serves no third-party tool
+
+The operator answered the fork by removing what both branches assumed:
+
+> farseer have only minimal tools, harness should use their own tools, farseer tools is only to manage farseer, expose widgets to harness, or to improve farseer itself.
+
+`37`'s forwarding and this ticket's proxy were two ways to put **somebody else's tool** in farseer's hands. The ruling is that farseer never holds one. A harness arrives with its own environment - that is what `37 inherited tool environment` found and what `32 harness capability floor` fenced - and farseer's own tool surface is closed at three purposes:
+
+1. manage farseer,
+2. expose farseer's widgets to a harness,
+3. improve farseer itself.
+
+Every tool farseer serves today is already in that set: `read_memory`, `write_memory`, `delegate_to_worker`, `delegate_to_cell`. There is no fifth, and now there is a rule saying why not.
+
+### What that does to `kind = "tool"`
+
+Nothing, and that is the answer rather than an omission. A tool entry is a **declaration about the harness's own environment**, enforced where farseer is actually standing: `36 tool grant enforcement`'s `ToolLevel` at launch, which decides what the runner is started with. `ToolHasNoVerb` already says on the canvas that no verb reaches the entry; it stops being a gap the moment farseer stops intending to serve one.
+
+So `12 autonomy and deny list`'s gate is neither refused nor built. **It is scoped**: farseer can gate what farseer serves, that set is permanently small and self-referential, and farseer is already in the path for all of it. A gate over `post` was never reachable without becoming a proxy, and farseer is not becoming one.
+
+### The research the operator asked for, and the one thing in it that argues the other way
+
+Current practice separates the two words this ticket used interchangeably. A **proxy** bridges transport and aggregates servers behind one endpoint and judges nothing; a **gateway** adds authentication, per-tool filtered discovery, quotas, approval, and an audit trail of identity, tool, arguments and outcome. `02 record scope` and `12`'s gate describe a gateway, not a proxy - so the larger build this ticket estimated was under-estimated, not over.
+
+MCP core `2026-07-28` removes protocol-level sessions and adds `Mcp-Method` and `Mcp-Name` headers **so an intermediary can route without parsing the body**. That lowers the cost of a proxy. It does not lower the cost of a gate: a gate on `post` decides on the *arguments*, which are in the body, so the header change buys routing and no policy. The one live argument for building an intermediary got cheaper at exactly the part farseer does not need.
+
+The second finding cuts the same way: tool-space interference is measured, not theoretical - an agent's selection degrades as the catalog grows, and current guidance is per-agent tool filters and a small, domain-prefixed surface. **A minimal tool surface is the design, and forwarding would have been the regression.**
+
+### Exposing widgets, which is purpose 2 and now has a standard
+
+`MCP Apps` shipped as the first official MCP extension, spec `2026-01-26`, package `@modelcontextprotocol/ext-apps`. A tool points at a pre-declared `ui://` resource through `_meta.ui.resourceUri`; the host fetches it, renders it in a **sandboxed iframe**, and speaks JSON-RPC over `postMessage`. Supported today in Claude, Goose, VS Code Insiders and ChatGPT.
+
+That is `28 operator surface`'s third gate, described by somebody else: farseer already renders agent-authored widgets in an opaque-origin iframe with a narrow bridge, and the sandbox probe already asserts the boundary from inside. The difference is the vocabulary - farseer's bridge is `farseer.read` / `ask` / `loadState` / `saveState`, and the extension's is JSON-RPC. Adopting it means an operator's widget renders in **their harness**, not only on farseer's canvas, and that a widget author writes to a published spec instead of to farseer.
+
+This is a serving change, in purpose 2, with farseer on the server side of a boundary it already enforces. It is the opposite direction from the proxy this ticket was weighing, and it is the one worth building.
+
+### Still open
+
+Question 3 - `zero.toml`'s `shell` entry and `36`'s `ToolLevel::Shell` are two places stating one fact. Unaffected by this ruling and still two places that can disagree.

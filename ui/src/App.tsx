@@ -1,12 +1,14 @@
 import { useCallback, useEffect, useState } from "react";
 import { createBridge, type Anchor } from "./bridge";
 import { onSelection } from "./selection";
+import { restoreProject } from "./project";
 import { QuotaWidget } from "./widgets/quota";
 import { FleetWidget } from "./widgets/fleet";
 import { ActivityWidget } from "./widgets/activity";
 import { RunsWidget } from "./widgets/runs";
 import { RunnersWidget } from "./widgets/runners";
 import { SettingsWidget } from "./widgets/settings";
+import { ProjectsWidget } from "./widgets/projects";
 import { ConversationWidget } from "./widgets/conversation";
 import { DelegationWidget } from "./widgets/delegation";
 import { RunWidget } from "./widgets/run";
@@ -56,6 +58,11 @@ const REGISTRY = {
   },
   runs: { title: "Runs", subtitle: "with 05's verbs", render: RunsWidget },
   run: { title: "Run", subtitle: "one run, whole", render: RunWidget },
+  projects: {
+    title: "Projects",
+    subtitle: "folders farseer may work in",
+    render: ProjectsWidget,
+  },
   settings: { title: "Settings", subtitle: "the harness in front", render: SettingsWidget },
 } as const;
 
@@ -79,7 +86,7 @@ type AgentWidget = { id: string; title: string; subtitle: string; cell?: string 
  */
 type Layout = { v?: number; mounted: WidgetId[]; wide: WidgetId[] };
 
-const LAYOUT_VERSION = 3;
+const LAYOUT_VERSION = 4;
 
 /**
  * The two conversations first, side by side, and everything else below them.
@@ -91,8 +98,21 @@ const LAYOUT_VERSION = 3;
  */
 const DEFAULT_LAYOUT: Layout = {
   v: LAYOUT_VERSION,
-  mounted: ["conversation", "delegation", "runs", "run", "activity", "quota", "runners", "fleet"],
-  wide: ["conversation", "delegation", "runs", "run"],
+  mounted: [
+    "conversation",
+    "delegation",
+    "runs",
+    "run",
+    "activity",
+    "quota",
+    "runners",
+    "fleet",
+    "projects",
+  ],
+  // Projects is wide because a folder with two dozen repositories in it is the
+  // ordinary case, and a column of wrapped chips two abreast is a list nobody
+  // scans.
+  wide: ["conversation", "delegation", "runs", "run", "projects"],
 };
 
 /**
@@ -160,6 +180,10 @@ export function App() {
       .catch(() => setLayout(DEFAULT_LAYOUT));
     // Discovered, not imported: a widget appears because a file exists, which
     // is what makes "ask for a widget" a thing the operator can do.
+    // Which project the canvas is pointed at, restored before anything can be
+    // sent - `39 what an installed farseer points at` makes every instruction
+    // carry one.
+    void restoreProject();
     fetch("/__widgets")
       .then((response) => response.json() as Promise<AgentWidget[]>)
       .then(setAgentWidgets)
