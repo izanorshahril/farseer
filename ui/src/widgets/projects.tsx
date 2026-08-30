@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useState, type KeyboardEvent } from "react";
 import type { Bridge } from "../bridge";
 import { currentProject, onProject, setProject } from "../project";
 import { confirmGrantWithdrawal } from "../confirm";
@@ -50,6 +50,17 @@ function isInside(root: string, project: string): boolean {
   return tail.startsWith("\\") || tail.startsWith("/");
 }
 
+/**
+ * How the operator arranged this widget. Stored through the same blob the
+ * canvas uses, per `24 ui state persistence`: an arrangement they chose, kept
+ * so reopening the console does not undo it.
+ *
+ * `collapsed` folds a root's project list and **never hides the root**. A grant
+ * the operator cannot see is a grant they cannot withdraw, so the one thing
+ * this control must not do is make authorization disappear from the screen.
+ */
+type Arrangement = { order: string[]; collapsed: string[] };
+
 export function ProjectsWidget({ bridge }: { bridge: Bridge }) {
   const [roots, setRoots] = useState<Root[] | null>(null);
   const [note, setNote] = useState<string | null>(null);
@@ -62,6 +73,15 @@ export function ProjectsWidget({ bridge }: { bridge: Bridge }) {
   const [selected, setSelected] = useState(currentProject());
   /** Narrows the chip lists. See [`FILTER_AT`]. */
   const [filter, setFilter] = useState("");
+  const [arrangement, setArrangement] = useState<Arrangement>({ order: [], collapsed: [] });
+  /**
+   * Which chip in each root's list holds the tab stop.
+   *
+   * A root with two dozen projects is two dozen tab stops, which is a keyboard
+   * operator tabbing past the whole widget to reach the field below it. One
+   * stop per list, arrows inside - the roving pattern every toolbar uses.
+   */
+  const [cursor, setCursor] = useState<Record<string, number>>({});
 
   const load = useCallback(
     () =>
@@ -74,8 +94,67 @@ export function ProjectsWidget({ bridge }: { bridge: Bridge }) {
 
   useEffect(() => {
     void load();
+    bridge
+      .loadState<Arrangement>("projects")
+      .then((stored) =>
+        setArrangement({ order: stored?.order ?? [], collapsed: stored?.collapsed ?? [] }),
+      )
+      // No stored arrangement is the resting state: the roots render in the
+      // order the runtime returned them.
+      .catch(() => {});
     return onProject(setSelected);
-  }, [load]);
+  }, [bridge, load]);
+
+  const arrange = (change: (current: Arrangement) => Arrangement) =>
+    setArrangement((current) => {
+      const next = change(current);
+      // Fire and forget, like the project choice itself: a failed write costs
+      // one re-drag after a restart, and blocking the gesture on a round trip
+      // costs the gesture.
+      bridge.saveState("projects", next).catch(() => {});
+      return next;
+    });
+
+  /**
+   * Move a root one place.
+   *
+   * Written back as the **whole** displayed order rather than as a pair of
+   * swapped entries, so a list holding roots the operator never arranged comes
+   * out of one drag fully ordered instead of half.
+   */
+  const move = (paths: string[], path: string, by: number) => {
+    const at = paths.indexOf(path);
+    const to = at + by;
+    if (at < 0 || to < 0 || to >= paths.length) return;
+    const order = [...paths];
+    order.splice(to, 0, ...order.splice(at, 1));
+    arrange((current) => ({ ...current, order }));
+  };
+
+  /**
+   * Arrows move within a root's chips; the list itself is one tab stop.
+   *
+   * Focus is moved on the DOM rather than through state because the chips are
+   * already rendered and a React round trip would move the tab stop a frame
+   * after the key, which reads as a dropped keystroke.
+   */
+  const roam = (event: KeyboardEvent<HTMLUListElement>, root: string) => {
+    const keys = ["ArrowRight", "ArrowDown", "ArrowLeft", "ArrowUp", "Home", "End"];
+    if (!keys.includes(event.key)) return;
+    const chips = [...event.currentTarget.querySelectorAll<HTMLButtonElement>("button.project")];
+    if (chips.length === 0) return;
+    const from = chips.findIndex((chip) => chip === document.activeElement);
+    const forward = event.key === "ArrowRight" || event.key === "ArrowDown";
+    const at =
+      event.key === "Home"
+        ? 0
+        : event.key === "End"
+          ? chips.length - 1
+          : Math.min(chips.length - 1, Math.max(0, (from < 0 ? 0 : from) + (forward ? 1 : -1)));
+    event.preventDefault();
+    chips[at]?.focus();
+    setCursor((current) => ({ ...current, [root]: at }));
+  };
 
   /**
    * Withdrawing a root clears a project selected **inside** it.
@@ -89,6 +168,13 @@ export function ProjectsWidget({ bridge }: { bridge: Bridge }) {
     const losing = selected && isInside(root.path, selected) ? selected : null;
     if (!confirmGrantWithdrawal(root.path, losing)) return;
     if (losing) setProject(null);
+    // A withdrawn root leaves nothing behind in the arrangement either, so
+    // re-authorizing it later starts where a new root starts rather than in a
+    // position and a fold the operator has forgotten choosing.
+    arrange((current) => ({
+      order: current.order.filter((path) => path !== root.path),
+      collapsed: current.collapsed.filter((path) => path !== root.path),
+    }));
     void act(() => bridge.del("/projects/roots", { path: root.path }));
   };
 
@@ -108,6 +194,16 @@ export function ProjectsWidget({ bridge }: { bridge: Bridge }) {
   if (!roots && note) return <p className="empty bad">{note}</p>;
   if (!roots) return <p className="empty">reading folders...</p>;
 
+  // A root the operator never arranged sorts after every one they did, and
+  // keeps the runtime's order among its own kind - `Array.sort` is stable, so
+  // an equal rank leaves the list alone rather than reshuffling it.
+  const rank = (path: string) => {
+    const at = arrangement.order.indexOf(path);
+    return at < 0 ? arrangement.order.length : at;
+  };
+  const ordered = [...roots].sort((a, b) => rank(a.path) - rank(b.path));
+  const paths = ordered.map((root) => root.path);
+
   return (
     <div className="projects">
       {roots.length === 0 && (
@@ -118,18 +214,75 @@ export function ProjectsWidget({ bridge }: { bridge: Bridge }) {
       )}
 
       <ul className="roots">
-        {roots.map((root) => (
+        {ordered.map((root, place) => {
+          const folded = arrangement.collapsed.includes(root.path);
+          const shown = root.projects.filter(
+            (project) =>
+              root.projects.length <= FILTER_AT ||
+              project.name.toLowerCase().includes(filter.trim().toLowerCase()),
+          );
+          // The tab stop sits on the project already chosen when there is one,
+          // so arriving at the list starts where the operator left off rather
+          // than at the alphabetical first.
+          const stop = Math.max(
+            0,
+            cursor[root.path] ?? shown.findIndex((project) => project.path === selected),
+          );
+          return (
           <li key={root.path}>
             <div className="row">
+              {/* Folding a root, never hiding it: see [`Arrangement`]. */}
+              <button
+                className="chip fold"
+                aria-expanded={!folded}
+                title={folded ? "show what is in this folder" : "fold this folder away"}
+                onClick={() =>
+                  arrange((current) => ({
+                    ...current,
+                    collapsed: folded
+                      ? current.collapsed.filter((path) => path !== root.path)
+                      : [...current.collapsed, root.path],
+                  }))
+                }
+              >
+                {folded ? "▸" : "▾"}
+              </button>
               <b className="mono root-path" title={root.path}>
                 {root.path}
               </b>
+              {folded && root.projects.length > 0 && (
+                <span className="dim small">
+                  {root.projects.length} project{root.projects.length === 1 ? "" : "s"}
+                </span>
+              )}
               {root.missing && (
                 <span className="badge bad" title="the grant is still here; the directory is not">
                   not on disk
                 </span>
               )}
               <span className="grow" />
+              {/* Buttons rather than a drag handle. The canvas above can afford
+                  a grip because a widget is a big target; a root is one line,
+                  and one line that only moves by dragging is one line a
+                  keyboard cannot move at all. */}
+              <button
+                className="chip move"
+                disabled={place === 0}
+                aria-label={`move ${root.path} up`}
+                title="move this folder up"
+                onClick={() => move(paths, root.path, -1)}
+              >
+                ▲
+              </button>
+              <button
+                className="chip move"
+                disabled={place === paths.length - 1}
+                aria-label={`move ${root.path} down`}
+                title="move this folder down"
+                onClick={() => move(paths, root.path, 1)}
+              >
+                ▼
+              </button>
               <button
                 className="chip"
                 disabled={busy || root.missing}
@@ -196,11 +349,11 @@ export function ProjectsWidget({ bridge }: { bridge: Bridge }) {
               </div>
             )}
 
-            {!root.missing && root.projects.length === 0 && (
+            {!folded && !root.missing && root.projects.length === 0 && (
               <p className="empty small">Nothing in this folder yet.</p>
             )}
 
-            {root.projects.length > FILTER_AT && (
+            {!folded && root.projects.length > FILTER_AT && (
               <div className="row project-filter">
                 <input
                   aria-label={`filter projects in ${root.path}`}
@@ -216,21 +369,22 @@ export function ProjectsWidget({ bridge }: { bridge: Bridge }) {
               </div>
             )}
 
-            <ul className="project-list">
-              {root.projects
-                .filter(
-                  (project) =>
-                    root.projects.length <= FILTER_AT ||
-                    project.name.toLowerCase().includes(filter.trim().toLowerCase()),
-                )
-                .map((project) => {
-                const here = selected === project.path;
+            {!folded && (
+            <ul
+              className="project-list"
+              // A list of chips the arrows walk through: see [`roam`].
+              onKeyDown={(event) => roam(event, root.path)}
+            >
+              {shown.map((project, index) => {
+                const on = selected === project.path;
                 return (
                   <li key={project.path}>
                     <button
-                      className={here ? "project on" : "project"}
-                      aria-pressed={here}
-                      onClick={() => setProject(here ? null : project.path)}
+                      className={on ? "project on" : "project"}
+                      aria-pressed={on}
+                      tabIndex={index === Math.min(stop, shown.length - 1) ? 0 : -1}
+                      onFocus={() => setCursor((current) => ({ ...current, [root.path]: index }))}
+                      onClick={() => setProject(on ? null : project.path)}
                       title={project.path}
                     >
                       <span className="project-name">{project.name}</span>
@@ -247,8 +401,10 @@ export function ProjectsWidget({ bridge }: { bridge: Bridge }) {
                 );
               })}
             </ul>
+            )}
           </li>
-        ))}
+          );
+        })}
       </ul>
 
       <div className="row add-root">

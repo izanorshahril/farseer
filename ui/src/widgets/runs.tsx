@@ -3,6 +3,7 @@ import type { Bridge } from "../bridge";
 import { follow } from "../stream";
 import { selectRun } from "../selection";
 import { confirmVerb } from "../confirm";
+import { meaningOf } from "../meaning";
 
 /**
  * The fleet, with `05 run state model`'s verbs on the line.
@@ -64,6 +65,45 @@ function verbsFor(run: Run, steerable: (runner: string) => boolean): string[] {
   // being true the moment ACP and pi arrived, silently. One table, everything
   // else derived.
   return steerable(run.runner) ? ["steer", "cancel"] : ["cancel"];
+}
+
+/**
+ * The same rows, ordered so a worker sits under the manager that spawned it.
+ *
+ * `28 operator surface`'s review found this widget's one blind spot: every row
+ * looked alike, so a screen of twenty-five runs said nothing about which of
+ * them an operator started and which a manager did on its own. The Runners
+ * widget beside it has answered that since it was written, by indenting runs
+ * that share a `task_id` - so the fix is to speak that idiom here rather than
+ * invent a second one.
+ *
+ * Two things this deliberately does not do:
+ *
+ * - **Guess a parent.** The indent is `role`, which the record holds, not
+ *   position in the list. A worker whose manager fell outside this window is
+ *   shown flat, because indenting it under the row above would name a manager
+ *   that is not there.
+ * - **Re-sort the fleet.** Tasks keep the order the API returned them in -
+ *   newest first - and only the runs *within* one task are put oldest first, so
+ *   the manager comes before what it handed off.
+ */
+type Row = { run: Run; under: boolean };
+
+function threaded(runs: Run[]): Row[] {
+  const rows: Row[] = [];
+  const done = new Set<string>();
+  for (const run of runs) {
+    if (done.has(run.task_id)) continue;
+    done.add(run.task_id);
+    const task = runs
+      .filter((candidate) => candidate.task_id === run.task_id)
+      .sort((a, b) => a.started_ts - b.started_ts);
+    const hasManager = task.some((candidate) => candidate.role !== "worker");
+    for (const member of task) {
+      rows.push({ run: member, under: hasManager && member.role === "worker" });
+    }
+  }
+  return rows;
 }
 
 const usd = (micros: number) => `$${(micros / 1_000_000).toFixed(2)}`;
@@ -141,10 +181,21 @@ export function RunsWidget({ bridge }: { bridge: Bridge }) {
   return (
     <>
       <ul className="runs">
-        {runs.map((run) => {
+        {threaded(runs).map(({ run, under }) => {
           const verbs = verbsFor(run, steerable);
           return (
-            <li key={run.run_id}>
+            <li key={run.run_id} className={under ? "under" : undefined}>
+              {under ? (
+                <span className="mono faint small elbow" title={meaningOf("role")}>
+                  └
+                </span>
+              ) : (
+                run.role && (
+                  <span className="badge role" title={meaningOf("role")}>
+                    {run.role}
+                  </span>
+                )
+              )}
               <span
                 className={`dot ${run.liveness ?? (run.lifecycle === "running" ? "live" : "done")}`}
                 title={run.liveness ?? run.lifecycle}

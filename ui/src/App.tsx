@@ -329,8 +329,35 @@ export function App() {
                 <span
                   className="grip"
                   role="button"
-                  aria-label={`move the ${widget.title} widget`}
-                  title="drag to move this widget"
+                  aria-label={`move the ${widget.title} widget - arrow keys, or drag`}
+                  aria-keyshortcuts="ArrowLeft ArrowRight"
+                  title="drag to move this widget, or focus it and press an arrow key"
+                  // Focusable, because a grip that only answers to a drag is a
+                  // canvas a keyboard cannot arrange at all - and the drag was
+                  // itself the fix for a grip that looked like a handle and
+                  // moved nothing. Same failure, one input device along.
+                  tabIndex={0}
+                  onKeyDown={(event) => {
+                    const by =
+                      event.key === "ArrowLeft" || event.key === "ArrowUp"
+                        ? -1
+                        : event.key === "ArrowRight" || event.key === "ArrowDown"
+                          ? 1
+                          : 0;
+                    if (by === 0) return;
+                    event.preventDefault();
+                    persist((current) => {
+                      const order = [...current.mounted];
+                      const at = order.indexOf(id);
+                      const to = at + by;
+                      if (at < 0 || to < 0 || to >= order.length) return current;
+                      // The same move the drop performs, one place at a time.
+                      // React reconciles the section by key, so the grip travels
+                      // with its card and keeps focus for the next press.
+                      order.splice(to, 0, ...order.splice(at, 1));
+                      return { ...current, mounted: order };
+                    });
+                  }}
                   // Only the grip drags, so selecting text in a widget body is
                   // still a selection.
                   draggable
