@@ -26,5 +26,5 @@ pub use run::{
     ActivityClock, Control, Lifecycle, Liveness, LivenessThresholds, ManagerVerb, Outcome, Pause,
     WorkerContract, WorkerContractSpec, WorkspaceState, WorkspaceStrategy,
 };
-pub use runners::{RunnerConfig, RunnerEntry};
+pub use runners::{A2aConfig, A2aPeer, RunnerConfig, RunnerEntry};
 pub use scrub::scrub;

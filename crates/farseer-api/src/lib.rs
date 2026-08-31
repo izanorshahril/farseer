@@ -42,6 +42,7 @@ use farseer_manager::{
 use farseer_runner::spawn::CancelToken;
 use farseer_store::{RunRow, ScanFilter, Store, StoreError, UI_STATE_CAP_BYTES};
 
+mod a2a;
 mod attach;
 mod lifecycle;
 mod mcp;
@@ -491,6 +492,12 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/v1/analytics/intervention", get(analytics_intervention))
         .route("/v1/analytics/rework", get(analytics_rework))
         .route("/v1/analytics/lessons", get(analytics_lessons))
+        // `06 cell transport`'s inbound path for foreign orchestrators, off
+        // until `runners.toml` names a peer. Outside `/v1` because the card's
+        // location is the protocol's, not farseer's, and the RPC endpoint is
+        // what the card points at.
+        .route("/.well-known/agent-card.json", get(a2a::agent_card))
+        .route("/a2a", post(a2a::rpc))
         .nest_service("/v1/mcp", mcp::service(state.clone()))
         .layer(middleware::from_fn_with_state(state.clone(), guard))
         .with_state(state)
@@ -526,6 +533,14 @@ async fn guard(
     if !security::is_origin_allowed(host, origin) {
         return ApiError::Forbidden("request did not come from loopback").into_response();
     }
+    // The A2A face carries its own credential and checks it itself: `06 cell
+    // transport` binds a token **per peer** to a cell, which this guard has no
+    // way to express, and the Agent Card is read before any token exists at
+    // all. The loopback and origin checks above still apply, and the endpoint
+    // answers nothing until `runners.toml` names a peer.
+    if is_a2a(request.uri().path()) {
+        return next.run(request).await;
+    }
     let is_manager_request = is_manager_scoped(request.uri().path());
     if !presented_token(headers).is_some_and(|token| {
         state.token.matches(token) || (is_manager_request && state.manager_token_matches(token))
@@ -543,6 +558,11 @@ async fn guard(
 /// the runners that have no MCP client at all. Everything else on the router
 /// stays the operator's, which is what
 /// `a_manager_bearer_cannot_call_operator_routes` pins.
+/// The two paths a foreign orchestrator reaches, which authenticate themselves.
+fn is_a2a(path: &str) -> bool {
+    path == "/a2a" || path == "/.well-known/agent-card.json"
+}
+
 fn is_manager_scoped(path: &str) -> bool {
     path.starts_with("/v1/mcp") || path.starts_with("/v1/manager/")
 }
@@ -1402,6 +1422,16 @@ async fn cancel_run(
     UrlPath(run_id): UrlPath<String>,
 ) -> ApiResult<StatusCode> {
     let run_id: RunId = run_id.parse().map_err(|_| ApiError::NotFound("run"))?;
+    cancel_run_inner(&state, run_id).await?;
+    Ok(StatusCode::ACCEPTED)
+}
+
+/// The cancellation itself, reachable from more than one face.
+///
+/// `06 cell transport` puts a foreign orchestrator on the A2A endpoint with a
+/// `tasks/cancel`, and a second implementation of this would be a second
+/// opinion about what cancelling a manager does to its children.
+pub(crate) async fn cancel_run_inner(state: &Arc<AppState>, run_id: RunId) -> ApiResult<()> {
     let pending = state
         .pending_cancellations
         .lock()
@@ -1438,7 +1468,7 @@ async fn cancel_run(
     for token in tokens.drain(..) {
         token.cancel();
     }
-    Ok(StatusCode::ACCEPTED)
+    Ok(())
 }
 
 #[derive(Debug, Deserialize)]
@@ -3742,6 +3772,229 @@ grants_shell = true
                 .await
                 .0,
             StatusCode::BAD_REQUEST
+        );
+    }
+
+    /// A harness whose runner config names one A2A peer bound to cell zero.
+    fn harness_with_a_peer() -> Harness {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("zero.toml"), CELL_WITH_AN_ABSENT_RUNNER).unwrap();
+        let runs_dir = tempfile::tempdir().unwrap();
+        let repo = git_repo_with_a_commit();
+        let token = RuntimeToken::generate();
+        let config = farseer_core::RunnerConfig {
+            a2a: farseer_core::A2aConfig {
+                name: Some("farseer under test".into()),
+                expose: vec!["zero".into()],
+                peer: vec![farseer_core::A2aPeer {
+                    name: "a friendly orchestrator".into(),
+                    token: "peer-secret".into(),
+                    cell: "zero".into(),
+                }],
+            },
+            ..Default::default()
+        };
+        let state = Arc::new(
+            AppState::new(
+                Store::open_in_memory().unwrap(),
+                dir.path(),
+                token.clone(),
+                runs_dir.path(),
+                repo.path(),
+            )
+            .with_runner_config(config),
+        );
+        state.reload();
+        Harness {
+            router: router(state.clone()),
+            token,
+            state,
+            _dir: dir,
+            _runs_dir: runs_dir,
+            _repo: repo,
+        }
+    }
+
+    fn a2a_call(bearer: &str, body: serde_json::Value) -> Request<Body> {
+        Request::builder()
+            .method("POST")
+            .uri("/a2a")
+            .header(header::HOST, "127.0.0.1:9000")
+            .header(header::AUTHORIZATION, format!("Bearer {bearer}"))
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(body.to_string()))
+            .unwrap()
+    }
+
+    fn a_finished_run_in(h: &Harness, cell: &str) -> RunId {
+        let run_id = RunId::new();
+        h.state
+            .store()
+            .upsert_run(&RunRow {
+                run_id,
+                task_id: TaskId::new(),
+                cell_id: CellId::new(cell),
+                runner: "goose".into(),
+                model: String::new(),
+                outcome: Some("ok".into()),
+                usd_micros: 0,
+                tokens: 0,
+                operator_touched: false,
+                started_ts: 1,
+                finished_ts: Some(2),
+            })
+            .unwrap();
+        run_id
+    }
+
+    /// `06 cell transport` section 2: the endpoint is off until an operator
+    /// writes a peer, because turning it on is the moment the card becomes a
+    /// public commitment that is hard to walk back.
+    #[tokio::test]
+    async fn a_farseer_with_no_peers_publishes_no_card_and_answers_no_rpc() {
+        let h = harness();
+        assert_eq!(
+            h.send(h.request("GET", "/.well-known/agent-card.json"))
+                .await
+                .0,
+            StatusCode::NOT_FOUND
+        );
+        let (status, body) = h
+            .send(a2a_call(
+                "anything",
+                json!({"id": 1, "method": "tasks/get"}),
+            ))
+            .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert!(
+            body["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("runners.toml"),
+            "{body}"
+        );
+    }
+
+    /// `21 A2A conformance` section 4: generate the card from the cell
+    /// definition, so the card and the definition cannot drift. And `06`
+    /// section 3: farseer says what it is, because a caller that believes it is
+    /// driving a single agent has quietly wrong assumptions.
+    #[tokio::test]
+    async fn the_card_is_generated_from_the_cells_and_says_it_is_an_orchestrator() {
+        let h = harness_with_a_peer();
+        let (status, card) = h
+            .send(h.request("GET", "/.well-known/agent-card.json"))
+            .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(card["name"], "farseer under test");
+        assert!(
+            card["description"]
+                .as_str()
+                .unwrap()
+                .contains("orchestrator, not a single agent"),
+            "{card}"
+        );
+        assert_eq!(card["skills"][0]["id"], "zero");
+        assert_eq!(
+            card["capabilities"]["streaming"], false,
+            "A2A's subscription cannot express `16`'s cursored replay, so it is not advertised"
+        );
+        assert_eq!(card["securitySchemes"]["peerToken"]["scheme"], "bearer");
+    }
+
+    /// `06` section 7: a token per peer, bound to a cell. The identity is which
+    /// token authenticated the request, never what the caller asserts.
+    #[tokio::test]
+    async fn an_unknown_peer_token_is_refused_before_anything_is_started() {
+        let h = harness_with_a_peer();
+        let (status, _) = h
+            .send(a2a_call(
+                "not-the-secret",
+                json!({"id": 1, "method": "message/send",
+                       "params": {"message": {"parts": [{"text": "do a thing"}]}}}),
+            ))
+            .await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert!(
+            h.state.store().recent_runs(10).unwrap().is_empty(),
+            "the fence is before the work, not after it"
+        );
+    }
+
+    /// The mapping `21` section 1 found, end to end: a message starts a run and
+    /// the reply is the task, not the answer - `06` made a cell call
+    /// fire-and-forget for reasons the transport does not change.
+    #[tokio::test]
+    async fn a_peer_starts_a_task_and_reads_it_back_but_cannot_see_another_cells() {
+        let h = harness_with_a_peer();
+        let (status, sent) = h
+            .send(a2a_call(
+                "peer-secret",
+                json!({"id": 7, "method": "message/send", "params": {
+                    "message": {
+                        "parts": [{"text": "summarise the release"}],
+                        "metadata": {"autonomy_ceiling": "irreversible",
+                                     "definition_of_done": "a paragraph"}
+                    }
+                }}),
+            ))
+            .await;
+        assert_eq!(status, StatusCode::OK, "{sent}");
+        assert_eq!(sent["id"], 7, "the JSON-RPC id is echoed");
+        let task_id = sent["result"]["id"].as_str().unwrap().to_string();
+
+        // Read from the record rather than the run row: the row is written when
+        // the run starts and the event when it is queued, and a client reading
+        // its task back immediately is the ordinary case.
+        let (_, queued) = h.get(&format!("/v1/events?run={task_id}&limit=5")).await;
+        assert_eq!(queued[0]["cell_id"], "zero", "{queued}");
+        assert!(
+            queued[0]["payload"]["goal"]
+                .as_str()
+                .unwrap()
+                .contains("a friendly orchestrator"),
+            "the manager is told who asked, which nothing else on the wire says"
+        );
+
+        let (_, read) = h
+            .send(a2a_call(
+                "peer-secret",
+                json!({"id": 8, "method": "tasks/get", "params": {"id": task_id}}),
+            ))
+            .await;
+        assert!(
+            read["result"]["status"]["state"]
+                .as_str()
+                .unwrap()
+                .starts_with("TASK_STATE_"),
+            "{read}"
+        );
+
+        // A run in a cell this peer is not bound to answers the same as one that
+        // does not exist: telling them apart would disclose the rest of the fleet.
+        let elsewhere = a_finished_run_in(&h, "social");
+        let (status, hidden) = h
+            .send(a2a_call(
+                "peer-secret",
+                json!({"id": 9, "method": "tasks/get", "params": {"id": elsewhere.to_string()}}),
+            ))
+            .await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{hidden}");
+
+        // And the stream farseer will not fake says so rather than 404ing.
+        let (status, refused) = h
+            .send(a2a_call(
+                "peer-secret",
+                json!({"id": 10, "method": "tasks/resubscribe", "params": {"id": task_id}}),
+            ))
+            .await;
+        assert_eq!(status, StatusCode::NOT_IMPLEMENTED);
+        assert!(
+            refused["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("cursored"),
+            "{refused}"
         );
     }
 

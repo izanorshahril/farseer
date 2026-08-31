@@ -28,6 +28,13 @@ pub struct RunnerConfig {
     /// use for work.
     #[serde(default)]
     pub usage: UsageConfig,
+    /// The inbound A2A endpoint, per `06 cell transport` section 2.
+    ///
+    /// **Its own section and off unless written.** Turning it on is the moment
+    /// the Agent Card becomes a public commitment that is hard to walk back, so
+    /// it is a deliberate act rather than a default nobody read.
+    #[serde(default)]
+    pub a2a: A2aConfig,
     #[serde(default, flatten)]
     pub runners: BTreeMap<String, RunnerEntry>,
 }
@@ -42,6 +49,75 @@ pub struct UsageConfig {
     /// kit`.
     #[serde(default)]
     pub source: Option<String>,
+}
+
+/// Who may call farseer from outside, and as what.
+///
+/// `06 cell transport` section 2: local cells never traverse this - they take
+/// the in-process path - so the endpoint serves foreign callers exclusively and
+/// is off until an operator writes a peer.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct A2aConfig {
+    /// What the Agent Card calls this farseer. `21 A2A conformance` section 4
+    /// requires a name, and an unnamed agent on somebody else's registry is
+    /// worse than an opinionated default.
+    #[serde(default)]
+    pub name: Option<String>,
+    /// Which cells the card advertises, and the only ones a peer may address.
+    ///
+    /// Named rather than "every cell", because the card is public and read
+    /// before any token is presented: the fleet is not something to disclose by
+    /// omission.
+    #[serde(default)]
+    pub expose: Vec<String>,
+    /// One entry per caller. `06` chose a token **per peer** rather than one
+    /// global key, so revocation is per peer, and each is bound to the cell it
+    /// speaks as - which is where `from_cell` comes from, derived from auth
+    /// rather than asserted by the caller.
+    #[serde(default)]
+    pub peer: Vec<A2aPeer>,
+}
+
+impl A2aConfig {
+    /// The endpoint answers only when a peer exists. A card with no peer is an
+    /// advertisement for a door nobody can open.
+    pub fn is_on(&self) -> bool {
+        !self.peer.is_empty()
+    }
+
+    /// Which cell a bearer speaks as, if any.
+    ///
+    /// Compared in constant time, like the operator token: a peer token is a
+    /// credential, and a comparison that returns early leaks its prefix.
+    pub fn peer_for(&self, token: &str) -> Option<&A2aPeer> {
+        let mut found = None;
+        for peer in &self.peer {
+            let expected = peer.token.as_bytes();
+            let got = token.as_bytes();
+            let mut diff = (expected.len() ^ got.len()) as u8;
+            for i in 0..expected.len().max(got.len()) {
+                diff |= expected.get(i).copied().unwrap_or(0) ^ got.get(i).copied().unwrap_or(0);
+            }
+            if diff == 0 {
+                found = Some(peer);
+            }
+        }
+        found
+    }
+}
+
+/// One foreign caller.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct A2aPeer {
+    /// What to call this caller in the record. Not a secret and not an
+    /// identity claim - the token is the identity.
+    pub name: String,
+    pub token: String,
+    /// The cell this peer addresses. One cell per peer, so a token that leaks
+    /// reaches exactly what it was issued for.
+    pub cell: String,
 }
 
 /// A source farseer knows how to read windows from while nothing is running.

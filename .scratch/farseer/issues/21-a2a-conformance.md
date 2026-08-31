@@ -207,3 +207,24 @@ Everywhere this ticket says "the envelope" - the eight-field payload mapped to A
 
 `14` retired the word because `05` used it for the worker contract and `06` for the cell-call payload: overlapping fields, one token, two targets.
 Nothing about this ticket's findings changes. The mapping table, the four fields with no native home, and the unbounded-foreign-callee conclusion all stand.
+
+## Built, 2026-08-31
+
+`GET /.well-known/agent-card.json` and `POST /a2a`, both off until `runners.toml` names a peer, per `06` section 2.
+
+**The card is generated from the loaded cell definitions**, as section 4 asked, so it cannot drift from them.
+Each exposed cell becomes one skill described by its roster, and the card's own description leads with `06` section 3's declaration: an orchestrator, not a single agent.
+
+**`streaming` is advertised as `false`, and `tasks/resubscribe` answers `501` with the reason.**
+Section 3 found A2A's subscription is a state snapshot plus live events where `16` made replay and attach one cursored call.
+A subscription that silently drops the backlog would be worse than none, and a client that cannot tell it lost events is exactly the failure this repository keeps naming.
+
+**Auth is the per-peer bearer `06` chose**, compared in constant time, bound to one cell.
+A task in any other cell answers the same as a task that does not exist, because distinguishing them discloses the rest of the fleet.
+The two A2A paths are exempt from the operator-token guard and authenticate themselves; loopback and `Origin` still apply.
+
+**The four homeless envelope fields ride in `message.metadata` and only ever narrow.**
+A ceiling above the cell's own is capped to it and a budget is `cap_to`'d, because section 7's rule cuts both ways: a foreign callee is unbounded by construction, and a foreign caller's idea of what it asked for is not authority either.
+
+**Not built.** No artifacts: `08` makes artifact the unit of reviewable change and A2A agrees, but farseer has no step that turns a finished run's diff into one, and an empty artifact array is honest where an invented artifact would not be.
+`TASK_STATE_INPUT_REQUIRED` has no farseer side yet either - it is where gated actions will land, and gated actions are not built.

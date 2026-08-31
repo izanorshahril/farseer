@@ -57,6 +57,31 @@
 [usage]
 source = "omp"
 
+# `06 cell transport`: the inbound A2A endpoint, for a foreign orchestrator that
+# wants to call a farseer cell. **Off until a peer is written here**, because
+# turning it on is the moment the Agent Card at
+# `/.well-known/agent-card.json` becomes a public commitment that is hard to
+# walk back - and local cells never traverse it, so nothing farseer does itself
+# needs it.
+#
+#   name    what the card calls this farseer.
+#   expose  which cells the card advertises, and the only ones a peer may
+#           address. Named rather than "all", because the card is read before
+#           any token is presented.
+#   peer    one entry per caller, each with its own token bound to one cell.
+#           `21 A2A conformance`: the caller's identity is which token
+#           authenticated the request, so a peer never asserts who it is.
+#
+# [a2a]
+# name = "farseer on this machine"
+# expose = ["zero"]
+#
+#   [[a2a.peer]]
+#   name = "a colleague's orchestrator"
+#   token = "generate-something-long"
+#   cell = "zero"
+
+
 [codex]
 account = "chatgpt"
 provider = "openai-codex"
