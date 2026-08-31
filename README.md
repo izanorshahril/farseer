@@ -198,7 +198,7 @@ Binds `127.0.0.1` only, opens the record, loads the definitions, and writes its 
 | `GET /v1/cells/states` | every cell that is not simply active |
 | `GET`/`PUT /v1/ui-state/{key}` | an opaque blob farseer never parses, so a canvas survives a restart. `canvas` holds the widget arrangement and `window` the desktop window's own size and position. `413` above 1 MiB |
 | `GET /v1/analytics/{cost,intervention,rework,lessons}` | the four questions from [11 analytics questions](.scratch/farseer/issues/11-analytics-questions.md) |
-| `/v1/mcp` | the streamable-HTTP MCP face nested into this router and guard; all three tools - `read_memory`, `write_memory`, and `delegate_to_worker` - derive identity from an active manager capability, and no raw event append exists because "an agent that can forge events can rewrite its own history" |
+| `/v1/mcp` | the streamable-HTTP MCP face nested into this router and guard; all four tools - `read_memory`, `write_memory`, `delegate_to_worker` and `delegate_to_cell` - derive identity from an active manager capability, and no raw event append exists because "an agent that can forge events can rewrite its own history" |
 | `POST /v1/manager/delegate/{worker,cell}` | the same two delegation verbs as plain JSON, for a manager whose runner has no MCP client. It calls the same functions the MCP tools call, so the roster, the worker cap and the budget are one implementation rather than two |
 | `GET /v1/skills` | the skills a cell may declare - directories in `skills/`, with which cells declare each. Deliberately **not** what a harness discovered on this machine: discovery is denied, so that would be a menu of things no cell can order |
 | `GET /v1/quota` | recorded windows from runs, plus a live `omp usage --json` snapshot labelled `source: "omp usage"` - the live reading supersedes farseer's own record of the same window, matched on the provider an account declares - the only reading of a Google Antigravity quota farseer has, and the only sight of any window while nothing is running |
@@ -259,15 +259,13 @@ See [35 notification plane](.scratch/farseer/issues/35-notification-plane.md).
 
 ### What is not built yet
 
-- **Delegation reach for ACP and Codex managers.** Claude Code managers delegate over MCP and pi/omp managers over farseer's own extension, both verified live.
-  `goose-acp`, `opencode-acp`, `codex-app-server`, `agy` and `cursor-agent` managers are told their roster and told they cannot reach it, because no channel for the verbs has been probed on those protocols yet.
 - **Pre-spend enforcement for bounded native-runner budgets.** Task-root and per-worker caps narrow and draw down as `23 prototype loose ends` requires, but every bounded dimension fails closed before spawn today.
   Claude Code 2.1.233's `--max-budget-usd` exceeded a one-micro-dollar cap by more than five orders of magnitude before reporting `budget_exhausted`, while the other runners report only after spending.
 - Gated actions.
 - **Third-party MCP clients.** The manager process is now an MCP client of farseer's own server, but reaching arbitrary third-party MCP tool servers is still the `M0 -.->|MCP| TOOL` edge on the map above and is not implemented.
-- **The ACP server adapter** and the A2A endpoint, both decided and both later.
-- **The UI.** Backend support exists - `GET`/`PUT /v1/ui-state/{key}` per `24`, and `07` constrains the attach surface to a rendered event stream over one run - but "UI shape" itself is still fog on [the map](.scratch/farseer/map.md), not a closed ticket: manager chat, fleet view, board and graph explorer are options, not a decision. It waits on a `/wayfinder` grilling-and-prototype session, HITL, not something to design and build unilaterally.
-- **A fifth runner, `pi` (badlogic/pi-mono).** Installed on the dev machine but has no provider credentials configured (`pi auth check` answers `credentials_not_configured`) - configuring one is an operator decision, so this stays a documented gap rather than a guess.
+- **The ACP server adapter** and the A2A endpoint, both decided in [16](.scratch/farseer/issues/16-local-api-surface.md) and [21](.scratch/farseer/issues/21-a2a-conformance.md) and both still unbuilt: farseer speaks ACP and MCP as a **client**, and answers neither as a server.
+- **A widget an agent wrote that farseer did not compile.** [28 operator surface](.scratch/farseer/issues/28-operator-surface.md)'s three gates are built and the canvas ships - see [ui/README.md](ui/README.md) - but a widget still reaches the screen only through `bun run --cwd ui build`, so a cell that writes one cannot see it without a build.
+- **Cost farseer can trust from every runner.** `pi` reports an API list price against a subscription, which is why it is labelled `at list price, not billed` everywhere it appears, and most runners report nothing at all - so a fleet-wide spend figure would be a number farseer invented.
 
 ## The spikes
 

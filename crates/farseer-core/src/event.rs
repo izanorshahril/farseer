@@ -144,6 +144,19 @@ impl EventKind {
     /// would bury the transitions. Current state derives from the latest.
     pub const RATE_LIMIT: &'static str = "rate_limit_event";
 
+    /// The operator started a run over, per `16 local api surface` section 8.
+    ///
+    /// Appended to the **parent** run, because the manager whose plan was
+    /// overridden is watching that one; the new run's own `run_queued` says
+    /// what it is. The payload names which verb it was - a re-run repeats a
+    /// contract and a re-scope changes a field of it - and the new run's id.
+    ///
+    /// `05 run state model` gives both verbs to the manager as well. This kind
+    /// exists because when the **operator** uses one, a manager that silently
+    /// discovers its plan changed underneath it will re-plan badly: do not
+    /// restrict the human, do record that it was the human.
+    pub const RUN_RESPAWNED: &'static str = "run_respawned";
+
     /// A cell moved between active, paused, archived and deleted, per
     /// `17 cell lifecycle`.
     ///

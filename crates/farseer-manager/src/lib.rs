@@ -1281,8 +1281,10 @@ fn deny_discovered_tools(runner: &str) -> &'static [&'static str] {
     }
 }
 
-/// `contract.runner` selects one of the four verified native stream-json dialects: Claude Code, Codex, cursor-agent, or Goose.
-/// The ACP runner from `20 worker control channel` remains unimplemented, so anything else is `UnsupportedRunner`.
+/// `contract.runner` selects a native stream-json dialect - Claude Code, Codex,
+/// cursor-agent or Goose - or an ACP runner, which `29 harness protocol` wired
+/// and `20 worker control channel` asked for. Anything else is
+/// `UnsupportedRunner`.
 ///
 /// A Claude Code manager bootstraps the goal onto live stdin before exposing its steer handle.
 /// A Claude Code worker receives one positional goal and no live-input mode, so a synchronous delegation returns after one turn instead of waiting forever for steering.

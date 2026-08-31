@@ -70,4 +70,4 @@ Adding `allow-same-origin` would hand a widget the host's origin and undo every 
 
 - **Response shapes in the contract.** [`widgets/AGENTS.md`](../widgets/AGENTS.md) lists the paths a widget may read but not what they return, and the first widget cell zero wrote guessed wrong about `/analytics/cost`.
 - **Auto-height in a real window.** A frame reports its own layout as `0` under a hidden browser pane, so the check that would prove it has not run anywhere that composites.
-- **Attach and takeover.** `07 attach semantics`'s control axis - `observe`, `take over`, `release` - has no API surface yet, so the run line shows `steer` and `cancel` only.
+- **A rendered stream inside the attach.** `07 attach semantics`'s control axis is on the run line now - `observe`, `take over`, `release`, and `intervene` once a run is taken over - but observing still means reading the Activity widget beside it rather than a stream scoped to the run the operator attached to.

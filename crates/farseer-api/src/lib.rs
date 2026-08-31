@@ -1594,10 +1594,14 @@ fn original_run(state: &AppState, run_id: RunId) -> ApiResult<OriginalRun> {
     })
 }
 
-/// `05 run state model`'s **re-run**: same contract, fresh run, fresh workspace. `16 local api surface`:
-/// operator-initiated re-run leaves an event behind - here, the
-/// `rescoped_from` edge `11 analytics questions`'s rework-depth query already walks, so a chain
-/// of re-runs reads exactly like a chain of re-scopes to that analytics query.
+/// `05 run state model`'s **re-run**: same contract, fresh run, fresh workspace.
+///
+/// Leaves two marks, which are for two different readers. The `rescoped_from`
+/// edge is for `11 analytics questions`'s rework-depth query, so a chain of
+/// re-runs reads exactly like a chain of re-scopes to it. The `run_respawned`
+/// event on the parent is for the **manager**, per `16 local api surface`
+/// section 8 - nothing reads an edge on a wake, and a manager that discovers
+/// its plan changed underneath it silently will re-plan badly.
 async fn rerun_run(
     State(state): State<Arc<AppState>>,
     UrlPath(run_id): UrlPath<String>,
@@ -1605,7 +1609,7 @@ async fn rerun_run(
     let parent_run_id: RunId = run_id.parse().map_err(|_| ApiError::NotFound("run"))?;
     let mut original = original_run(&state, parent_run_id)?;
     original.spec.run_id = RunId::new();
-    respawn(&state, original, parent_run_id).await
+    respawn(&state, original, parent_run_id, false).await
 }
 
 /// `05 run state model`'s **re-scope**: a new run against the same task, with a changed
@@ -1634,18 +1638,28 @@ async fn rescope_run(
     }
     original.spec.run_id = RunId::new();
     original.spec.goal = goal;
-    respawn(&state, original, parent_run_id).await
+    respawn(&state, original, parent_run_id, true).await
 }
 
 async fn respawn(
     state: &Arc<AppState>,
     original: OriginalRun,
     parent_run_id: RunId,
+    // Whether the caller changed the goal. `05 run state model` separates the
+    // two verbs by exactly this, and the record should not have to diff two
+    // contracts to recover which one the operator used.
+    changed_goal: bool,
 ) -> ApiResult<(StatusCode, Json<RespawnResponse>)> {
     let pinned_cell = original.manager_cell.ok_or(ApiError::BadRequest(
         "this legacy run has no pinned cell definition and cannot be rerun safely",
     ))?;
     let run_id = original.spec.run_id;
+    let cell_id = original.spec.cell_id.clone();
+    let goal = original.spec.goal.clone();
+    // The edge stays: `11 analytics questions`'s rework-depth query walks it,
+    // and a chain of re-runs has to read like a chain of re-scopes to that
+    // query. What it cannot do is tell the manager, because nothing reads the
+    // edge on a wake - so the event is appended beside it rather than instead.
     state.store().record_rescope(run_id, parent_run_id)?;
     let run_id = spawn_run(
         state,
@@ -1657,6 +1671,20 @@ async fn respawn(
         // owned the run it repeats.
         None,
     )?;
+    // Appended to the parent, per `16 local api surface` section 8: the manager
+    // whose plan was overridden is the one watching that run, and it decides
+    // for itself what to do about it - the same shape as `07`'s intervention.
+    let verb = if changed_goal { "rescope" } else { "rerun" };
+    if let Err(error) = state.store().append(&farseer_core::NewEvent::new(
+        cell_id,
+        parent_run_id,
+        farseer_core::EventKind::new(farseer_core::EventKind::RUN_RESPAWNED),
+        farseer_core::Actor::Operator,
+        now_ms(),
+        serde_json::json!({ "verb": verb, "run_id": run_id.to_string(), "goal": goal }),
+    )) {
+        eprintln!("the operator's {verb} of run {parent_run_id} was not recorded: {error}");
+    }
     Ok((
         StatusCode::ACCEPTED,
         Json(RespawnResponse {
@@ -4012,6 +4040,77 @@ grants_shell = true
             reconstructed.manager_cell.is_some(),
             "the operator's rerun must retain the worker's pinned cell authority"
         );
+    }
+
+    /// `16 local api surface` section 8: an operator's re-run and re-scope leave
+    /// an event, so a manager does not silently discover its plan changed.
+    ///
+    /// The `rescoped_from` edge was carrying this on its own, which serves
+    /// `11 analytics questions` and nothing else - nothing reads an edge on a
+    /// wake.
+    #[tokio::test]
+    async fn an_operators_respawn_tells_the_manager_which_verb_it_was() {
+        let h = harness_with_cell(CELL_WITH_A_WORKER);
+        let cell = h.state.cells().get(&CellId::new("zero")).cloned().unwrap();
+
+        for (endpoint, body, verb) in [
+            ("rerun", json!({}), "rerun"),
+            ("rescope", json!({ "goal": "a different goal" }), "rescope"),
+        ] {
+            let run_id = RunId::new();
+            let spec = WorkerContractSpec {
+                run_id,
+                task_id: TaskId::new(),
+                cell_id: CellId::new("zero"),
+                goal: "the original goal".into(),
+                workspace: WorkspaceStrategy::Worktree,
+                // Never resolved on this machine, so the respawned run fails
+                // without launching an agent.
+                runner: "not-a-real-runner".into(),
+                tool_grants: vec!["shell".into()],
+                tool_level: Default::default(),
+                autonomy_ceiling: farseer_core::policy::Irreversibility::Reversible,
+                budget: Budget::default(),
+                definition_of_done: String::new(),
+            };
+            let mut payload = serde_json::to_value(&spec).unwrap();
+            payload.as_object_mut().unwrap().insert(
+                RUN_ROLE_FIELD.into(),
+                serde_json::Value::String(RunRole::Worker.as_record_str().into()),
+            );
+            payload.as_object_mut().unwrap().insert(
+                MANAGER_CELL_FIELD.into(),
+                serde_json::to_value(&cell).unwrap(),
+            );
+            h.state
+                .store()
+                .append(&NewEvent::new(
+                    CellId::new("zero"),
+                    run_id,
+                    farseer_core::EventKind::RUN_QUEUED,
+                    Actor::Manager,
+                    1,
+                    payload,
+                ))
+                .unwrap();
+
+            let (status, answer) = h.post(&format!("/v1/runs/{run_id}/{endpoint}"), body).await;
+            assert_eq!(status, StatusCode::ACCEPTED, "{answer}");
+
+            let (_, events) = h.get(&format!("/v1/events?run={run_id}&limit=50")).await;
+            let respawned = events
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|e| e["kind"] == "run_respawned")
+                .unwrap_or_else(|| panic!("no run_respawned on the parent after {endpoint}"));
+            assert_eq!(respawned["payload"]["verb"], verb);
+            assert_eq!(respawned["payload"]["run_id"], answer["run_id"]);
+            assert_eq!(
+                respawned["actor"], "operator",
+                "the point of the event is that it was the human"
+            );
+        }
     }
 
     #[tokio::test]
