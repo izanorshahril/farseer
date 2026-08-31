@@ -223,3 +223,23 @@ A conditional write stays additive if that is ever revisited.
 
 This is deliberately the **only** part of the API that returns something farseer does not understand.
 Everything about runs, cells and cost stays reconstructible from a query plus a cursor.
+
+## The ACP server adapter, built 2026-08-31
+
+`farseer acp` speaks line-delimited JSON-RPC on stdio and attaches to a running farseer over `/v1`, which is section 1's ordering made literal: the adapter sits on top of the HTTP surface and reaches it like any other client.
+
+**The handshake declares an orchestrator**, per `06 cell transport` section 3.
+Standard ACP has no field for "I am a fleet", so it goes in `_meta.farseer` as a `kind` and a sentence saying that a turn can outlive a usual agent turn and that cancellation ends a tree.
+`loadSession` is declined: ACP's replay is a session the agent reconstructs and farseer's is a cursor over the record, and rebuilding a conversation from events and calling it the session the editor left would be a claim.
+
+**A session is a cell**, defaulting to zero, which is `15 manager conversation`'s shape and `01`'s address.
+
+**A turn ends when the manager answers.**
+The first version waited for `run_finished` and the live test hung on exactly the case `10 runner inventory` had already documented: a manager on live stdin emits its own terminal result per turn and stays alive for the next one, so `run_finished` arrives only when the operator closes the conversation.
+ACP models one prompt as one turn, so the loop returns at `manager_answered`.
+That is the whole reason that event kind exists, and this is the second place it has saved something.
+
+**A prompt runs as its own task while the read loop keeps reading.**
+`session/cancel` arrives *during* a turn, and a loop blocked on the turn would only see it after the thing it cancels had finished.
+
+Verified live against `pi` in cell zero: `session/new`, then a prompt, produced the manager's own words back as an `agent_message_chunk` update and closed with `stopReason: end_turn`.

@@ -265,9 +265,20 @@ See [35 notification plane](.scratch/farseer/issues/35-notification-plane.md).
   Claude Code 2.1.233's `--max-budget-usd` exceeded a one-micro-dollar cap by more than five orders of magnitude before reporting `budget_exhausted`, while the other runners report only after spending.
 - Gated actions.
 - **Third-party MCP clients.** The manager process is now an MCP client of farseer's own server, but reaching arbitrary third-party MCP tool servers is still the `M0 -.->|MCP| TOOL` edge on the map above and is not implemented.
-- **The ACP server adapter.** [16 local api surface](.scratch/farseer/issues/16-local-api-surface.md) made it a first-class feature and it is not built: farseer speaks ACP as a **client** to runners and answers none as a server, so no editor can drive it. The A2A endpoint beside it is built - see the route table - and off until a peer is written.
 - **A widget an agent wrote that farseer did not compile.** [28 operator surface](.scratch/farseer/issues/28-operator-surface.md)'s three gates are built and the canvas ships - see [ui/README.md](ui/README.md) - but a widget still reaches the screen only through `bun run --cwd ui build`, so a cell that writes one cannot see it without a build.
 - **Cost farseer can trust from every runner.** `pi` reports an API list price against a subscription, which is why it is labelled `at list price, not billed` everywhere it appears, and most runners report nothing at all - so a fleet-wide spend figure would be a number farseer invented.
+
+### The two inbound faces
+
+Farseer answers on three surfaces, and the substrate is the first one: [16 local api surface](.scratch/farseer/issues/16-local-api-surface.md) made the HTTP plus SSE API the transport and the other two adapters on top of it.
+
+| face | who calls it | how it is turned on |
+| --- | --- | --- |
+| `farseer serve` on `127.0.0.1` | the canvas, the CLI, anything local | always |
+| `farseer acp` on stdio | an editor, driving farseer as if it were an agent | run the subcommand; it attaches to a serving farseer |
+| `POST /a2a` plus the Agent Card | a foreign orchestrator | write a peer under `[a2a]` in `runners.toml` |
+
+Both adapters **say what farseer is** rather than passing as a single agent: the ACP handshake declares an orchestrator in `_meta.farseer`, and the Agent Card's description leads with the same sentence. [06 cell transport](.scratch/farseer/issues/06-cell-transport.md) section 3 refused to let the path flatten silently, because a caller that thinks it is driving one agent has quietly wrong timeout, cancellation and progress assumptions.
 
 ## The spikes
 

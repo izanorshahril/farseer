@@ -3943,10 +3943,18 @@ grants_shell = true
         assert_eq!(sent["id"], 7, "the JSON-RPC id is echoed");
         let task_id = sent["result"]["id"].as_str().unwrap().to_string();
 
-        // Read from the record rather than the run row: the row is written when
-        // the run starts and the event when it is queued, and a client reading
-        // its task back immediately is the ordinary case.
-        let (_, queued) = h.get(&format!("/v1/events?run={task_id}&limit=5")).await;
+        // `run_queued` is appended by the run's own task, so this waits for it
+        // rather than assuming it has landed - the read below is the one that
+        // must answer immediately, and it does.
+        let mut queued = serde_json::Value::Null;
+        for _ in 0..100 {
+            let (_, events) = h.get(&format!("/v1/events?run={task_id}&limit=5")).await;
+            if events.get(0).is_some() {
+                queued = events;
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
         assert_eq!(queued[0]["cell_id"], "zero", "{queued}");
         assert!(
             queued[0]["payload"]["goal"]

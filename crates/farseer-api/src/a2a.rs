@@ -395,6 +395,15 @@ fn task_of(
 /// only the row made that read answer "no such task" about a task farseer had
 /// just handed out an id for.
 fn cell_of(state: &Arc<AppState>, run_id: RunId) -> Option<String> {
+    // The manager context first, because it is the only one of the three that
+    // exists the moment `spawn_run` returns. The row is written when the run
+    // starts and `run_queued` when the manager loop reaches it, so a peer that
+    // reads its task back on the next line - which is what a well-behaved
+    // client does - was being told there was no such task, about a task farseer
+    // had just handed it the id for.
+    if let Some(manager) = state.manager(run_id) {
+        return Some(manager.cell.cell_id.to_string());
+    }
     if let Ok(Some(row)) = state.store().run(run_id) {
         return Some(row.cell_id.to_string());
     }
