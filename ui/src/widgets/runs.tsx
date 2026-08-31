@@ -34,6 +34,8 @@ type Run = {
   role: string | null;
   /** Why it ended, when the record says. See `RunView::finished_reason`. */
   finished_reason: string | null;
+  /** `07 attach semantics`'s third axis: autonomous, observed or taken_over. */
+  control: "autonomous" | "observed" | "taken_over";
 };
 
 /**
@@ -52,10 +54,25 @@ function why(run: Run): string | null {
     : run.finished_reason.slice(0, 40);
 }
 
-/** What `05 run state model` permits, given where the run actually is. */
+/**
+ * What `05 run state model` and `07 attach semantics` permit, given where the
+ * run actually is.
+ *
+ * Two axes, not one. Lifecycle decides whether anything can be sent at all;
+ * control decides who is holding the wheel. A verb appears only when the
+ * runtime would accept it - the rule this widget exists to keep.
+ *
+ * `observe` is offered on a **finished** run too. `07` section 1 makes attach
+ * target a run rather than a process: with a live worker the subscription
+ * continues into live output, without one it is replay, and one address answers
+ * either way.
+ */
 function verbsFor(run: Run, steerable: (runner: string) => boolean): string[] {
-  if (run.lifecycle !== "running") return [];
-  // Steer needs a live process listening on stdin. The runtime answers `400`
+  const verbs: string[] = [];
+  if (run.control === "autonomous") verbs.push("observe");
+  else verbs.push("release");
+  if (run.lifecycle !== "running") return verbs;
+  // Live input needs a process listening on stdin. The runtime answers `400`
   // when the runner has no steering path, and finding that out by clicking is
   // exactly what this list exists to prevent - but the runner is on the row, so
   // the decision is honest rather than optimistic.
@@ -64,8 +81,25 @@ function verbsFor(run: Run, steerable: (runner: string) => boolean): string[] {
   // `runner === "claude-code"`, which was true when it was written and stopped
   // being true the moment ACP and pi arrived, silently. One table, everything
   // else derived.
-  return steerable(run.runner) ? ["steer", "cancel"] : ["cancel"];
+  if (steerable(run.runner)) {
+    // A manager is a conversation, so `steer` is how the operator talks to it.
+    // A worker is executing a contract somebody else wrote, and `07` section 3
+    // refused typing into one unannounced - so its input verb is behind a
+    // takeover, and the takeover is the event the record hangs on.
+    if (run.role === "manager") verbs.push("steer");
+    else if (run.control === "taken_over") verbs.push("intervene");
+    else verbs.push("take over");
+  }
+  verbs.push("cancel");
+  return verbs;
 }
+
+/** Which path each verb posts to. `take over` is two words and one route. */
+const VERB_PATH: Record<string, string> = {
+  observe: "observe",
+  "take over": "take-over",
+  release: "release",
+};
 
 /**
  * The same rows, ordered so a worker sits under the manager that spawned it.
@@ -157,14 +191,33 @@ export function RunsWidget({ bridge }: { bridge: Bridge }) {
     setBusy(`${run.run_id}:${verb}`);
     setNote(null);
     try {
-      if (verb === "steer") {
-        const message = prompt(`Steer run ${run.run_id.slice(0, 8)} - same run, same contract:`);
+      const short = run.run_id.slice(0, 8);
+      if (verb === "steer" || verb === "intervene") {
+        const ask =
+          verb === "steer"
+            ? `Steer run ${short} - same run, same contract:`
+            : // Named as what it is. `07 attach semantics` section 6: the
+              // manager is told and decides for itself whether the goal
+              // changed, and the run carries the flag for good.
+              `Send this to run ${short}. The manager is told, and the run is marked as touched:`;
+        const message = prompt(ask);
         if (!message) return;
-        await bridge.post(`/runs/${run.run_id}/steer`, { message });
-        setNote(`steered ${run.run_id.slice(0, 8)}`);
-      } else {
+        await bridge.post(`/runs/${run.run_id}/${verb === "steer" ? "steer" : "intervene"}`, {
+          message,
+        });
+        setNote(`${verb === "steer" ? "steered" : "sent to"} ${short}`);
+      } else if (verb === "cancel") {
         await bridge.post(`/runs/${run.run_id}/cancel`);
-        setNote(`cancelled ${run.run_id.slice(0, 8)}`);
+        setNote(`cancelled ${short}`);
+      } else {
+        // observe, take over, release: no body, and the answer is the control
+        // state the run landed in.
+        const landed = (await bridge.post(`/runs/${run.run_id}/${VERB_PATH[verb]}`)) as
+          | { control?: string }
+          | undefined;
+        // The runtime answers with the state the run landed in, so the note
+        // says what is true rather than what was asked for.
+        setNote(`${short} is ${landed?.control ?? "changed"}`);
       }
       await load();
     } catch (e) {
@@ -239,7 +292,15 @@ export function RunsWidget({ bridge }: { bridge: Bridge }) {
               {verbs.map((verb) => (
                 <button
                   key={verb}
-                  className={verb === "cancel" ? "chip danger" : "chip"}
+                  className={
+                    verb === "cancel"
+                      ? "chip danger"
+                      : // The two verbs that put a person between the agent and
+                        // its work read as held rather than as neutral.
+                        verb === "take over" || verb === "intervene"
+                        ? "chip on"
+                        : "chip"
+                  }
                   disabled={busy !== null}
                   onClick={() => {
                     // Named, not "are you sure": the risk here is having hit the

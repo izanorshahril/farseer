@@ -75,7 +75,10 @@ export function createBridge(): Bridge {
       // `quota/refresh` launches a poll the operator has already enabled in
       // `runners.toml`; the runtime refuses it when they have not.
       const allowed = [
-        /^\/runs\/[0-9a-f-]+\/(steer|cancel|rerun|rescope)$/,
+        // `07 attach semantics`'s control axis joins `05 run state model`'s
+        // verbs here: attach is read-only until a takeover, and `intervene`
+        // is the only one of these that puts words into a live agent.
+        /^\/runs\/[0-9a-f-]+\/(steer|cancel|rerun|rescope|observe|take-over|release|intervene)$/,
         /^\/quota\/refresh$/,
         // `39 what an installed farseer points at`: authorizing a folder and
         // creating a project inside one. Neither widens farseer's reach on its

@@ -42,6 +42,7 @@ use farseer_manager::{
 use farseer_runner::spawn::CancelToken;
 use farseer_store::{RunRow, ScanFilter, Store, StoreError, UI_STATE_CAP_BYTES};
 
+mod attach;
 mod lifecycle;
 mod mcp;
 mod notify;
@@ -92,6 +93,10 @@ pub struct AppState {
     runs: Mutex<HashMap<RunId, RunHandle>>,
     /// Active manager identities accepted by `delegate_to_worker`.
     managers: Mutex<HashMap<RunId, ManagerContext>>,
+    /// Who is attached to which run, per `07 attach semantics`. In memory
+    /// rather than in the store, because an attachment is a live person on the
+    /// other end of a connection and a farseer that restarted has none.
+    attachments: Mutex<HashMap<RunId, attach::Attachment>>,
     /// Cancellation requested after a run id is returned but before its
     /// process exposes a live [`CancelToken`].
     pending_cancellations: Mutex<HashMap<RunId, Arc<AtomicBool>>>,
@@ -183,6 +188,10 @@ impl AppState {
         self.cells.lock().unwrap_or_else(|e| e.into_inner())
     }
 
+    fn attachments(&self) -> std::sync::MutexGuard<'_, HashMap<RunId, attach::Attachment>> {
+        self.attachments.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
     fn runs(&self) -> std::sync::MutexGuard<'_, HashMap<RunId, RunHandle>> {
         self.runs.lock().unwrap_or_else(|e| e.into_inner())
     }
@@ -262,6 +271,7 @@ impl AppState {
             runner_config: RunnerConfig::default(),
             runs: Mutex::new(HashMap::new()),
             managers: Mutex::new(HashMap::new()),
+            attachments: Mutex::new(HashMap::new()),
             pending_cancellations: Mutex::new(HashMap::new()),
             worker_counts: Mutex::new(HashMap::new()),
             base_url: OnceLock::new(),
@@ -456,6 +466,15 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/v1/runs/{run_id}/steer", post(steer_run))
         .route("/v1/runs/{run_id}/rerun", post(rerun_run))
         .route("/v1/runs/{run_id}/rescope", post(rescope_run))
+        // `07 attach semantics`'s three control states. Attach is read-only by
+        // default and `intervene` refuses without a takeover, because silent
+        // injection makes a manager confidently wrong about its own worker.
+        .route("/v1/runs/{run_id}/control", get(attach::read_control))
+        .route("/v1/runs/{run_id}/observe", post(attach::observe))
+        .route("/v1/runs/{run_id}/take-over", post(attach::take_over))
+        .route("/v1/runs/{run_id}/release", post(attach::release))
+        .route("/v1/runs/{run_id}/heartbeat", post(attach::heartbeat))
+        .route("/v1/runs/{run_id}/intervene", post(attach::intervene))
         .route("/v1/ui-state/{key}", get(get_ui_state).put(put_ui_state))
         .route(
             "/v1/projects",
@@ -1432,6 +1451,31 @@ pub struct SteerBody {
 /// `400` when the run's runner has no steering path (Codex today) rather
 /// than writing a line nothing reads; `404` when the run is unknown or
 /// already finished, same as `cancel`.
+/// Mark a run as one a human stepped into, permanently.
+///
+/// `07 attach semantics` section 6: the run's result carries the flag for good,
+/// so neither the manager nor the record mistakes the outcome for autonomous.
+/// Best-effort, like the event beside it - an intervention that reached the
+/// agent happened whether or not the row could be updated, and failing the call
+/// afterwards would tell the operator their words did not land when they did.
+pub(crate) fn mark_touched(state: &AppState, run_id: RunId) {
+    let store = state.store();
+    let row = match store.run(run_id) {
+        Ok(Some(mut row)) => {
+            row.operator_touched = true;
+            row
+        }
+        Ok(None) => return,
+        Err(error) => {
+            eprintln!("run {run_id} could not be read to mark it touched: {error}");
+            return;
+        }
+    };
+    if let Err(error) = store.upsert_run(&row) {
+        eprintln!("run {run_id} could not be marked as touched: {error}");
+    }
+}
+
 async fn steer_run(
     State(state): State<Arc<AppState>>,
     UrlPath(run_id): UrlPath<String>,
@@ -1452,6 +1496,27 @@ async fn steer_run(
             steer
                 .steer(&body.message)
                 .map_err(|e| ApiError::Steer(e.to_string()))?;
+            // The operator's words entered the run, so `07 attach semantics`
+            // section 6 applies here as much as it does to `intervene`: the
+            // manager is told, and the run carries the flag for good.
+            //
+            // Steer does **not** require a takeover, where `intervene` does.
+            // The difference is what is on the other end: a manager is a
+            // conversation the operator is having, and `05 run state model` put
+            // steer on it as the way to talk; a worker is executing a contract
+            // somebody else wrote, and typing into one unannounced is what
+            // `07` section 3 refused.
+            mark_touched(&state, run_id);
+            if let Ok(Some(row)) = state.store().run(run_id) {
+                let _ = state.store().append(&farseer_core::NewEvent::new(
+                    row.cell_id,
+                    run_id,
+                    farseer_core::EventKind::new(farseer_core::EventKind::OPERATOR_INTERVENED),
+                    farseer_core::Actor::Operator,
+                    now_ms(),
+                    serde_json::json!({ "control": "autonomous", "message": body.message }),
+                ));
+            }
             Ok(StatusCode::ACCEPTED)
         }
         None => Err(ApiError::BadRequest(
@@ -1769,6 +1834,14 @@ pub struct RunView {
     /// is already in `run_finished`, and this is the same move `title` makes
     /// with `run_queued` - read the record rather than add a column.
     pub finished_reason: Option<String>,
+    /// `07 attach semantics`'s third axis: `autonomous`, `observed` or
+    /// `taken_over`.
+    ///
+    /// Derived on read like `liveness`, and for the same reason - a lease
+    /// nobody renewed has lapsed whether or not anything swept it - so a
+    /// surface showing this never has to ask whether the person holding the run
+    /// is still there.
+    pub control: String,
 }
 
 /// The fleet, newest first.
@@ -2043,6 +2116,12 @@ fn run_view(state: &Arc<AppState>, row: RunRow) -> RunView {
         title,
         role,
         finished_reason: finished_reason(state, run_id),
+        control: match attach::control_of(state, run_id, now_ms()) {
+            farseer_core::Control::Autonomous => "autonomous",
+            farseer_core::Control::Observed => "observed",
+            farseer_core::Control::TakenOver => "taken_over",
+        }
+        .to_string(),
     };
     view
 }
@@ -3497,6 +3576,145 @@ grants_shell = true
         // still takes tens of seconds to fail, and a unit test that sat through
         // that would be paying a minute to re-observe one `remove` two lines
         // below the `insert` this test already proved.
+    }
+
+    /// A run row with no process behind it. `07 attach semantics` section 1:
+    /// attach targets a run, and a run may or may not currently have a live
+    /// worker - so every control verb has to work on one that does not.
+    fn a_finished_run(h: &Harness) -> RunId {
+        let run_id = RunId::new();
+        h.state
+            .store()
+            .upsert_run(&RunRow {
+                run_id,
+                task_id: TaskId::new(),
+                cell_id: CellId::new("zero"),
+                runner: "goose".into(),
+                model: String::new(),
+                outcome: Some("ok".into()),
+                usd_micros: 0,
+                tokens: 0,
+                operator_touched: false,
+                started_ts: 1,
+                finished_ts: Some(2),
+            })
+            .unwrap();
+        run_id
+    }
+
+    /// `07` section 3: attach is a read-only tail by default, and interactive
+    /// control is an explicit step. Stray keystrokes into a live agent are
+    /// destructive, and silent injection makes a manager confidently wrong
+    /// about its own worker.
+    #[tokio::test]
+    async fn observing_a_run_does_not_let_the_operator_type_into_it() {
+        let h = harness();
+        let run_id = a_finished_run(&h);
+
+        let (status, view) = h
+            .post(&format!("/v1/runs/{run_id}/observe"), json!({}))
+            .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(view["control"], "observed");
+        assert!(view["expires_in_ms"].as_i64().unwrap() > 0);
+
+        let (status, refused) = h
+            .post(
+                &format!("/v1/runs/{run_id}/intervene"),
+                json!({"message": "stop"}),
+            )
+            .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(
+            refused["error"].as_str().unwrap().contains("take over"),
+            "the refusal must name the step that is missing, got {refused}"
+        );
+
+        // The axis is on the run itself, so a fleet view never has to ask twice.
+        let (_, run) = h.get(&format!("/v1/runs/{run_id}")).await;
+        assert_eq!(run["control"], "observed");
+    }
+
+    /// `07` section 7: taking over is a released mode, and the release hands the
+    /// run back with the worker carrying on.
+    #[tokio::test]
+    async fn a_takeover_is_recorded_and_released_back_to_autonomous() {
+        let h = harness();
+        let run_id = a_finished_run(&h);
+
+        assert_eq!(
+            h.post(&format!("/v1/runs/{run_id}/take-over"), json!({}))
+                .await
+                .1["control"],
+            "taken_over"
+        );
+        assert_eq!(
+            h.get(&format!("/v1/runs/{run_id}/control")).await.1["control"],
+            "taken_over"
+        );
+
+        let (status, released) = h
+            .post(&format!("/v1/runs/{run_id}/release"), json!({}))
+            .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(released["control"], "autonomous");
+        assert_eq!(released["expires_in_ms"], serde_json::Value::Null);
+
+        // Releasing twice is refused rather than recorded twice.
+        assert_eq!(
+            h.post(&format!("/v1/runs/{run_id}/release"), json!({}))
+                .await
+                .0,
+            StatusCode::BAD_REQUEST
+        );
+
+        let (_, events) = h.get(&format!("/v1/events?run={run_id}&limit=50")).await;
+        let controls: Vec<&str> = events
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|e| e["kind"] == "operator_intervened")
+            .map(|e| e["payload"]["control"].as_str().unwrap())
+            .collect();
+        assert_eq!(
+            controls,
+            vec!["taken_over", "autonomous"],
+            "who took the wheel and when is exactly what `07` asks the record to carry"
+        );
+    }
+
+    /// `07` section 7: detaching without releasing must auto-release, because a
+    /// closed terminal that freezes a worker waiting on a human forever is the
+    /// class of hang the brief catalogues.
+    #[tokio::test]
+    async fn an_attachment_nobody_renewed_lapses_and_hands_the_run_back() {
+        let h = harness();
+        let run_id = a_finished_run(&h);
+        h.post(&format!("/v1/runs/{run_id}/take-over"), json!({}))
+            .await;
+
+        // The lease is checked on read rather than swept by a timer, so this is
+        // the same code path a real lapse takes - no clock is stubbed.
+        h.state.attachments().insert(
+            run_id,
+            attach::Attachment {
+                control: farseer_core::Control::TakenOver,
+                seen_ms: now_ms() - attach::LEASE_MS - 1,
+            },
+        );
+
+        assert_eq!(
+            h.get(&format!("/v1/runs/{run_id}/control")).await.1["control"],
+            "autonomous"
+        );
+        // And a heartbeat afterwards is a `400` rather than a silent re-grab of
+        // a wheel nobody is holding.
+        assert_eq!(
+            h.post(&format!("/v1/runs/{run_id}/heartbeat"), json!({}))
+                .await
+                .0,
+            StatusCode::BAD_REQUEST
+        );
     }
 
     #[tokio::test]
