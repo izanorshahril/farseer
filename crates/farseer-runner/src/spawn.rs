@@ -7,18 +7,19 @@
 //! a piped child so its stdout can be read line by line and fed to
 //! [`crate::claude_code::parse_line`].
 //!
-//! **Weaker than the spike in one respect, on purpose.** `jobspike` spawns
-//! suspended via raw `CreateProcessW`, assigns the job, then resumes - a
-//! race-free ordering, because a process that runs even briefly before
-//! assignment could spawn a child outside the job. `std::process::Command`
-//! has no supported way to create a process suspended and later resume it,
-//! so this assigns the job as the **first** statement after `spawn()`
-//! instead. The race window that reopens is a child spawning its own
-//! grandchild in the gap between two syscalls on the same thread - narrow,
-//! not zero. The trade is deliberate: `std`'s pipe and handle-inheritance
-//! machinery is tested; a hand-rolled reimplementation of it here would not
-//! be. If that race is ever observed in practice, close it by porting
-//! `jobspike`'s suspended-spawn path in rather than loosening this note.
+//! **The spike's ordering, with `std`'s pipes kept.** `03 spike job objects`
+//! requires `CREATE_SUSPENDED`, then `AssignProcessToJobObject`, then resume,
+//! and names any other ordering a race that fails rarely and unreproducibly.
+//! This once assigned the job as the first statement after `spawn()` instead,
+//! because `std::process::Command` exposes no primary-thread handle to resume
+//! and hand-rolling `CreateProcessW` would have meant reimplementing pipe and
+//! handle-inheritance machinery that `std` already has tested.
+//!
+//! Both halves are available at once. The creation flag is `std`'s to pass, and
+//! the thread to resume is found by enumerating the process's threads: a
+//! process created suspended has **exactly one**, so the first thread owned by
+//! that pid is its primary thread and there is nothing to disambiguate. No
+//! pipes are re-implemented and no window is left open.
 
 use std::io::{BufRead, BufReader, Write};
 use std::os::windows::io::AsRawHandle;
@@ -29,12 +30,17 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use windows::Win32::Foundation::{CloseHandle, HANDLE};
+use windows::Win32::System::Diagnostics::ToolHelp::{
+    CreateToolhelp32Snapshot, TH32CS_SNAPTHREAD, THREADENTRY32, Thread32First, Thread32Next,
+};
 use windows::Win32::System::JobObjects::{
     AssignProcessToJobObject, CreateJobObjectW, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
     JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectExtendedLimitInformation,
     SetInformationJobObject,
 };
-use windows::Win32::System::Threading::CREATE_NO_WINDOW;
+use windows::Win32::System::Threading::{
+    CREATE_NO_WINDOW, CREATE_SUSPENDED, OpenThread, ResumeThread, THREAD_SUSPEND_RESUME,
+};
 use windows::core::PCWSTR;
 
 #[derive(Debug, thiserror::Error)]
@@ -188,7 +194,10 @@ impl SupervisedProcess {
             })
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
-            .creation_flags(CREATE_NO_WINDOW.0)
+            // Suspended, so nothing this process does can precede its
+            // assignment to the job below. Resumed by [`resume_primary_thread`]
+            // once that assignment has succeeded.
+            .creation_flags(CREATE_NO_WINDOW.0 | CREATE_SUSPENDED.0)
             .spawn()
             .map_err(|source| SpawnError::Io {
                 exe: exe.display().to_string(),
@@ -214,6 +223,18 @@ impl SupervisedProcess {
             return Err(e.into());
         }
 
+        // Only now. Everything the child spawns from here is inside the job,
+        // which is the whole point of the ordering.
+        //
+        // A failure to resume leaves a process that will never run, so it is
+        // killed rather than returned: the job is already assigned, so the kill
+        // reaps whatever the suspended process would have become.
+        if let Err(e) = Self::resume_primary_thread(child.id()) {
+            unsafe { CloseHandle(job).ok() };
+            let _ = child.kill();
+            return Err(e.into());
+        }
+
         let stdout = child.stdout.take().expect("stdout was piped");
         let stdin = child.stdin.take().map(|stdin| Arc::new(Mutex::new(stdin)));
         Ok(Self {
@@ -223,6 +244,55 @@ impl SupervisedProcess {
             stdout: BufReader::new(stdout),
             stdin,
         })
+    }
+
+    /// Start a process that `CREATE_SUSPENDED` left frozen.
+    ///
+    /// `std` hands out no thread handle, so the thread is found by enumerating
+    /// the system's threads and taking the first one this pid owns. That is not
+    /// a guess: a process created suspended has exactly one thread until its
+    /// own code runs, and its own code has not run.
+    ///
+    /// The snapshot is system-wide because Windows offers no per-process thread
+    /// enumeration; the filter is `th32OwnerProcessID`, which the snapshot
+    /// carries on every entry.
+    fn resume_primary_thread(pid: u32) -> windows::core::Result<()> {
+        let snapshot = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0)? };
+        let mut entry = THREADENTRY32 {
+            dwSize: std::mem::size_of::<THREADENTRY32>() as u32,
+            ..Default::default()
+        };
+        let mut found = None;
+        unsafe {
+            if Thread32First(snapshot, &mut entry).is_ok() {
+                loop {
+                    if entry.th32OwnerProcessID == pid {
+                        found = Some(entry.th32ThreadID);
+                        break;
+                    }
+                    if Thread32Next(snapshot, &mut entry).is_err() {
+                        break;
+                    }
+                }
+            }
+            CloseHandle(snapshot).ok();
+        }
+        let Some(thread_id) = found else {
+            // The process has no thread, which for one that has never run means
+            // it is already gone.
+            return Err(windows::core::Error::from_thread());
+        };
+        unsafe {
+            let thread = OpenThread(THREAD_SUSPEND_RESUME, false, thread_id)?;
+            // `u32::MAX` is the documented failure value, and it is the only
+            // one worth acting on: any real count means the thread was resumed.
+            let previous = ResumeThread(thread);
+            CloseHandle(thread).ok();
+            if previous == u32::MAX {
+                return Err(windows::core::Error::from_thread());
+            }
+        }
+        Ok(())
     }
 
     /// A handle that can kill this process's whole tree from another thread.
@@ -307,6 +377,52 @@ mod tests {
             let _ = CloseHandle(h);
             ok && code == STILL_ACTIVE.0 as u32
         }
+    }
+
+    /// A grandchild spawned by the child is inside the job, and dies with it.
+    ///
+    /// `03 spike job objects` reproduced the negative case deliberately: killing
+    /// the root alone left five of six processes alive. This is the positive
+    /// one, at the depth that matters - the child spawns its own process
+    /// immediately, before farseer has read a single line from it.
+    ///
+    /// What this cannot do is reproduce the race the suspended-spawn ordering
+    /// closes. That race is two syscalls wide on one thread; a test that waited
+    /// for it would be the flaky test the ticket warns about. The ordering is
+    /// verified by construction - the child cannot run before assignment
+    /// because it is not running - and this proves the reaping it protects.
+    #[test]
+    fn a_grandchild_spawned_immediately_is_reaped_with_the_tree() {
+        let dir = tempfile::tempdir().unwrap();
+        let marker = dir.path().join("grandchild-was-alive.txt");
+        // `start /b` detaches a second `cmd` that outlives its parent's own
+        // exit - the shape that survives a root-only kill.
+        let script = format!(
+            "start /b cmd /c \"timeout /t 4 /nobreak >nul & echo alive > {}\" & echo spawned & timeout /t 20 /nobreak >nul",
+            marker.display()
+        );
+        let mut proc = SupervisedProcess::spawn(
+            Path::new(r"C:\Windows\System32\cmd.exe"),
+            &cmd(&["/c", &script]),
+            dir.path(),
+            &[],
+            StdinMode::Closed,
+        )
+        .unwrap();
+        assert_eq!(
+            // `cmd`'s `echo x & ...` keeps the space before the separator.
+            proc.read_line().unwrap().as_deref().map(str::trim_end),
+            Some("spawned"),
+            "the child ran, so it was resumed after assignment"
+        );
+
+        proc.cancel_token().cancel();
+        // Past when the grandchild would have written, had it lived.
+        std::thread::sleep(std::time::Duration::from_secs(6));
+        assert!(
+            !marker.exists(),
+            "the grandchild outlived the job it was spawned inside"
+        );
     }
 
     fn cmd(args: &[&str]) -> Vec<String> {

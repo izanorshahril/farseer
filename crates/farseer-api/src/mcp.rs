@@ -299,7 +299,8 @@ impl FarseerMcp {
     ) -> Result<farseer_manager::RunReport, McpError> {
         let run_id = contract.run_id;
         let (cwd, repo_for_teardown) =
-            create_workspace(&self.state, contract.workspace, run_id, project).map_err(api_error)?;
+            create_workspace(&self.state, contract.workspace, run_id, project)
+                .map_err(api_error)?;
 
         let result = execute_run(
             &self.state,
@@ -757,6 +758,7 @@ impl FarseerMcp {
             RunRole::Manager,
             callee,
             manager.project.clone(),
+            Some(Arc::clone(&manager.child_runs)),
         ) {
             Ok(run_id) => run_id,
             Err(error) => {

@@ -65,7 +65,10 @@ pub async fn start(
         .route("/__widgets", get(list_widgets))
         .route("/__widgets/{id}/bundle", get(widget_bundle))
         .fallback_service(ServeDir::new(canvas.clone()).fallback(ServeFile::new(index)))
-        .with_state(state);
+        .with_state(state)
+        // Outermost, so it runs before the proxy attaches the operator token
+        // and before the shell's own settings writes. See [`browser_may_reach`].
+        .layer(axum::middleware::from_fn(browser_may_reach));
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
     let addr = listener.local_addr()?;
@@ -189,6 +192,36 @@ async fn write_top_manager(
     }
 }
 
+/// The same browser check the runtime makes, made here as well.
+///
+/// This proxy attaches the operator bearer to whatever arrives and does not
+/// forward the request's `Origin`, so from the daemon's side every proxied
+/// request looks like a loopback client with no origin at all - which
+/// `16 local api surface` deliberately allows, because `curl` and the CLI send
+/// none. The effect was that the daemon's guard, which exists to stop a hostile
+/// page reaching a bearer-authenticated route, could not see the page.
+///
+/// So the shell applies it rather than delegating it. That also covers the
+/// shell's **own** mutating routes - the top-manager write is not proxied, so
+/// forwarding `Origin` alone would have left it unguarded.
+///
+/// One function, in `farseer_api::security`, so the two servers cannot come to
+/// disagree about what loopback means.
+async fn browser_may_reach(request: Request, next: axum::middleware::Next) -> Response {
+    let headers = request.headers();
+    let host = headers.get(header::HOST).and_then(|v| v.to_str().ok());
+    let origin = headers.get(header::ORIGIN).and_then(|v| v.to_str().ok());
+    let allowed = farseer_api::security::is_origin_allowed(host, origin);
+    if allowed {
+        return next.run(request).await;
+    }
+    (
+        StatusCode::FORBIDDEN,
+        "farseer is reachable from this machine's own canvas, and from nothing else",
+    )
+        .into_response()
+}
+
 /// Pass a request through to farseer, adding the credential the page does not have.
 async fn proxy(State(shell): State<Arc<Shell>>, request: Request) -> Response {
     let path = request
@@ -265,4 +298,64 @@ pub fn canvas_dir() -> Option<PathBuf> {
     let exe = std::env::current_exe().ok()?;
     let beside = exe.parent()?.join("canvas");
     beside.join("index.html").exists().then_some(beside)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A hostile page must not reach the proxy, which would attach the
+    /// operator's bearer to whatever it sent.
+    ///
+    /// The daemon cannot catch this on its own: the proxy speaks to it over
+    /// loopback and forwards no `Origin`, so from there the request is
+    /// indistinguishable from `curl`. This is the test that would have failed
+    /// while that was true.
+    #[tokio::test]
+    async fn a_cross_site_origin_is_refused_before_the_token_is_attached() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        std::fs::write(dir.path().join("index.html"), "<!doctype html>").expect("canvas");
+        // Port 1 is not listening. A request that reaches the proxy fails as a
+        // bad gateway, which is how this test tells "refused" from "forwarded".
+        let base = start(
+            dir.path().to_path_buf(),
+            dir.path().to_path_buf(),
+            1,
+            "operator-token".into(),
+        )
+        .await
+        .expect("shell server");
+
+        let client = reqwest::Client::new();
+        let hostile = client
+            .post(format!("{base}/v1/cells/zero/instruct"))
+            .header(header::ORIGIN, "https://evil.example")
+            .body("{}")
+            .send()
+            .await
+            .expect("request sent");
+        assert_eq!(hostile.status(), StatusCode::FORBIDDEN);
+
+        // The canvas's own origin still passes, and fails further along at the
+        // daemon that is not there - which is the proof it was forwarded.
+        let ours = client
+            .post(format!("{base}/v1/cells/zero/instruct"))
+            .header(header::ORIGIN, base.clone())
+            .body("{}")
+            .send()
+            .await
+            .expect("request sent");
+        assert_ne!(ours.status(), StatusCode::FORBIDDEN);
+
+        // The shell's own mutating route is behind the same guard: it is not
+        // proxied, so forwarding `Origin` to the daemon would have left it open.
+        let settings = client
+            .put(format!("{base}/__settings/top-manager"))
+            .header(header::ORIGIN, "https://evil.example")
+            .body("{}")
+            .send()
+            .await
+            .expect("request sent");
+        assert_eq!(settings.status(), StatusCode::FORBIDDEN);
+    }
 }

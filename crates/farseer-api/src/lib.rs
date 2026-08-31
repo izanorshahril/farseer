@@ -702,7 +702,7 @@ async fn instruct_cell(
         .as_deref()
         .map(|path| projects::resolve(&state, path))
         .transpose()?;
-    let run_id = spawn_run(&state, contract, RunRole::Manager, cell, project)?;
+    let run_id = spawn_run(&state, contract, RunRole::Manager, cell, project, None)?;
 
     Ok((
         StatusCode::ACCEPTED,
@@ -1116,6 +1116,7 @@ pub(crate) fn spawn_run(
     role: RunRole,
     pinned_cell: CellDefinition,
     project: Option<PathBuf>,
+    caller_children: Option<Arc<Mutex<HashSet<RunId>>>>,
 ) -> ApiResult<RunId> {
     ensure_runner_authority(&pinned_cell, &contract.runner)?;
     if let Some(dimension) = unenforceable_budget_dimension(&contract.runner, contract.budget) {
@@ -1214,6 +1215,22 @@ pub(crate) fn spawn_run(
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .insert(run_id, Arc::clone(&cancel_requested));
+    // A run somebody else's manager owns joins that manager's children, so
+    // cancelling the caller reaches it. `06 cell transport` section 6: a cell is
+    // a worker whose implementation happens to be another manager, and the
+    // calling manager owns it exactly as it owns a worker.
+    //
+    // Registered here rather than through `ChildRunRegistration`, whose `Drop`
+    // fires when the *call* returns. A cell call is fire-and-forget, so that
+    // would have unregistered the callee before it had done anything; this
+    // membership lasts as long as the run does, and is dropped by the same
+    // background task that drops the manager context.
+    if let Some(children) = &caller_children {
+        children
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(run_id);
+    }
     let background_state = Arc::clone(state);
     tokio::task::spawn_blocking(move || {
         let _config_guard = SecretFileGuard(config_path);
@@ -1227,6 +1244,12 @@ pub(crate) fn spawn_run(
         );
         observe_window(&background_state, &contract, &result);
         background_state.managers().remove(&run_id);
+        if let Some(children) = &caller_children {
+            children
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .remove(&run_id);
+        }
         background_state
             .pending_cancellations
             .lock()
@@ -1527,6 +1550,9 @@ async fn respawn(
         original.role,
         pinned_cell,
         original.project,
+        // An operator re-run belongs to the operator, not to whatever manager
+        // owned the run it repeats.
+        None,
     )?;
     Ok((
         StatusCode::ACCEPTED,
@@ -2587,8 +2613,11 @@ grants_shell = true
             "a sibling of the root is not inside it"
         );
         assert!(
-            projects::resolve(&h.state, &inside.join("..").join("..").display().to_string())
-                .is_err(),
+            projects::resolve(
+                &h.state,
+                &inside.join("..").join("..").display().to_string()
+            )
+            .is_err(),
             "`..` out of the root must be refused by where it lands"
         );
     }
@@ -3194,6 +3223,80 @@ grants_shell = true
         );
         assert!(manager_token.was_cancelled());
         assert!(child_token.was_cancelled());
+    }
+
+    /// A cell whose runner is not installed on this machine.
+    ///
+    /// The point is a run that reaches `spawn_run`, registers, and then ends on
+    /// its own at `ExecutableNotFound` - **without launching an agent**. A test
+    /// that spawns a real runner is a test that bills somebody.
+    const CELL_WITH_AN_ABSENT_RUNNER: &str = r#"
+cell_id = "zero"
+name = "Cell Zero"
+workspace_strategy = "plain_directory"
+
+[manager]
+runner = "cursor-agent"
+
+# `12 autonomy and deny list`: a runner with shell-equivalent reach needs the
+# cell to have granted one, or the run is refused before it is spawned.
+[[roster]]
+kind = "tool"
+name = "shell"
+irreversibility = "reversible"
+grants_shell = true
+"#;
+
+    /// A cell call's callee is the caller's child for as long as it runs.
+    ///
+    /// `06 cell transport` section 6 says a cell is a worker whose
+    /// implementation happens to be another manager, and that the calling
+    /// manager owns it the same way. It did not: worker delegation registered
+    /// its child and cell delegation did not, so cancelling the caller left an
+    /// entire second manager running with nothing pointing at it.
+    ///
+    /// Asserted on `spawn_run`, which is where ownership is established.
+    /// `cancelling_a_manager_also_cancels_its_active_delegated_worker` covers
+    /// what cancellation then does with that membership.
+    #[tokio::test]
+    async fn a_cell_call_joins_the_callers_children_for_the_life_of_the_run() {
+        let h = harness_with_cell(CELL_WITH_AN_ABSENT_RUNNER);
+        let cell = h.state.cells().get(&CellId::new("zero")).cloned().unwrap();
+        let children: Arc<Mutex<HashSet<RunId>>> = Arc::new(Mutex::new(HashSet::new()));
+        let contract = WorkerContract::seal(WorkerContractSpec {
+            run_id: RunId::new(),
+            task_id: TaskId::new(),
+            cell_id: cell.cell_id.clone(),
+            goal: "the callee's own goal".into(),
+            workspace: WorkspaceStrategy::PlainDirectory,
+            runner: cell.manager.runner.clone(),
+            tool_grants: cell.tool_grants(),
+            tool_level: Default::default(),
+            autonomy_ceiling: cell.policy.autonomy_ceiling,
+            budget: cell.budget,
+            definition_of_done: String::new(),
+        });
+
+        let run_id = spawn_run(
+            &h.state,
+            contract,
+            RunRole::Manager,
+            cell,
+            None,
+            Some(Arc::clone(&children)),
+        )
+        .expect("the callee spawns");
+
+        assert!(
+            children.lock().unwrap().contains(&run_id),
+            "an immediate cancel would race process startup and miss the callee              unless it is reachable before spawn_run returns"
+        );
+
+        // Membership ends with the run, in the same background task that drops
+        // the manager context - not waited for here. An unresolvable runner
+        // still takes tens of seconds to fail, and a unit test that sat through
+        // that would be paying a minute to re-observe one `remove` two lines
+        // below the `insert` this test already proved.
     }
 
     #[tokio::test]
@@ -4929,8 +5032,8 @@ runner = "{runner}"
                 definition_of_done: String::new(),
             });
             let token = RuntimeToken::generate();
-            let options =
-                manager_run_options(&h.state, &contract, &cell, &token, None).expect("options build");
+            let options = manager_run_options(&h.state, &contract, &cell, &token, None)
+                .expect("options build");
             let prompt = options
                 .append_system_prompt
                 .expect("a manager is told who it is");

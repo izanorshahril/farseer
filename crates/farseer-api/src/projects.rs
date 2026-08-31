@@ -256,7 +256,10 @@ mod tests {
             Path::new(r"D:\Dev"),
             Path::new(r"D:\Development")
         ));
-        assert!(is_within(Path::new(r"D:\Dev"), Path::new(r"D:\Dev\farseer")));
+        assert!(is_within(
+            Path::new(r"D:\Dev"),
+            Path::new(r"D:\Dev\farseer")
+        ));
         assert!(is_within(Path::new(r"D:\Dev"), Path::new(r"D:\Dev")));
     }
 
