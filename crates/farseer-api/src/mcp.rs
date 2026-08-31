@@ -528,6 +528,12 @@ impl FarseerMcp {
                     None,
                 )
             })?;
+        // Pause is "the manager starts no new runs", so it is checked here as
+        // well as on the operator's own instruction - `17 cell lifecycle` made
+        // it a policy flag, and a flag nothing reads is a switch that does
+        // nothing.
+        crate::lifecycle::ensure_accepts_work(&self.state, &manager.cell.cell_id)
+            .map_err(api_error)?;
         let mut remaining_budget = manager
             .remaining_budget
             .lock()
@@ -700,6 +706,10 @@ impl FarseerMcp {
                 None,
             )
         })?;
+        // `17 cell lifecycle`: a paused or archived callee starts no new run,
+        // and a caller finding that out is better than a run that begins in a
+        // cell the operator has stopped.
+        crate::lifecycle::ensure_accepts_work(&self.state, &to_cell).map_err(api_error)?;
 
         // `22 cell addressing` section 4 caps the grant at the roster entry, `06 cell
         // transport` lets a caller cap but never raise, and the callee's own

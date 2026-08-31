@@ -144,6 +144,37 @@ impl EventKind {
     /// would bury the transitions. Current state derives from the latest.
     pub const RATE_LIMIT: &'static str = "rate_limit_event";
 
+    /// A cell moved between active, paused, archived and deleted, per
+    /// `17 cell lifecycle`.
+    ///
+    /// One kind rather than five, carrying `from` and `to`. The verbs differ in
+    /// what they remove, not in what a reader of the record needs to ask, and a
+    /// reader asking "when did this cell stop taking work" should not have to
+    /// know four names to find out.
+    pub const CELL_LIFECYCLE: &'static str = "cell_lifecycle";
+
+    /// The tombstone purge leaves behind, per `17 cell lifecycle` section 5.
+    ///
+    /// Names the scope destroyed and when. `02 record scope` made the record
+    /// **evidence**, and evidence with an unexplained hole in it is worth less
+    /// than evidence that says where the hole came from - so a deliberate
+    /// deletion and a lost write must not look identical.
+    ///
+    /// Appended after the delete, so its own `ts` is later than any range a
+    /// purge could have just destroyed. A subsequent purge whose range reaches
+    /// forward over this one does remove it, which is the honest behaviour: it
+    /// is a record entry like any other, and purge is defined over the record.
+    pub const CELL_PURGED: &'static str = "cell_purged";
+
+    /// A permanent hole, per `17 cell lifecycle` section 5.
+    ///
+    /// The distinction `09 store decision` asked for. A `gap` is backpressure -
+    /// the reader refetches the range and gets it. A `void` is a purge - the
+    /// data is gone and refetching is a loop. A client that cannot tell them
+    /// apart retries forever on the second, which is a bug that only appears
+    /// after somebody purges.
+    pub const VOID: &'static str = "void";
+
     pub fn new(kind: impl Into<String>) -> Self {
         Self(kind.into())
     }

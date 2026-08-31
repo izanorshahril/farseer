@@ -40,6 +40,23 @@ macro_rules! uuid_id {
             pub fn from_bytes(bytes: [u8; 16]) -> Self {
                 Self(Uuid::from_bytes(bytes))
             }
+
+            /// The all-zero id, for a record entry that belongs to a **cell**
+            /// rather than to any run.
+            ///
+            /// `17 cell lifecycle`'s verbs act on the cell, and the events they
+            /// append have no run to name. Minting a fresh id instead would put
+            /// a run in the record that never existed, which `02 record scope`
+            /// forbids more strongly than it requires the column to be
+            /// interesting.
+            pub fn none() -> Self {
+                Self(Uuid::nil())
+            }
+
+            /// Whether this is [`Self::none`].
+            pub fn is_none(&self) -> bool {
+                self.0.is_nil()
+            }
         }
 
         impl Default for $name {

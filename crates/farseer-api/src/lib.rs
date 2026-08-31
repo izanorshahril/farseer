@@ -42,6 +42,7 @@ use farseer_manager::{
 use farseer_runner::spawn::CancelToken;
 use farseer_store::{RunRow, ScanFilter, Store, StoreError, UI_STATE_CAP_BYTES};
 
+mod lifecycle;
 mod mcp;
 mod notify;
 mod projects;
@@ -360,7 +361,31 @@ impl AppState {
             }
         }
 
-        *self.cells() = loaded;
+        // A deleted cell stays deleted across a reload. `17 cell lifecycle`
+        // makes delete reversible *through git* - the file is still there, and
+        // re-reading the directory would otherwise resurrect a cell the
+        // operator removed, every time anything else was edited. `restore`
+        // is the way back, and it is one call.
+        //
+        // A failed read leaves the registry alone rather than emptying it: a
+        // store that cannot answer is not evidence that nothing is deleted.
+        match self.store().cell_states() {
+            Ok(states) => {
+                for (cell_id, state) in states {
+                    if state == farseer_store::Lifecycle::Deleted {
+                        loaded.remove(&cell_id);
+                        report.loaded.retain(|id| id != cell_id.as_str());
+                    }
+                }
+                *self.cells() = loaded;
+            }
+            Err(error) => report.errors.push(ReloadError {
+                file: self.cells_dir.display().to_string(),
+                message: format!(
+                    "cell states are unreadable, so the registry was left alone: {error}"
+                ),
+            }),
+        }
         report
     }
 }
@@ -411,6 +436,16 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/v1/cells/{cell_id}", get(get_cell))
         .route("/v1/cells/reload", post(reload_cells))
         .route("/v1/cells/{cell_id}/instruct", post(instruct_cell))
+        // `17 cell lifecycle`'s verbs, increasing in violence. `purge` is the
+        // only irreversible one farseer owns, so it says what it destroyed
+        // rather than answering `204`.
+        .route("/v1/cells/states", get(lifecycle::list_states))
+        .route("/v1/cells/{cell_id}/pause", post(lifecycle::pause))
+        .route("/v1/cells/{cell_id}/resume", post(lifecycle::resume))
+        .route("/v1/cells/{cell_id}/archive", post(lifecycle::archive))
+        .route("/v1/cells/{cell_id}/restore", post(lifecycle::restore))
+        .route("/v1/cells/{cell_id}/purge", post(lifecycle::purge))
+        .route("/v1/cells/{cell_id}/delete", post(lifecycle::delete))
         .route("/v1/manager/delegate/worker", post(delegate_to_worker))
         .route("/v1/manager/delegate/cell", post(delegate_to_cell))
         .route("/v1/events", get(read_events))
@@ -681,6 +716,9 @@ async fn instruct_cell(
         .get(&CellId::new(cell_id))
         .cloned()
         .ok_or(ApiError::NotFound("cell"))?;
+    // `17 cell lifecycle`: a paused or archived cell starts no new run, and the
+    // check belongs where runs begin rather than where the operator is looking.
+    lifecycle::ensure_accepts_work(&state, &cell.cell_id)?;
     check_tool_level(&cell.manager.runner, cell.manager.tools)?;
     let contract = WorkerContract::seal(WorkerContractSpec {
         run_id: RunId::new(),
@@ -2874,6 +2912,168 @@ grants_shell = true
         // There is no edit path, per `16 local api surface` section 6.
         let put = h.request("PUT", "/v1/cells/zero");
         assert_eq!(h.send(put).await.0, StatusCode::METHOD_NOT_ALLOWED);
+    }
+
+    /// `17 cell lifecycle` section 1: pause is a policy flag on the manager,
+    /// and the flag is only real where runs begin.
+    #[tokio::test]
+    async fn a_paused_cell_starts_no_new_run_and_resuming_lets_it_again() {
+        let h = harness();
+        let (status, view) = h.post("/v1/cells/zero/pause", json!({})).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(view["lifecycle"], "paused");
+        assert_eq!(view["accepts_work"], false);
+
+        // `Policy` is a `400` throughout this API - the request is well formed
+        // and the runtime refuses it.
+        let (status, refused) = h
+            .post("/v1/cells/zero/instruct", json!({"goal": "do a thing"}))
+            .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(
+            refused["error"].as_str().unwrap().contains("paused"),
+            "the refusal must say which state stopped it, got {refused}"
+        );
+
+        // Pausing twice is refused rather than recorded, so the record does not
+        // gain a transition that did not happen.
+        assert_eq!(
+            h.post("/v1/cells/zero/pause", json!({})).await.0,
+            StatusCode::BAD_REQUEST
+        );
+
+        assert_eq!(
+            h.post("/v1/cells/zero/resume", json!({})).await.1["accepts_work"],
+            true
+        );
+    }
+
+    /// `17` section 4: cell zero can be archived and never deleted, because
+    /// `01 cell primitive` made it the address the operator talks to.
+    #[tokio::test]
+    async fn cell_zero_can_be_archived_and_never_deleted() {
+        let h = harness();
+        let (status, refused) = h.post("/v1/cells/zero/delete", json!({})).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(
+            refused["error"]
+                .as_str()
+                .unwrap()
+                .contains("archive it instead")
+        );
+
+        assert_eq!(
+            h.post("/v1/cells/zero/archive", json!({})).await.1["lifecycle"],
+            "archived"
+        );
+        // Archived keeps the definition and the record: the cell is still there
+        // to read, it just takes no work.
+        assert_eq!(h.get("/v1/cells/zero").await.0, StatusCode::OK);
+        assert_eq!(
+            h.post("/v1/cells/zero/instruct", json!({"goal": "x"}))
+                .await
+                .0,
+            StatusCode::BAD_REQUEST
+        );
+        assert_eq!(
+            h.post("/v1/cells/zero/restore", json!({})).await.1["accepts_work"],
+            true
+        );
+    }
+
+    /// A deletion that a reload undoes is not a deletion. The file is still on
+    /// disk - `16 local api surface` gave the API no path that writes one - so
+    /// the state has to outlive re-reading the directory.
+    #[tokio::test]
+    async fn a_deleted_cell_stays_deleted_across_a_reload_and_restore_brings_it_back() {
+        let h = harness();
+        std::fs::write(
+            h._dir.path().join("second.toml"),
+            CELL.replace(r#"cell_id = "zero""#, r#"cell_id = "second""#),
+        )
+        .unwrap();
+        h.send(h.request("POST", "/v1/cells/reload")).await;
+        assert_eq!(h.get("/v1/cells/second").await.0, StatusCode::OK);
+
+        assert_eq!(
+            h.post("/v1/cells/second/delete", json!({})).await.1["lifecycle"],
+            "deleted"
+        );
+        assert_eq!(h.get("/v1/cells/second").await.0, StatusCode::NOT_FOUND);
+
+        let (_, report) = h.send(h.request("POST", "/v1/cells/reload")).await;
+        assert_eq!(
+            report["loaded"],
+            json!(["zero"]),
+            "a reload must not resurrect a cell the operator deleted"
+        );
+        assert_eq!(h.get("/v1/cells/second").await.0, StatusCode::NOT_FOUND);
+
+        h.post("/v1/cells/second/restore", json!({})).await;
+        assert_eq!(
+            h.get("/v1/cells/second").await.0,
+            StatusCode::OK,
+            "restore brings back a cell whose file never left"
+        );
+    }
+
+    /// `17` section 5: purge takes a scope and leaves a tombstone naming what it
+    /// destroyed, because `02 record scope` made the record evidence and an
+    /// unexplained hole and a deliberate deletion must not look identical.
+    #[tokio::test]
+    async fn a_purge_is_scoped_and_leaves_a_tombstone_naming_what_it_destroyed() {
+        let h = harness();
+        let run = RunId::new();
+        for ts in [10, 20, 30] {
+            h.state
+                .store()
+                .append(&farseer_core::NewEvent::new(
+                    CellId::new("zero"),
+                    run,
+                    farseer_core::EventKind::new("status_changed"),
+                    farseer_core::Actor::Worker,
+                    ts,
+                    json!({"at": ts}),
+                ))
+                .unwrap();
+        }
+
+        let (status, purged) = h
+            .post("/v1/cells/zero/purge", json!({"from": 10, "to": 20}))
+            .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(purged["events"], 2);
+
+        let (_, left) = h.get("/v1/events?cell=zero&limit=50").await;
+        let kinds: Vec<&str> = left
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|e| e["kind"].as_str().unwrap())
+            .collect();
+        assert!(
+            kinds.contains(&"cell_purged"),
+            "the hole must be explained rather than merely present, got {kinds:?}"
+        );
+        let tombstone = left
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|e| e["kind"] == "cell_purged")
+            .unwrap();
+        assert_eq!(tombstone["payload"]["from"], 10);
+        assert_eq!(tombstone["payload"]["to"], 20);
+        assert_eq!(
+            tombstone["payload"]["hole"], "void",
+            "a reader is told the hole is permanent rather than refetchable"
+        );
+
+        assert_eq!(
+            h.post("/v1/cells/zero/purge", json!({"from": 40, "to": 20}))
+                .await
+                .0,
+            StatusCode::BAD_REQUEST
+        );
     }
 
     #[tokio::test]

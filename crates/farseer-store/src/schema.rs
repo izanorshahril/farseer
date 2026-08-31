@@ -92,6 +92,21 @@ CREATE TABLE IF NOT EXISTS roots (
     ts    INTEGER NOT NULL
 );
 
+-- `17 cell lifecycle`: where a cell is, when it is not simply active.
+--
+-- Kept here rather than in the definition file, because the file is git's and
+-- `16 local api surface` gave the API no edit path to it. Pausing a cell is an
+-- operator act on a running system, not a change to what the cell is - and a
+-- deletion that lived only in memory would be undone by the next reload.
+--
+-- A row exists only for a cell that has moved. Absent means active, so a fresh
+-- store and a fleet nobody has touched are the same thing.
+CREATE TABLE IF NOT EXISTS cell_state (
+    cell_id   TEXT PRIMARY KEY,
+    lifecycle TEXT NOT NULL,        -- paused / archived / deleted
+    ts        INTEGER NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS ui_state (
     key   TEXT PRIMARY KEY,
     blob  BLOB NOT NULL,

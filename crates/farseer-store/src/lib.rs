@@ -20,6 +20,7 @@ use farseer_core::{
 };
 
 mod analytics;
+mod lifecycle;
 mod memory;
 mod quota;
 mod roots;
@@ -28,6 +29,7 @@ mod ui_state;
 
 pub use analytics::{CostRow, InterventionRow, LessonRow, ReworkRow};
 pub use farseer_core::MemoryId;
+pub use lifecycle::{Lifecycle, Purged};
 pub use memory::{MemoryCaps, MemoryClaim, MemoryScope, NewMemory, Promotion};
 pub use quota::WindowRow;
 pub use ui_state::{UI_STATE_CAP_BYTES, UI_STATE_KEY_CAP_BYTES};
@@ -288,51 +290,6 @@ impl Store {
         Ok(self
             .conn
             .query_row("SELECT COALESCE(MAX(seq), 0) FROM events", [], |r| r.get(0))?)
-    }
-
-    /// Destroy a cell's history.
-    ///
-    /// `12 autonomy and deny list` made this **operator-only**: never a manager, never a worker. An
-    /// agent that can destroy its own history makes the record worthless as
-    /// evidence, and forge and destroy are two halves of one threat. `12 autonomy and deny list` also
-    /// classes purge as `irreversible`, so the gate on it is not lowerable.
-    ///
-    /// Leaves permanent holes in `seq`. Per `09 store decision`, cursor reads tolerate gaps and
-    /// nothing may infer a count from a delta.
-    pub fn purge_cell(&mut self, cell_id: &CellId) -> Result<usize> {
-        let tx = self.conn.transaction()?;
-        let removed = tx.execute("DELETE FROM events WHERE cell_id = ?1", [cell_id.as_str()])?;
-        // Edges go before the rows they point at, so nothing dangles at any
-        // point inside the transaction.
-        tx.execute(
-            "DELETE FROM supersedes
-             WHERE new_id IN (SELECT memory_id FROM memories WHERE cell_id = ?1)
-                OR old_id IN (SELECT memory_id FROM memories WHERE cell_id = ?1)",
-            [cell_id.as_str()],
-        )?;
-        tx.execute(
-            "DELETE FROM consulted
-             WHERE memory_id IN (SELECT memory_id FROM memories WHERE cell_id = ?1)
-                OR run_id IN (SELECT run_id FROM runs WHERE cell_id = ?1)",
-            [cell_id.as_str()],
-        )?;
-        tx.execute(
-            "DELETE FROM rescoped_from
-             WHERE run_id IN (SELECT run_id FROM runs WHERE cell_id = ?1)
-                OR parent IN (SELECT run_id FROM runs WHERE cell_id = ?1)",
-            [cell_id.as_str()],
-        )?;
-        tx.execute(
-            "DELETE FROM memories WHERE cell_id = ?1",
-            [cell_id.as_str()],
-        )?;
-        // The runs go too. Purge is not delete: `02 record scope` section 7 keeps the record
-        // when a *cell* is deleted, but this verb exists for content that must
-        // not exist, and leaving the cost and intervention rows behind would
-        // have the analytics still reporting on what was supposedly destroyed.
-        tx.execute("DELETE FROM runs WHERE cell_id = ?1", [cell_id.as_str()])?;
-        tx.commit()?;
-        Ok(removed)
     }
 
     /// Record a run for `11 analytics questions`'s four questions. Deleting a cell does not delete
@@ -716,7 +673,9 @@ mod tests {
             })
             .unwrap();
 
-        store.purge_cell(&CellId::new("social")).unwrap();
+        store
+            .purge_cell(&CellId::new("social"), None, None)
+            .unwrap();
 
         assert_eq!(store.run(run).unwrap(), None);
         assert!(
@@ -724,6 +683,53 @@ mod tests {
             "analytics still reports spend on what was destroyed"
         );
         assert!(store.intervention_rate_by_cell().unwrap().is_empty());
+    }
+
+    /// `17 cell lifecycle`: purge takes a scope, because a purge that can only
+    /// destroy everything cannot serve a retention policy - and retention is
+    /// the reason purge exists.
+    #[test]
+    fn a_purge_destroys_the_range_it_was_given_and_nothing_either_side_of_it() {
+        let mut store = Store::open_in_memory().unwrap();
+        let run = RunId::new();
+        for ts in [10, 20, 30, 40] {
+            store
+                .append(&event("zero", run, &format!("at-{ts}"), ts))
+                .unwrap();
+        }
+
+        let purged = store
+            .purge_cell(&CellId::new("zero"), Some(20), Some(30))
+            .unwrap();
+        assert_eq!(purged.events, 2, "both ends of the range are inclusive");
+
+        let left = store.scan(0, 100, &ScanFilter::default()).unwrap();
+        assert_eq!(
+            left.iter().map(|e| e.ts).collect::<Vec<_>>(),
+            vec![10, 40],
+            "a scoped purge must not reach outside its range"
+        );
+    }
+
+    /// Active has no row, so a fleet nobody has touched needs no seeding to be
+    /// correct - and coming back to active removes the row rather than writing
+    /// the word, so "not moved" has one representation.
+    #[test]
+    fn a_cell_that_was_never_moved_is_active_and_coming_back_leaves_no_trace() {
+        let store = Store::open_in_memory().unwrap();
+        let zero = CellId::new("zero");
+        assert_eq!(store.cell_state(&zero).unwrap(), Lifecycle::Active);
+        assert!(store.cell_states().unwrap().is_empty());
+
+        store.set_cell_state(&zero, Lifecycle::Paused, 1).unwrap();
+        assert_eq!(store.cell_state(&zero).unwrap(), Lifecycle::Paused);
+        assert!(!Lifecycle::Paused.accepts_work());
+
+        store.set_cell_state(&zero, Lifecycle::Archived, 2).unwrap();
+        assert_eq!(store.cell_state(&zero).unwrap(), Lifecycle::Archived);
+
+        store.set_cell_state(&zero, Lifecycle::Active, 3).unwrap();
+        assert!(store.cell_states().unwrap().is_empty());
     }
 
     #[test]
@@ -734,7 +740,13 @@ mod tests {
         store.append(&event("social", run, "b", 2)).unwrap();
         store.append(&event("zero", run, "c", 3)).unwrap();
 
-        assert_eq!(store.purge_cell(&CellId::new("zero")).unwrap(), 2);
+        assert_eq!(
+            store
+                .purge_cell(&CellId::new("zero"), None, None)
+                .unwrap()
+                .events,
+            2
+        );
 
         let all = store.scan(0, 100, &ScanFilter::default()).unwrap();
         assert_eq!(all.len(), 1);

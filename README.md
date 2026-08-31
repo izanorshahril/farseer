@@ -193,6 +193,9 @@ Binds `127.0.0.1` only, opens the record, loads the definitions, and writes its 
 | `POST /v1/runs/{id}/steer` | send a follow-up message into a run's live process. `400` if the runner has no steering path - Codex, cursor-agent and goose today - `404` if the run is unknown or already finished |
 | `POST /v1/runs/{id}/rerun` | same sealed contract, fresh run, fresh workspace; managers and delegated workers retain their pinned cell authority, and a worker reacquires that cell's shared cap; legacy records without a pinned definition fail closed; `404` on an unknown run |
 | `POST /v1/runs/{id}/rescope` | a new run with a changed `goal`. `400` if `goal` is missing or unchanged from the original - that is `rerun`, not `rescope` |
+| `POST /v1/cells/{id}/{pause,resume,archive,restore,delete}` | [17 cell lifecycle](.scratch/farseer/issues/17-cell-lifecycle.md)'s verbs. Pause stops new runs and never suspends a process; archive keeps definition and record; delete keeps the record and takes the binding, and is refused on cell zero |
+| `POST /v1/cells/{id}/purge` | the only irreversible verb farseer owns. Scoped by `from`/`to` in epoch milliseconds, and it appends a tombstone naming what it destroyed |
+| `GET /v1/cells/states` | every cell that is not simply active |
 | `GET`/`PUT /v1/ui-state/{key}` | an opaque blob farseer never parses, so a canvas survives a restart. `canvas` holds the widget arrangement and `window` the desktop window's own size and position. `413` above 1 MiB |
 | `GET /v1/analytics/{cost,intervention,rework,lessons}` | the four questions from [11 analytics questions](.scratch/farseer/issues/11-analytics-questions.md) |
 | `/v1/mcp` | the streamable-HTTP MCP face nested into this router and guard; all three tools - `read_memory`, `write_memory`, and `delegate_to_worker` - derive identity from an active manager capability, and no raw event append exists because "an agent that can forge events can rewrite its own history" |
