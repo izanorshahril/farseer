@@ -1,0 +1,136 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+  <style>
+    body { margin: 0; font: 13px/1.5 system-ui, "Segoe UI", sans-serif; background: #0b0d10; color: #e6edf3; }
+    a { color: #58a6ff; } a:hover { color: #79b8ff; }
+    .m { font-family: ui-monospace, Consolas, monospace; }
+    .bar { height: 26px; display: flex; align-items: center; gap: 12px; padding: 0 12px; background: #12161b; border: 1px solid #232b35; font: 11px/1 ui-monospace, Consolas, monospace; color: #8b97a6; }
+    .dot { width: 6px; height: 6px; border-radius: 50%; flex-shrink: 0; }
+    .sep { color: #232b35; }
+    .lbl { font: 10px/1 ui-monospace, Consolas, monospace; color: #7a8491; letter-spacing: 0.08em; }
+    .note { font-size: 11px; color: #8b97a6; }
+    .seg { display: flex; flex-direction: column; gap: 6px; }
+    .swatch { display: flex; align-items: center; gap: 8px; }
+    .chip { width: 26px; height: 14px; border-radius: 3px; border: 1px solid #232b35; flex-shrink: 0; }
+  </style>
+</helmet>
+<div style="width: 1440px; height: 560px; display: flex; flex-direction: column; gap: 22px; background: #0b0d10; padding: 26px 30px; overflow: hidden;">
+
+  <div style="display: flex; flex-direction: column; gap: 7px;">
+    <span class="lbl">STATUS BAR &middot; 26PX &middot; ALWAYS PRESENT</span>
+    <div class="bar" style="border-radius: 5px;">
+      <span style="display: flex; align-items: center; gap: 5px;"><span class="dot" style="background: #3fb950;"></span>daemon 53215</span>
+      <span class="sep">|</span>
+      <span><span style="color: #d29922;">82%</span> <span style="color: #7a8491;">anthropic 2h20m</span></span>
+      <span><span style="color: #3fb950;">14%</span> <span style="color: #7a8491;">codex 3h10m</span></span>
+      <span><span style="color: #3fb950;">7%</span> <span style="color: #7a8491;">google 5d14h</span></span>
+      <span class="sep">|</span>
+      <span style="color: #7a8491;">cpu <span style="color: #8b97a6;">31%</span></span>
+      <span style="color: #7a8491;">ram <span style="color: #8b97a6;">1.02 GB</span></span>
+      <span style="color: #7a8491;">disk <span style="color: #8b97a6;">44 GB free</span></span>
+      <span style="flex: 1;"></span>
+      <span style="color: #7a8491;">4 running</span>
+      <span style="color: #d29922;">1 needs you</span>
+      <span class="sep">|</span>
+      <span style="color: #7a8491;">Ctrl K search</span>
+      <span style="color: #7a8491;">Ctrl B rail</span>
+      <span style="color: #7a8491;">Ctrl 1-4 channel</span>
+    </div>
+    <div style="display: grid; grid-template-columns: 150px 210px 250px 210px 1fr; gap: 12px; font-size: 11px; color: #7a8491;">
+      <span>daemon, or nothing works</span>
+      <span>subscription windows, worst first</span>
+      <span>this machine, because farseer spawns on it</span>
+      <span>the only number that asks for a person</span>
+      <span>the three keys that move you</span>
+    </div>
+  </div>
+
+  <div style="height: 1px; background: #232b35;"></div>
+
+  <div style="display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 26px;">
+
+    <div class="seg">
+      <span class="lbl">STATES</span>
+      <div class="bar" style="border-radius: 5px;">
+        <span style="display: flex; align-items: center; gap: 5px;"><span class="dot" style="background: #3fb950;"></span>daemon 53215</span>
+        <span class="sep">|</span><span style="color: #7a8491;">idle</span>
+      </div>
+      <div class="bar" style="border-radius: 5px;">
+        <span style="display: flex; align-items: center; gap: 5px;"><span class="dot" style="background: #d29922;"></span>daemon 53215</span>
+        <span class="sep">|</span><span style="color: #d29922;">2 need you</span>
+      </div>
+      <div class="bar" style="border-radius: 5px; border-color: #f85149;">
+        <span style="display: flex; align-items: center; gap: 5px;"><span class="dot" style="background: #f85149;"></span><span style="color: #f85149;">daemon unreachable</span></span>
+        <span class="sep">|</span><span style="color: #7a8491;">retrying in 4s</span>
+      </div>
+      <span class="note">A window over 80% turns amber; a run that stops for a person turns the whole segment amber. Nothing else earns colour.</span>
+    </div>
+
+    <div class="seg">
+      <span class="lbl">RAIL ZONES &middot; 48PX COLLAPSED, 232PX PEEKED</span>
+      <div style="display: flex; gap: 10px;">
+        <div style="width: 48px; background: #12161b; border: 1px solid #232b35; border-radius: 5px; display: flex; flex-direction: column; align-items: center; gap: 5px; padding: 7px 0;">
+          <div style="width: 28px; height: 28px; border-radius: 5px; background: #171c23; border: 1px solid #58a6ff;"></div>
+          <div style="width: 28px; height: 28px; border-radius: 5px; background: #171c23;"></div>
+          <div style="width: 28px; height: 28px; border-radius: 5px; background: #171c23;"></div>
+          <div style="width: 20px; height: 1px; background: #232b35;"></div>
+          <div style="width: 28px; height: 28px; border-radius: 5px; background: #171c23;"></div>
+          <div style="width: 28px; height: 28px; border-radius: 5px; background: #171c23;"></div>
+        </div>
+        <div style="flex: 1; display: flex; flex-direction: column; gap: 9px; padding-top: 2px;">
+          <div><span style="font-size: 12px; color: #e6edf3;">Cells</span> <span class="note">&mdash; what farseer is, one row each</span></div>
+          <div><span style="font-size: 12px; color: #e6edf3;">Pinned</span> <span class="note">&mdash; a shortcut to one thing</span></div>
+          <div><span style="font-size: 12px; color: #e6edf3;">Board</span> <span class="note">&mdash; the two columns that wait on you</span></div>
+          <div><span style="font-size: 12px; color: #e6edf3;">Runs</span> <span class="note">&mdash; live, newest first</span></div>
+        </div>
+      </div>
+      <span class="note"><b style="color: #e6edf3; font-weight: 600;">Pin</b> puts a shortcut in the rail. <b style="color: #e6edf3; font-weight: 600;">Mount</b> puts a tile on the board. Two verbs, because they are two things.</span>
+    </div>
+
+    <div class="seg">
+      <span class="lbl">TOKENS LIFTED FROM ui/src/style.css</span>
+      <div style="display: flex; flex-direction: column; gap: 5px;">
+        <div class="swatch"><span class="chip" style="background: #0b0d10;"></span><span class="m" style="font-size: 11px; color: #8b97a6;">#0b0d10</span><span class="note">bg</span></div>
+        <div class="swatch"><span class="chip" style="background: #12161b;"></span><span class="m" style="font-size: 11px; color: #8b97a6;">#12161b</span><span class="note">panel</span></div>
+        <div class="swatch"><span class="chip" style="background: #171c23;"></span><span class="m" style="font-size: 11px; color: #8b97a6;">#171c23</span><span class="note">panel-2</span></div>
+        <div class="swatch"><span class="chip" style="background: #232b35;"></span><span class="m" style="font-size: 11px; color: #8b97a6;">#232b35</span><span class="note">line</span></div>
+        <div class="swatch"><span class="chip" style="background: #7a8491;"></span><span class="m" style="font-size: 11px; color: #8b97a6;">#7a8491</span><span class="note">faint &middot; 4.51:1</span></div>
+        <div class="swatch"><span class="chip" style="background: #8b97a6;"></span><span class="m" style="font-size: 11px; color: #8b97a6;">#8b97a6</span><span class="note">dim</span></div>
+        <div class="swatch"><span class="chip" style="background: #e6edf3;"></span><span class="m" style="font-size: 11px; color: #8b97a6;">#e6edf3</span><span class="note">ink</span></div>
+        <div class="swatch"><span class="chip" style="background: #58a6ff;"></span><span class="m" style="font-size: 11px; color: #8b97a6;">#58a6ff</span><span class="note">accent &middot; selection only</span></div>
+        <div class="swatch"><span class="chip" style="background: #3fb950;"></span><span class="m" style="font-size: 11px; color: #8b97a6;">#3fb950</span><span class="note">running, ok</span></div>
+        <div class="swatch"><span class="chip" style="background: #d29922;"></span><span class="m" style="font-size: 11px; color: #8b97a6;">#d29922</span><span class="note">needs a person</span></div>
+        <div class="swatch"><span class="chip" style="background: #f85149;"></span><span class="m" style="font-size: 11px; color: #8b97a6;">#f85149</span><span class="note">failed, denied</span></div>
+      </div>
+    </div>
+
+  </div>
+
+  <div style="height: 1px; background: #232b35;"></div>
+
+  <div style="display: flex; gap: 30px; align-items: flex-start;">
+    <div class="seg" style="flex: 1;">
+      <span class="lbl">GRID</span>
+      <span class="note">12 columns, 12px gutter, 14px page padding. A tile stores <span class="m" style="color: #e6edf3;">w</span> in columns and <span class="m" style="color: #e6edf3;">h</span> in 40px rows, so both axes snap and no tile can overlap another. Under 900px every tile takes the full width.</span>
+    </div>
+    <div class="seg" style="flex: 1;">
+      <span class="lbl">TYPE</span>
+      <span class="note">13px/1.5 system-ui for prose, <span class="m">ui-monospace</span> for anything an operator compares: ids, costs, durations, percentages, event kinds. 11px is the floor for chrome, 10px only for uppercase labels.</span>
+    </div>
+    <div class="seg" style="flex: 1;">
+      <span class="lbl">RADII</span>
+      <span class="note">3px inner tags, 4px badges, 5px controls and chips, 6px cards. One step down per nesting level, so a chip inside a card never matches its parent.</span>
+    </div>
+  </div>
+
+</div>
+</x-dc>
+</body>
+</html>

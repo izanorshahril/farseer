@@ -1,0 +1,232 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+  <style>
+    body { margin: 0; font: 13px/1.5 system-ui, "Segoe UI", sans-serif; background: #0b0d10; color: #e6edf3; }
+    a { color: #58a6ff; } a:hover { color: #79b8ff; }
+    .m { font-family: ui-monospace, Consolas, monospace; }
+    .pane { display: flex; flex-direction: column; background: #12161b; border: 1px solid #232b35; border-radius: 6px; overflow: hidden; min-height: 0; min-width: 0; }
+    .ph { display: flex; align-items: center; gap: 8px; padding: 6px 9px; border-bottom: 1px solid #232b35; flex-shrink: 0; }
+    .ph b { font-size: 12px; font-weight: 600; }
+    .pb { padding: 9px 11px; overflow: hidden; flex: 1; min-height: 0; }
+    .tog { padding: 5px 10px; border-radius: 5px; border: 1px solid #232b35; background: #171c23; color: #8b97a6; font: inherit; font-size: 11px; cursor: pointer; }
+    .tog:hover { color: #e6edf3; border-color: #58a6ff; }
+    .on { color: #e6edf3; border-color: #58a6ff; }
+    .x { color: #7a8491; font-size: 13px; cursor: pointer; line-height: 1; }
+    .x:hover { color: #f85149; }
+    .dot { width: 6px; height: 6px; border-radius: 50%; flex-shrink: 0; }
+    .fr { display: flex; align-items: center; gap: 7px; font-size: 12px; color: #8b97a6; padding: 2px 0; }
+    .ln { display: grid; grid-template-columns: 30px 1fr; gap: 8px; font: 11px/1.55 ui-monospace, Consolas, monospace; }
+  </style>
+</helmet>
+<div style="width: 1440px; height: 900px; display: flex; flex-direction: column; background: #0b0d10; overflow: hidden;">
+
+  <div style="display: flex; align-items: center; gap: 10px; padding: 9px 14px; background: #12161b; border-bottom: 1px solid #232b35; flex-shrink: 0;">
+    <span style="color: #7a8491; cursor: pointer; font-size: 15px; line-height: 1;">&#8592;</span>
+    <span style="font-weight: 650;">far<span style="color: #58a6ff;">seer</span></span>
+    <span style="color: #232b35;">/</span>
+    <span style="font-size: 13px;">changelog</span>
+    <span class="m" style="font-size: 10px; color: #7a8491; border: 1px solid #232b35; border-radius: 3px; padding: 3px 5px;">a41f9c2e</span>
+    <span style="display: flex; align-items: center; gap: 5px; padding: 3px 8px; border-radius: 4px; border: 1px solid #3fb950; color: #3fb950; font-size: 11px;"><span class="dot" style="background: #3fb950;"></span>running</span>
+    <span style="flex: 1;"></span>
+    <span style="color: #7a8491; font-size: 11px; margin-right: 2px;">panels</span>
+    <button class="tog {{filesOn}}" onClick="{{toggleFiles}}">Files</button>
+    <button class="tog {{diffOn}}" onClick="{{toggleDiff}}">Diff</button>
+    <button class="tog {{termOn}}" onClick="{{toggleTerm}}">Terminal</button>
+    <button class="tog {{artOn}}" onClick="{{toggleArt}}">Artifacts</button>
+    <button class="tog {{ctxOn}}" onClick="{{toggleCtx}}">Context</button>
+  </div>
+
+  <div style="flex: 1; display: flex; gap: 10px; padding: 10px; min-height: 0;">
+
+    <sc-if value="{{files}}" hint-placeholder-val="{{ true }}">
+      <div class="pane" style="width: 194px; flex-shrink: 0;">
+        <div class="ph"><b>Files</b><span style="flex: 1;"></span><span class="x" onClick="{{toggleFiles}}">&times;</span></div>
+        <div class="pb" style="display: flex; flex-direction: column; gap: 1px;">
+          <div class="fr"><svg width="11" height="11" viewBox="0 0 16 16" fill="none"><path d="M2 4.5 4 2.5h3l1.2 1.4H14v9.6H2z" stroke="#7a8491" stroke-width="1.2" stroke-linejoin="round"/></svg>crates</div>
+          <div class="fr" style="padding-left: 13px;"><svg width="11" height="11" viewBox="0 0 16 16" fill="none"><path d="M2 4.5 4 2.5h3l1.2 1.4H14v9.6H2z" stroke="#7a8491" stroke-width="1.2" stroke-linejoin="round"/></svg>farseer-api</div>
+          <div class="fr" style="padding-left: 13px; color: #e6edf3;"><svg width="11" height="11" viewBox="0 0 16 16" fill="none"><path d="M3.5 1.5h6L13 5v9.5H3.5z" stroke="#58a6ff" stroke-width="1.2" stroke-linejoin="round"/></svg>CHANGELOG.md<span style="flex: 1;"></span><span class="m" style="font-size: 10px; color: #3fb950;">M</span></div>
+          <div class="fr"><svg width="11" height="11" viewBox="0 0 16 16" fill="none"><path d="M2 4.5 4 2.5h3l1.2 1.4H14v9.6H2z" stroke="#7a8491" stroke-width="1.2" stroke-linejoin="round"/></svg>ui</div>
+          <div class="fr" style="padding-left: 13px;"><svg width="11" height="11" viewBox="0 0 16 16" fill="none"><path d="M3.5 1.5h6L13 5v9.5H3.5z" stroke="#7a8491" stroke-width="1.2" stroke-linejoin="round"/></svg>layout.ts<span style="flex: 1;"></span><span class="m" style="font-size: 10px; color: #3fb950;">A</span></div>
+          <div class="fr"><svg width="11" height="11" viewBox="0 0 16 16" fill="none"><path d="M3.5 1.5h6L13 5v9.5H3.5z" stroke="#7a8491" stroke-width="1.2" stroke-linejoin="round"/></svg>README.md</div>
+        </div>
+      </div>
+    </sc-if>
+
+    <div style="flex: 1; display: flex; flex-direction: column; gap: 10px; min-width: 0; min-height: 0;">
+      <div style="flex: 1; display: flex; gap: 10px; min-height: 0;">
+
+        <div class="pane" style="flex: 1;">
+          <div class="ph">
+            <b>Transcript</b>
+            <span class="m" style="font-size: 10px; color: #7a8491;">pi &middot; 2m14s &middot; $0.21</span>
+            <span style="flex: 1;"></span>
+            <span style="padding: 2px 6px; border-radius: 4px; border: 1px solid #232b35; color: #8b97a6; font-size: 10px;">steer</span>
+            <span style="padding: 2px 6px; border-radius: 4px; border: 1px solid #232b35; color: #8b97a6; font-size: 10px;">take over</span>
+            <span style="padding: 2px 6px; border-radius: 4px; border: 1px solid #f85149; color: #f85149; font-size: 10px;">cancel</span>
+          </div>
+          <div class="pb" style="display: flex; flex-direction: column; gap: 9px;">
+            <div style="display: flex; gap: 8px;"><span class="m" style="font-size: 10px; line-height: 1.6; color: #7a8491; flex-shrink: 0;">you</span><span style="font-size: 12px;">Ship the changelog for 0.4 and post it to the release channel.</span></div>
+            <div style="display: flex; gap: 8px;"><span class="m" style="font-size: 10px; line-height: 1.6; color: #58a6ff; flex-shrink: 0;">mgr</span><span style="font-size: 12px; color: #8b97a6;">Reading the commits since <span class="m" style="color: #e6edf3;">v0.3.2</span>. Forty-one, eleven of them user-visible.</span></div>
+            <div style="display: flex; gap: 8px; align-items: flex-start;">
+              <span class="m" style="font-size: 10px; line-height: 1.6; color: #7a8491; flex-shrink: 0;">run</span>
+              <div style="flex: 1; border-left: 2px solid #232b35; padding-left: 9px; display: flex; flex-direction: column; gap: 3px;">
+                <span class="m" style="font-size: 11px; color: #8b97a6;">git log v0.3.2..HEAD --oneline</span>
+                <span class="m" style="font-size: 11px; color: #7a8491;">41 lines</span>
+              </div>
+            </div>
+            <div style="display: flex; gap: 8px; align-items: flex-start;">
+              <span class="m" style="font-size: 10px; line-height: 1.6; color: #f85149; flex-shrink: 0;">deny</span>
+              <div style="flex: 1; border-left: 2px solid #f85149; padding-left: 9px; display: flex; flex-direction: column; gap: 2px;">
+                <span class="m" style="font-size: 11px; color: #e6edf3;">git push origin main</span>
+                <span style="font-size: 11px; color: #8b97a6;">refused by the cell's deny list</span>
+              </div>
+            </div>
+            <div style="display: flex; gap: 8px;"><span class="m" style="font-size: 10px; line-height: 1.6; color: #58a6ff; flex-shrink: 0;">mgr</span><span style="font-size: 12px; color: #8b97a6;">Draft is in <span class="m" style="color: #e6edf3;">CHANGELOG.md</span>. Posting crosses your ceiling, so I have stopped and asked.</span></div>
+            <span style="flex: 1;"></span>
+            <div style="display: flex; align-items: center; gap: 8px; padding: 7px 9px; border-radius: 5px; border: 1px solid #232b35; background: #171c23;">
+              <span class="m" style="font-size: 10px; color: #7a8491; border: 1px solid #232b35; border-radius: 3px; padding: 3px 5px;">steer</span>
+              <span style="color: #7a8491; font-size: 12px;">redirect this run without taking it over</span>
+            </div>
+          </div>
+        </div>
+
+        <sc-if value="{{diff}}" hint-placeholder-val="{{ true }}">
+          <div class="pane" style="flex: 1;">
+            <div class="ph"><b>Diff</b><span class="m" style="font-size: 10px; color: #7a8491;">CHANGELOG.md</span><span style="flex: 1;"></span><span class="m" style="font-size: 10px; color: #3fb950;">+18</span><span class="m" style="font-size: 10px; color: #f85149;">-2</span><span class="x" onClick="{{toggleDiff}}">&times;</span></div>
+            <div class="pb" style="display: flex; flex-direction: column;">
+              <div class="ln"><span style="color: #7a8491;">1</span><span style="color: #8b97a6;"># Changelog</span></div>
+              <div class="ln"><span style="color: #7a8491;">2</span><span style="color: #8b97a6;">&nbsp;</span></div>
+              <div class="ln" style="background: rgba(63,185,80,0.10);"><span style="color: #3fb950;">3</span><span style="color: #e6edf3;">+ ## 0.4.0</span></div>
+              <div class="ln" style="background: rgba(63,185,80,0.10);"><span style="color: #3fb950;">4</span><span style="color: #e6edf3;">+</span></div>
+              <div class="ln" style="background: rgba(63,185,80,0.10);"><span style="color: #3fb950;">5</span><span style="color: #e6edf3;">+ An editor can now drive farseer</span></div>
+              <div class="ln" style="background: rgba(63,185,80,0.10);"><span style="color: #3fb950;">6</span><span style="color: #e6edf3;">+ over ACP, and a foreign</span></div>
+              <div class="ln" style="background: rgba(63,185,80,0.10);"><span style="color: #3fb950;">7</span><span style="color: #e6edf3;">+ orchestrator over A2A.</span></div>
+              <div class="ln" style="background: rgba(248,81,73,0.10);"><span style="color: #f85149;">8</span><span style="color: #8b97a6;">- ## Unreleased</span></div>
+              <div class="ln"><span style="color: #7a8491;">9</span><span style="color: #8b97a6;">&nbsp;</span></div>
+              <div class="ln"><span style="color: #7a8491;">10</span><span style="color: #8b97a6;">## 0.3.2</span></div>
+            </div>
+          </div>
+        </sc-if>
+
+        <sc-if value="{{ctx}}" hint-placeholder-val="{{ true }}">
+          <div class="pane" style="width: 210px; flex-shrink: 0;">
+            <div class="ph"><b>Context</b><span style="flex: 1;"></span><span class="x" onClick="{{toggleCtx}}">&times;</span></div>
+            <div class="pb" style="display: flex; flex-direction: column; gap: 10px;">
+              <div style="display: flex; flex-direction: column; gap: 4px;">
+                <span class="m" style="font-size: 10px; color: #7a8491; letter-spacing: 0.08em;">CELL</span>
+                <span style="font-size: 12px;">zero</span>
+              </div>
+              <div style="display: flex; flex-direction: column; gap: 4px;">
+                <span class="m" style="font-size: 10px; color: #7a8491; letter-spacing: 0.08em;">CEILING</span>
+                <span style="font-size: 12px; color: #d29922;">reversible</span>
+              </div>
+              <div style="display: flex; flex-direction: column; gap: 4px;">
+                <span class="m" style="font-size: 10px; color: #7a8491; letter-spacing: 0.08em;">BUDGET</span>
+                <div style="height: 4px; border-radius: 2px; background: #232b35; overflow: hidden;"><div style="width: 34%; height: 100%; background: #3fb950;"></div></div>
+                <span class="m" style="font-size: 10px; color: #7a8491;">$0.21 of $0.60</span>
+              </div>
+              <div style="display: flex; flex-direction: column; gap: 4px;">
+                <span class="m" style="font-size: 10px; color: #7a8491; letter-spacing: 0.08em;">WORKSPACE</span>
+                <span class="m" style="font-size: 11px; color: #8b97a6;">worktree &middot; run-a41f</span>
+              </div>
+              <div style="display: flex; flex-direction: column; gap: 4px;">
+                <span class="m" style="font-size: 10px; color: #7a8491; letter-spacing: 0.08em;">DENIED</span>
+                <span class="m" style="font-size: 11px; color: #f85149;">git push</span>
+                <span class="m" style="font-size: 11px; color: #f85149;">rm -rf</span>
+              </div>
+            </div>
+          </div>
+        </sc-if>
+
+        <sc-if value="{{art}}" hint-placeholder-val="{{ true }}">
+          <div class="pane" style="width: 210px; flex-shrink: 0;">
+            <div class="ph"><b>Artifacts</b><span style="flex: 1;"></span><span class="x" onClick="{{toggleArt}}">&times;</span></div>
+            <div class="pb" style="display: flex; flex-direction: column; gap: 6px;">
+              <div style="display: flex; align-items: center; gap: 7px; padding: 6px 8px; border-radius: 5px; border: 1px solid #232b35; background: #171c23;">
+                <svg width="13" height="13" viewBox="0 0 16 16" fill="none"><path d="M3.5 1.5h6L13 5v9.5H3.5z" stroke="#58a6ff" stroke-width="1.2" stroke-linejoin="round"/></svg>
+                <span style="font-size: 12px;">CHANGELOG.md</span>
+              </div>
+              <div style="display: flex; align-items: center; gap: 7px; padding: 6px 8px; border-radius: 5px; border: 1px solid #232b35; background: #171c23;">
+                <svg width="13" height="13" viewBox="0 0 16 16" fill="none"><rect x="2" y="3" width="12" height="10" rx="1.2" stroke="#7a8491" stroke-width="1.2"/></svg>
+                <span style="font-size: 12px; color: #8b97a6;">release-notes.txt</span>
+              </div>
+              <span class="m" style="font-size: 10px; color: #7a8491; margin-top: 2px;">produced this run</span>
+            </div>
+          </div>
+        </sc-if>
+
+      </div>
+
+      <sc-if value="{{term}}" hint-placeholder-val="{{ true }}">
+        <div class="pane" style="height: 186px; flex-shrink: 0;">
+          <div class="ph">
+            <b>Terminal</b>
+            <span style="display: flex; gap: 3px; margin-left: 4px;">
+              <span class="m" style="font-size: 10px; color: #e6edf3; border: 1px solid #58a6ff; border-radius: 3px; padding: 2px 6px;">pwsh</span>
+              <span class="m" style="font-size: 10px; color: #7a8491; border: 1px solid #232b35; border-radius: 3px; padding: 2px 6px;">bash</span>
+              <span class="m" style="font-size: 10px; color: #7a8491; border: 1px solid #232b35; border-radius: 3px; padding: 2px 6px;">wsl</span>
+            </span>
+            <span style="flex: 1;"></span>
+            <span class="m" style="font-size: 10px; color: #7a8491;">run-a41f worktree</span>
+            <span class="x" onClick="{{toggleTerm}}">&times;</span>
+          </div>
+          <div class="pb" style="display: flex; flex-direction: column; gap: 1px; background: #0b0d10;">
+            <span class="m" style="font-size: 11px; color: #8b97a6;"><span style="color: #58a6ff;">PS</span> D:\Dev\farseer&gt; cargo test -p farseer-api</span>
+            <span class="m" style="font-size: 11px; color: #7a8491;">   Compiling farseer-api v0.4.0</span>
+            <span class="m" style="font-size: 11px; color: #7a8491;">    Finished test profile in 11.42s</span>
+            <span class="m" style="font-size: 11px; color: #8b97a6;">running 63 tests</span>
+            <span class="m" style="font-size: 11px; color: #3fb950;">test result: ok. 63 passed; 0 failed</span>
+            <span class="m" style="font-size: 11px; color: #8b97a6;"><span style="color: #58a6ff;">PS</span> D:\Dev\farseer&gt; <span style="background: #58a6ff; color: #0b0d10;">&nbsp;</span></span>
+          </div>
+        </div>
+      </sc-if>
+    </div>
+  </div>
+
+  <div style="height: 26px; flex-shrink: 0; display: flex; align-items: center; gap: 12px; padding: 0 12px; background: #12161b; border-top: 1px solid #232b35; font: 11px/1 ui-monospace, Consolas, monospace; color: #8b97a6;">
+    <span style="display: flex; align-items: center; gap: 5px;"><span class="dot" style="background: #3fb950;"></span>daemon 53215</span>
+    <span style="color: #232b35;">|</span>
+    <span><span style="color: #d29922;">82%</span> <span style="color: #7a8491;">anthropic 2h20m</span></span>
+    <span style="color: #232b35;">|</span>
+    <span style="color: #7a8491;">cpu <span style="color: #8b97a6;">31%</span></span>
+    <span style="color: #7a8491;">ram <span style="color: #8b97a6;">1.02 GB</span></span>
+    <span style="flex: 1;"></span>
+    <span style="color: #7a8491;">{{openCount}} panels open</span>
+    <span style="color: #232b35;">|</span>
+    <span style="color: #7a8491;">Esc back to board</span>
+  </div>
+
+</div>
+</x-dc>
+<script data-dc-script data-props='{"$preview":{"width":1440,"height":900}}'>
+class Component extends DCLogic {
+  constructor(props) {
+    super(props);
+    this.state = { files: true, diff: true, term: true, art: false, ctx: false };
+  }
+  flip(key) {
+    return () => this.setState({ [key]: !this.state[key] });
+  }
+  renderVals() {
+    const s = this.state;
+    const open = ['files', 'diff', 'term', 'art', 'ctx'].filter((k) => s[k]).length;
+    return {
+      files: s.files, diff: s.diff, term: s.term, art: s.art, ctx: s.ctx,
+      filesOn: s.files ? 'on' : '', diffOn: s.diff ? 'on' : '', termOn: s.term ? 'on' : '',
+      artOn: s.art ? 'on' : '', ctxOn: s.ctx ? 'on' : '',
+      openCount: open,
+      toggleFiles: this.flip('files'), toggleDiff: this.flip('diff'),
+      toggleTerm: this.flip('term'), toggleArt: this.flip('art'), toggleCtx: this.flip('ctx'),
+    };
+  }
+}
+</script>
+</body>
+</html>

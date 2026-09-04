@@ -6,7 +6,7 @@ One operator, one Rust binary, no required external services.
 **Status: the foundation is built, and a Claude Code manager can delegate to a real roster worker.**
 Twenty-eight decision tickets are closed, and the domain model, the record, the local API, four native runners, all four manager verbs from [Run state model and control semantics](.scratch/farseer/issues/05-run-state-model.md), and the MCP face from [Record scope](.scratch/farseer/issues/02-record-scope.md) are implemented against them.
 `POST /v1/cells/{id}/instruct` runs a cell's manager against a goal and returns a `run_id` immediately.
-The operator surface is a separate client under [`ui/`](ui/README.md): a canvas of widgets whose arrangement farseer stores as an opaque blob, one composer addressed to the top manager, and a host bridge that is the only thing a widget may reach.
+The operator surface is a separate client under [`ui/`](ui/README.md): a Berd-inspired pale workbench of persisted widgets, an optional clock, one composer addressed to the top manager, and a host bridge that is the only thing a widget may reach.
 
 A Claude Code manager receives farseer's own MCP face under a per-run capability and can call `delegate_to_worker`, or `delegate_to_cell` for a granted cell, during the same live conversation; cancel and steer remain available through the run API.
 See [What runs today](#what-runs-today).
@@ -24,7 +24,8 @@ Mechanics never surface in conversation; they are all in the record and on the f
 
 ```mermaid
 graph TD
-  OP([operator]) -->|instruction| M0
+  OP([operator]) --> UI[Berd-inspired widget canvas]
+  UI -->|instruction to top manager| M0
 
   subgraph C0["cell #0"]
     M0[manager]
@@ -49,12 +50,13 @@ graph TD
 
   M0 --> REC[(append-only record SQLite)]
   MS --> REC
-  OP -.->|attach, any depth| W0
-  OP -.->|attach| WS
+  REC -->|live record and saved layout| UI
+  UI -.->|attach, any depth| W0
+  UI -.->|attach| WS
 
   classDef core fill:#1a3a5c,stroke:#4a90d9,color:#fff
   classDef ext fill:#3a3a3a,stroke:#777,color:#ccc
-  class M0,MS,W0,WS,REC,MCPFACE core
+  class UI,M0,MS,W0,WS,REC,MCPFACE core
   class RUN,PEER,TOOL ext
 ```
 
@@ -76,19 +78,22 @@ An external protocol is spoken at a boundary, never shaped into internals.
 ```
 .
 ├─ crates/
-│  ├─ farseer-core/    domain model: cells, policy, run state, scrubbing. Pure, no I/O
-│  ├─ farseer-store/   the record: one append-only SQLite log, memory, UI state, authorized roots
-│  ├─ farseer-api/     local HTTP plus SSE on 127.0.0.1, token and loopback guard; nests the MCP face at /v1/mcp; pushes notifications out
+│  ├─ farseer-core/    domain model: cells, policy, conversations, tasks, sessions, run state and scrubbing. Pure, no I/O
+│  ├─ farseer-store/   SQLite truth: record, work model, session/transcript metadata, memory, UI state and authorized roots
+│  ├─ farseer-api/     loopback HTTP/SSE, work queries and commands, token guard, manager transports and /v1/mcp
 │  ├─ farseer-runner/  runners: Claude Code, Codex, cursor-agent and goose, PATHEXT resolution, Job-Object spawn, stream-json mapping, worktree lifecycle
 │  ├─ farseer-manager/ runs one sealed contract, captures terminal text, and records what happened
 │  ├─ farseer/         the binary: runtime and CLI in one
 │  └─ farseer-shell/   the desktop shell: finds a farseer, serves the canvas and its widgets, holds the token, remembers the window, and puts each provider's quota in the tray
-├─ ui/                 the canvas: the operator surface, a client of /v1 like any other
+├─ ui/                 the Berd-inspired canvas: the operator surface, a client of /v1 like any other
+│  ├─ src/App.tsx      the sidebar, saved widget canvas and one top-manager composer
 │  ├─ src/bridge.ts    everything a widget may reach, and nothing else
+│  ├─ src/layout.ts    validates, snaps and bounds the persisted widget arrangement
 │  ├─ src/stream.ts    one SSE connection for the whole page, fanned out
-│  ├─ src/selection.ts which run the canvas is looking at - the one fact that crosses widgets
+│  ├─ src/selection.ts shared conversation, task, run, project and manager-runner context
 │  ├─ src/project.ts   which project work goes to, remembered across restarts
-│  ├─ src/widgets/     conversation, delegation, runs, run detail, activity, quota, runners, fleet, projects, settings
+│  ├─ src/widgets/     Work, Conversation, Fleet and Capacity defaults plus optional operational views
+│  ├─ tests/           focused behavior checks for the canvas layout contract
 │  ├─ plugins/         the widget host: gate 1's keep-or-undo and gate 2's import allowlist
 │  └─ scripts/         compiles agent widgets into the build, so the desktop app has them too
 ├─ widgets/            agent-authored widgets, in git, compiled and sandboxed by the canvas
@@ -122,7 +127,7 @@ cargo run
 Opens the desktop shell, which is what running farseer means: it attaches to a daemon already on this machine or starts one itself, serves the canvas on a loopback port of its own, and proxies `/v1` with the operator token attached on its side - so the page it loads is one origin and never holds a credential.
 It also puts the most constrained subscription window in the system tray. See [Tray](#tray).
 
-Build the canvas once first, or the shell has nothing to serve:
+Build the canvas once first, and rebuild it after any `ui/` change, because `cargo run` serves the compiled `ui/dist` rather than the Vite source:
 
 ```bash
 bun run --cwd ui build

@@ -244,3 +244,16 @@ This ticket closed before `14 Vocabulary and naming lock`.
 
 Where this resolution says **"contract envelope"** - in what a run entry contains, and in the record-versus-transcript table - the term is **worker contract**.
 `14` retired `envelope` as a noun because two tickets used it for two different payloads.
+
+## Amended by 40
+
+`40 Work model and session explorer` keeps the attachment rule and names three operator-selectable custody modes.
+
+- `reference` records the transcript pointer and copies no bytes.
+- `copy` stores an operator-authorized content-addressed attachment outside event rows.
+- `copy-plus-index` also creates a scrubbed, versioned search and similarity projection.
+
+The last mode is strictly more permissive because indexing reads transcript content and creates derived data.
+Scope precedence is run, then cell, then global default.
+The raw copied attachment remains unscrubbed evidence and every indexed derivative records its redaction version and source digest.
+Similarity edges are derived data, never runtime observations or memory claims.

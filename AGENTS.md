@@ -5,7 +5,7 @@ Twenty-eight decision tickets are closed, and the foundation is implemented agai
 ## Scope
 
 Farseer builds, tests and runs with **`cargo` and `bun` alone**.
-`cargo test --workspace`, `cargo clippy --workspace --all-targets`, `cargo fmt` and `bun run --cwd ui check` are the whole toolchain, and every live-runner test is `#[ignore]`d behind them.
+`cargo test --workspace`, `cargo clippy --workspace --all-targets`, `cargo fmt`, `bun run --cwd ui test` and `bun run --cwd ui check` are the whole toolchain, and every live-runner test is `#[ignore]`d behind them.
 **`--workspace` is not optional on either**: `cargo run` opens the desktop shell, which means `default-members` is the shell, which means a bare `cargo test` covers the shell and nothing else.
 
 No push gate, review pipeline or daemon is part of this project. If one is installed on a machine it belongs to that machine, not to farseer, and farseer must keep working when it is absent.
@@ -61,6 +61,12 @@ A field a runner declines to report stays absent rather than being defaulted, pe
 A manager's own words reach the record as **`manager_answered`**, appended per turn rather than at the end - `10 runner inventory` observed that a Claude Code manager on live stdin answers and stays alive for the next steer, so holding the text until the run finished would mean the operator hears nothing until they close the session they are talking to.
 **`run_finished`** is `05 run state model`'s lifecycle kind, which nothing emitted until now; it carries outcome, text, cost and tokens, and a run with no report quotes its error rather than inventing an apology in the manager's voice.
 Together they are what makes `16 local api surface`'s "the answer arrives on the event stream" true, and the **Conversation** widget is built from them.
+
+`40 work model and session explorer` is wired end to end: conversations group durable tasks, each instruction creates one task and one root run, and reruns, rescopes, continuations, delegations, and cell calls retain explicit parent edges.
+Task transitions are validated in the store and retain actor, reason, and timestamp; project and global boards are projections over the same rows.
+A run may report several harness-owned session identifiers with their provider kind, and transcript custody is explicitly `reference`, `copy`, or `copy-plus-index`.
+Copied raw transcript bytes live outside SQLite; only scrubbed derived text is indexed, and similarity edges carry their projection metadata.
+The version-eight canvas defaults to Conversation, Work, Fleet, and Capacity, while Settings is a top-bar popover and narrower diagnostic widgets remain optional.
 
 The canvas reads the record live: `src/stream.ts` follows `/v1/stream` and the **Activity** widget renders it, so an instruction the composer fires has somewhere to land.
 It parses SSE by hand rather than using `EventSource`, because farseer puts the **event kind** in the `event:` field and `EventSource.onmessage` fires only for unnamed events - it would silently receive nothing.
@@ -128,7 +134,11 @@ Two platform facts the spikes established the hard way:
 cargo test --workspace
 ```
 
-The canvas has its own check, and it is a typecheck rather than a test suite - there is nothing there yet whose behaviour a test would pin:
+The canvas typechecks and has focused behavior tests for its persisted layout contract:
+
+```bash
+bun run --cwd ui test
+```
 
 ```bash
 bun run --cwd ui check

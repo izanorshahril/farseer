@@ -313,7 +313,7 @@ fn send(
         // that should change how it answers.
         goal: format!("[from the A2A peer `{}`]\n{goal}", peer.name),
         workspace: cell.workspace_strategy,
-        runner: cell.manager.runner.clone(),
+        runner: cell.manager.runner().to_string(),
         tool_grants: cell.tool_grants(),
         tool_level: cell.manager.tools,
         autonomy_ceiling: ceiling,

@@ -1,0 +1,184 @@
+{
+  "schema": "farseer.production-home.design",
+  "version": 1,
+  "seed": "b452fefe",
+  "status": "production-ui-authoritative",
+  "approval_reference": ".scratch/farseer/prototypes/berd-home/",
+  "sources": {
+    "html": "ui/index.html",
+    "app": "ui/src/App.tsx",
+    "styles": "ui/src/style.css",
+    "clock": "ui/src/widgets/clock.tsx",
+    "bridge": "ui/src/bridge.ts",
+    "layout_model": "ui/src/layout.ts",
+    "accepted_rasters": [".impeccable/review/production-desktop.png", ".impeccable/review/production-mobile.png"]
+  },
+  "authority": "Production ui/ is authoritative; the static prototype is the approval reference and does not replace ui/.",
+  "intent": {
+    "surface": "Calm fleet workbench and single home canvas.",
+    "operator_job": "See current work, fleet state, project context, and live records before asking the top manager what happens next.",
+    "routing": "Every AI request goes to the top manager; direct run verbs act on a selected run.",
+    "deferred": ["full chat composition", "chat history as a separate surface", "second canvas or mode"]
+  },
+  "tokens": {
+    "theme": "light-only",
+    "color_scheme": "light",
+    "palette": {
+      "bg": "#f4f4f2",
+      "canvas": "#f8f8f6",
+      "panel": "#ffffff",
+      "panel_2": "#f5f5f3",
+      "line": "#e5e5e1",
+      "line_strong": "#d4d4cf",
+      "ink": "#252525",
+      "dim": "#666662",
+      "faint": "#73736e",
+      "accent": "#4d72ff",
+      "accent_soft": "#e9edff",
+      "ok": "#23805f",
+      "warn": "#98601b",
+      "bad": "#c14539",
+      "literal": {
+        "selection_text": "#ffffff",
+        "run_alert_surface": "#ffebe7",
+        "cell_surface": "#e2f2ed",
+        "operator_edge": "#a371f7",
+        "gate_link": "#58a6ff",
+        "meter_ok": "#3fb950",
+        "meter_warn": "#d29922",
+        "meter_bad": "#f85149"
+      },
+      "status_ring": "rgba(35, 128, 95, 0.12)"
+    },
+    "typography": {
+      "body": {"family": "Inter, Segoe UI Variable Text, Segoe UI, sans-serif", "size_px": 13, "line_height": 1.5},
+      "mono": "ui-monospace, Cascadia Mono, Consolas, monospace",
+      "brand": {"size_px": 18, "weight": 680, "letter_spacing_em": -0.035},
+      "widget_heading": {"size_px": 13, "weight": 680},
+      "clock": {"size": "clamp(38px, 4vw, 58px)", "weight": 540, "line_height": 1, "letter_spacing_em": -0.05, "numeric": "tabular-nums"},
+      "clock_support": {"size_px": 12, "margin_top_px": 8},
+      "group_label": {"size_px": 10, "weight": 700, "transform": "uppercase", "letter_spacing_em": 0.07},
+      "metadata": {"size_px": [10, 11, 12]},
+      "badge": {"family": "mono", "size_px": 11, "line_height": 1},
+      "size_badge": {"size_px": 9}
+    },
+    "depth": {
+      "standard_shadow": ["0 12px 36px rgba(29, 29, 27, 0.07)", "0 2px 5px rgba(29, 29, 27, 0.04)"],
+      "composer_shadow": ["0 18px 55px rgba(29, 29, 27, 0.13)", "0 2px 5px rgba(29, 29, 27, 0.05)"],
+      "focus_ring": "0 0 0 3px rgba(77, 114, 255, 0.13)"
+    }
+  },
+  "geometry": {
+    "app": {"height": "100%", "columns": [248, "minmax(0, 1fr)"], "gap_px": 8, "padding_px": 8},
+    "sidebar": {"border_px": 1, "radius_px": 18, "padding": "12px 10px", "collapsed_width_px": 72},
+    "brand_row": {"height_px": 40, "padding": "0 5px 0 9px"},
+    "fleet_switcher": {"min_height_px": 52, "margin": "10px 0 12px", "padding": "6px 8px", "columns": [32, "minmax(0, 1fr)"], "gap_px": 9, "mark_size_px": 32, "mark_radius_px": 9},
+    "sidebar_footer": {"columns": [8, "minmax(0, 1fr)"], "gap_px": 10, "padding": "12px 9px 2px"},
+    "workspace": {"border_px": 1, "radius_px": 18, "layout": "flex-column", "overflow": "hidden"},
+    "topbar": {"height_px": 52, "padding": "0 12px 0 18px", "action_gap_px": 4},
+    "canvas": {"columns": 12, "auto_row_px": 40, "gap_px": 12, "flow": "row dense", "align_content": "start", "padding": "14px 14px 154px", "overflow": "auto"},
+    "canvas_dots": {"dot_radius_px": 0.8, "transparent_cutoff_px": 0.9, "size_px": 20, "position": "10px 10px"},
+    "widget": {"column_span_min": 2, "column_span_max": 12, "row_span_min": 3, "row_span_max": 16, "border_px": 1, "radius_px": 18, "header": {"min_height_px": 48, "padding": "9px 12px", "gap_px": 8}, "body_padding": "11px 13px", "grip_target_px": 28, "resize_target_px": 24},
+    "composer": {"desktop": {"position": "absolute", "bottom_px": 18, "width": "min(600px, calc(100% - 180px))", "min_height_px": 112, "padding": "10px 11px 9px", "radius_px": 22}, "textarea": {"min_height_px": 40, "max_height_px": 78, "padding": "9px 4px 4px"}, "mobile": {"width": "calc(100% - 20px)", "margin": "8px 10px 10px", "position": "relative", "transform": "none", "radius_px": 18}, "send_target_px": 30}
+  },
+  "default_layout": {
+    "version": 6,
+    "mounted_order": ["runs", "clock", "fleet", "projects", "activity", "quota", "runners", "conversation", "delegation", "run"],
+    "spans": {
+      "runs": {"w": 4, "h": 6},
+      "clock": {"w": 4, "h": 4},
+      "fleet": {"w": 4, "h": 5},
+      "projects": {"w": 6, "h": 6},
+      "activity": {"w": 6, "h": 7},
+      "quota": {"w": 4, "h": 5},
+      "runners": {"w": 4, "h": 5},
+      "conversation": {"w": 6, "h": 9},
+      "delegation": {"w": 6, "h": 9},
+      "run": {"w": 4, "h": 8}
+    },
+    "span_normalization": {"round": true, "min_w": 2, "max_w": 12, "min_h": 3, "max_h": 16}
+  },
+  "registry": {
+    "built": {
+      "clock": ["Clock", "local time"],
+      "conversation": ["Conversation", "you and the top manager"],
+      "delegation": ["Delegation", "manager and workers"],
+      "quota": ["Windows", "provider accounts"],
+      "fleet": ["Cells", "cell definitions"],
+      "activity": ["Activity", "record, live"],
+      "runners": ["Runners", "active processes"],
+      "runs": ["Runs", "recent work"],
+      "run": ["Run", "selected run"],
+      "projects": ["Projects", "authorized folders"],
+      "settings": ["Settings", "runner configuration"]
+    },
+    "authored": "Discovered from /__widgets, labeled authored, and rendered through SandboxWidget.",
+    "clock_optional": true
+  },
+  "responsive": {
+    "mobile_breakpoint_px": 900,
+    "mobile_app": {"display": "block", "padding_px": 0},
+    "mobile_workspace": {"height": "100%", "border": 0, "radius_px": 0},
+    "mobile_sidebar": {"position": "fixed", "top_px": 8, "bottom_px": 8, "left_px": 8, "width": "min(280px, calc(100% - 32px))", "closed_transform": "translateX(calc(-100% - 16px))", "open_transform": "none"},
+    "mobile_canvas": {"columns": 1, "padding_px": 14, "bottom_border": true, "widget_span": "1 / -1", "clock_order": -1, "resize_visible": false},
+    "mobile_composer": "Normal-flow workspace child outside the bounded one-column canvas, preserving a separate composer region.",
+    "small_breakpoint_px": 560,
+    "small_breakpoint_hiding": ["saved-state", "profile", "live-canvas crumb", "widget header dim subtitles", "size badges"],
+    "small_breakpoint_textarea_px": 16
+  },
+  "clock": {
+    "optional_mount": true,
+    "source": "local browser time",
+    "format": "Intl.DateTimeFormat([], { hour: \"2-digit\", minute: \"2-digit\" })",
+    "refresh_ms": 15000,
+    "datetime": "ISO string",
+    "greeting": {"hour_lt_12": "Good morning", "hour_lt_18": "Good afternoon", "otherwise": "Good evening"},
+    "toggle": "Top-bar clock button and sidebar widget toggle mutate the mounted layout and persist it."
+  },
+  "interaction": {
+    "mounting": "Widget chips toggle mounted ids with aria-pressed and normalize the selected span.",
+    "movement": {"pointer": "Only the grip is draggable.", "drop": "Move dragged widget before the drop target rather than swap.", "keyboard": "Arrow keys move one mounted position and retain grip focus."},
+    "resize": {"pointer": "Pointer capture previews and commits a final grid-snapped span.", "keyboard": "Arrow keys nudge one column or row.", "preview": "Only the final span is persisted."},
+    "selection_anchor": "Focus, mouse enter, or pointer down on a widget stamps its title as composer context.",
+    "anchor_reset": "The about chip resets context to canvas.",
+    "sidebar": {"open_class": "sidebar-open", "collapsed_class": "sidebar-collapsed", "escape_closes": true, "backdrop": true},
+    "request": {"destination": "top manager", "pending": "Disable textarea and send control while asking.", "success": "Reset form and show accepted run id prefix.", "error": "Show error as alert."},
+    "focus": {"outline": "2px solid #4d72ff", "offset_px": 2},
+    "reduced_motion": "Disable smooth scrolling and clamp transitions and animations to .01ms with one animation iteration."
+  },
+  "persistence": {
+    "endpoint": "/v1/ui-state/canvas",
+    "format": "Opaque canvas layout blob",
+    "load": "Normalize version, mounted ids, duplicate ids, and missing spans before rendering; invalid or stale data falls back to default layout.",
+    "save": "Serialize layout edits through a promise queue so an older response cannot win a later edit.",
+    "runtime_boundary": "The runtime stores the blob but never parses frontend layout."
+  },
+  "bridge_security": {
+    "host": "The host owns the operator token and file-system boundary; widgets receive only a bridge.",
+    "read": "GET-only /v1 reads.",
+    "post_allowlist": ["/runs/{id}/{steer|cancel|rerun|rescope|observe|take-over|release|intervene}", "/quota/refresh", "/projects", "/projects/roots"],
+    "delete_allowlist": ["/projects/roots"],
+    "ask": {"endpoint": "/v1/cells/zero/instruct", "goal_anchor": "[from the {widget}, showing {subject}]\\n{text}", "project": "current project", "return": "accepted run_id"},
+    "state": {"endpoint": "/v1/ui-state/{key}", "authored_namespace": "widget.{id}.{key}", "authored_canvas_read": false},
+    "authored_widget_sandbox": {"iframe": "sandbox=allow-scripts", "allow_same_origin": false, "origin": "opaque", "host_dom": false, "cookies": false, "storage": false, "network": false, "channel": "host-issued MessagePort"},
+    "authored_widget_methods": ["read", "ask", "loadState", "saveState"],
+    "authored_widget_direct_run_controls": false,
+    "anchor_integrity": "Host stamps widget id, title, and optional cell subject; a widget cannot claim another widget's context.",
+    "cell_rule": "A widget displays a cell and never addresses an individual cell."
+  },
+  "fleet_semantics": {
+    "fleet_switcher": ["Local fleet", "layout saved to farseer"],
+    "widget_distinctions": {"cells": "Cell definitions and fleet identity.", "runners": "Active native processes.", "runs": "Lifecycle records and direct run controls.", "projects": "Authorized folders and project selection.", "windows": "Provider accounts and provider-stated quota windows."},
+    "routing": "Top manager is the sole AI request destination.",
+    "worker_relationship": "Delegated workers are indented under the manager that handed them the job.",
+    "conversation_voice": "Operator and manager messages use edge color and indentation instead of bubbles.",
+    "quota_truth": "Provider meters show provider-stated values; Farseer's own spend is a lower bound and is not presented as provider usage."
+  },
+  "scope_limits": [
+    "Production ui/ is authoritative and remains the shipped client.",
+    "The static prototype is an approval reference and does not replace production ui/.",
+    "Full chat composition and chat history as a separate surface are deferred.",
+    "The home remains one canvas with widgets rather than a second layout, mode switch, runtime, or plugin ABI.",
+    "This design record does not claim a new backend, runner implementation, or runtime replacement."
+  ]
+}

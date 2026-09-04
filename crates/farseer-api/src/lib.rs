@@ -49,6 +49,7 @@ mod mcp;
 mod notify;
 mod projects;
 pub mod security;
+mod work;
 
 pub use security::{RuntimeToken, runtime_file_path, write_runtime_file};
 
@@ -74,6 +75,8 @@ pub struct AppState {
     /// `WorkspaceStrategy::PlainDirectory`, a `git worktree` under here for
     /// `Worktree`.
     runs_dir: PathBuf,
+    /// Content-addressed transcript bytes, outside SQLite and the event log.
+    transcript_dir: PathBuf,
     /// The git repository a `Worktree`-strategy cell's runs are worktrees
     /// *of*. `13 harness build kit` deliberately keeps no git flag on `CellDefinition`, so this
     /// has to come from somewhere else - the runtime's own working directory
@@ -260,6 +263,8 @@ impl AppState {
         runs_dir: impl Into<PathBuf>,
         repo_root: impl Into<PathBuf>,
     ) -> Self {
+        let runs_dir = runs_dir.into();
+        let transcript_dir = runs_dir.parent().unwrap_or(&runs_dir).join("transcripts");
         Self {
             store: Mutex::new(store),
             cells: Mutex::new(BTreeMap::new()),
@@ -267,7 +272,8 @@ impl AppState {
             token,
             thresholds: LivenessThresholds::default(),
             polled_windows: Mutex::new(Vec::new()),
-            runs_dir: runs_dir.into(),
+            runs_dir,
+            transcript_dir,
             repo_root: repo_root.into(),
             runner_config: RunnerConfig::default(),
             runs: Mutex::new(HashMap::new()),
@@ -401,17 +407,59 @@ impl AppState {
     }
 }
 
+/// The provider's own noun for the identifier emitted by each adapter.
+///
+/// `40 work model and session explorer` preserves this kind so a Codex thread
+/// never silently becomes the same thing as an ACP session.
+fn session_identifier_kind(runner: &str) -> &'static str {
+    match runner {
+        "codex" | "codex-app-server" => "thread",
+        "agy" => "conversation",
+        _ => "session",
+    }
+}
+
 /// `farseer-manager` never holds a `Store` across a whole run - see that
 /// crate's own doc comment for why - so `AppState` locks and releases the
 /// store mutex for each individual write instead of handing over one
 /// long-lived borrow.
 impl RunSink for AppState {
     fn append(&self, event: &NewEvent) -> Result<Seq, StoreError> {
-        self.store().append(event)
+        let store = self.store();
+        let seq = store.append(event)?;
+        if event.kind.as_str() == farseer_core::EventKind::SESSION_STARTED
+            && let Some(identifier) = event
+                .payload
+                .get("session_id")
+                .and_then(serde_json::Value::as_str)
+        {
+            let runner = event
+                .payload
+                .get("runner")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default();
+            store.observe_harness_session(&farseer_core::HarnessSession {
+                run_id: event.run_id,
+                identifier_kind: session_identifier_kind(runner).to_string(),
+                identifier: identifier.to_string(),
+                log_pointer: event
+                    .payload
+                    .get("log_pointer")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_string),
+                observed_ts: event.ts,
+            })?;
+        }
+        Ok(seq)
     }
 
     fn upsert_run(&self, row: &RunRow) -> Result<(), StoreError> {
-        self.store().upsert_run(row)
+        let store = self.store();
+        store.upsert_run(row)?;
+        // Task-state projection happens after the run returns in `spawn_run`,
+        // where the runtime still knows whether this manager is the task driver
+        // or a delegated cell manager.
+        Ok(())
     }
 
     fn observe_window(
@@ -467,6 +515,22 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/v1/runs/{run_id}/steer", post(steer_run))
         .route("/v1/runs/{run_id}/rerun", post(rerun_run))
         .route("/v1/runs/{run_id}/rescope", post(rescope_run))
+        .route(
+            "/v1/conversations",
+            get(work::list_conversations).post(work::create_conversation),
+        )
+        .route("/v1/tasks", get(work::list_tasks))
+        .route("/v1/tasks/{task_id}", get(work::get_task))
+        .route(
+            "/v1/tasks/{task_id}/transition",
+            post(work::transition_task),
+        )
+        .route("/v1/work/graph", get(work::graph))
+        .route("/v1/work/search", get(work::search_transcripts))
+        .route(
+            "/v1/runs/{run_id}/transcripts",
+            get(work::list_transcripts).post(work::add_transcript),
+        )
         // `07 attach semantics`'s three control states. Attach is read-only by
         // default and `intervene` refuses without a takeover, because silent
         // injection makes a manager confidently wrong about its own worker.
@@ -595,6 +659,8 @@ enum ApiError {
     Corrupt(&'static str),
     #[error("writing the steer message failed: {0}")]
     Steer(String),
+    #[error("transcript storage failed: {0}")]
+    Transcript(String),
 }
 
 impl IntoResponse for ApiError {
@@ -604,15 +670,20 @@ impl IntoResponse for ApiError {
             Self::Unauthorized => StatusCode::UNAUTHORIZED,
             Self::NotFound(_) => StatusCode::NOT_FOUND,
             Self::BadRequest(_) | Self::Policy(_) => StatusCode::BAD_REQUEST,
+            Self::Store(StoreError::InvalidTaskTransition { .. }) => StatusCode::BAD_REQUEST,
+            Self::Store(StoreError::NoSuchConversation(_) | StoreError::NoSuchTask(_)) => {
+                StatusCode::NOT_FOUND
+            }
             // `24 ui state persistence`: over 1 MiB per key, the answer is `413`.
             Self::Store(StoreError::UiStateTooLarge { .. }) => StatusCode::PAYLOAD_TOO_LARGE,
             // `24 ui state persistence`: the key is capped too, and an overlong
             // one arrives in the URL, so `414` names what was actually too long.
             Self::Store(StoreError::UiStateKeyTooLong { .. }) => StatusCode::URI_TOO_LONG,
-            Self::Store(_) => StatusCode::INTERNAL_SERVER_ERROR,
-            Self::Workspace(_) => StatusCode::INTERNAL_SERVER_ERROR,
-            Self::Corrupt(_) => StatusCode::INTERNAL_SERVER_ERROR,
-            Self::Steer(_) => StatusCode::INTERNAL_SERVER_ERROR,
+            Self::Store(_)
+            | Self::Workspace(_)
+            | Self::Corrupt(_)
+            | Self::Steer(_)
+            | Self::Transcript(_) => StatusCode::INTERNAL_SERVER_ERROR,
         };
         (
             status,
@@ -676,15 +747,21 @@ async fn reload_cells(State(state): State<Arc<AppState>>) -> Json<ReloadReport> 
 pub struct InstructBody {
     pub goal: String,
     /// Which project to work in, per `39 what an installed farseer points at`.
-    /// Absent means the process's own working directory, which is farseer run
-    /// from inside a checkout.
     #[serde(default)]
     pub project: Option<String>,
+    /// Existing durable operator conversation, or absent to create one.
+    #[serde(default)]
+    pub conversation_id: Option<String>,
+    /// One candidate declared by this cell's manager definition.
+    #[serde(default)]
+    pub manager_runner: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
 pub struct InstructResponse {
     pub run_id: String,
+    pub task_id: String,
+    pub conversation_id: String,
 }
 
 /// Delegation for a runner that cannot speak MCP, on exactly the terms one that can gets.
@@ -747,7 +824,8 @@ async fn instruct_cell(
     UrlPath(cell_id): UrlPath<String>,
     Json(body): Json<InstructBody>,
 ) -> ApiResult<(StatusCode, Json<InstructResponse>)> {
-    if body.goal.trim().is_empty() {
+    let goal = body.goal.trim();
+    if goal.is_empty() {
         return Err(ApiError::BadRequest("goal must not be empty"));
     }
     let cell = state
@@ -755,36 +833,130 @@ async fn instruct_cell(
         .get(&CellId::new(cell_id))
         .cloned()
         .ok_or(ApiError::NotFound("cell"))?;
-    // `17 cell lifecycle`: a paused or archived cell starts no new run, and the
-    // check belongs where runs begin rather than where the operator is looking.
     lifecycle::ensure_accepts_work(&state, &cell.cell_id)?;
-    check_tool_level(&cell.manager.runner, cell.manager.tools)?;
+
+    let requested_conversation = body
+        .conversation_id
+        .as_deref()
+        .map(|id| {
+            id.parse::<farseer_core::ConversationId>()
+                .map_err(|_| ApiError::NotFound("conversation"))
+        })
+        .transpose()?;
+    let existing = requested_conversation
+        .map(|id| state.store().conversation(id))
+        .transpose()?
+        .flatten();
+    if requested_conversation.is_some() && existing.is_none() {
+        return Err(ApiError::NotFound("conversation"));
+    }
+
+    let runner = body
+        .manager_runner
+        .as_deref()
+        .or_else(|| {
+            existing
+                .as_ref()
+                .and_then(|conversation| conversation.manager_runner.as_deref())
+        })
+        .unwrap_or_else(|| cell.manager.runner())
+        .to_owned();
+    if !cell.manager.has_runner(&runner) {
+        return Err(ApiError::BadRequest(
+            "manager runner is not a candidate for this cell",
+        ));
+    }
+    check_tool_level(&runner, cell.manager.tools)?;
+
+    let project = match body.project.as_deref().or_else(|| {
+        existing
+            .as_ref()
+            .and_then(|conversation| conversation.project_path.as_deref())
+    }) {
+        Some(path) => Some(projects::resolve(&state, path)?),
+        None => None,
+    };
+    let project_path = project.as_deref().map(projects::display);
+    let now = now_ms();
+    let title = title_of(goal).unwrap_or_else(|| "Untitled task".into());
+    let conversation_id = if let Some(conversation) = existing {
+        conversation.conversation_id
+    } else {
+        let conversation = farseer_core::Conversation {
+            conversation_id: farseer_core::ConversationId::new(),
+            title: title.clone(),
+            project_path: project_path.clone(),
+            manager_runner: Some(runner.clone()),
+            created_ts: now,
+            updated_ts: now,
+            archived_ts: None,
+        };
+        state.store().create_conversation(&conversation)?;
+        conversation.conversation_id
+    };
+    let previous_run = state.store().latest_run_for_conversation(conversation_id)?;
+    state
+        .store()
+        .set_conversation_runner(conversation_id, &runner, now)?;
+
+    let task_id = TaskId::new();
+    state.store().create_task(&farseer_core::Task {
+        task_id,
+        conversation_id,
+        goal: goal.to_owned(),
+        title,
+        project_path,
+        state: farseer_core::TaskState::Inbox,
+        priority: 0,
+        created_ts: now,
+        updated_ts: now,
+    })?;
+    state.store().transition_task(
+        task_id,
+        farseer_core::TaskState::InProgress,
+        farseer_core::Actor::Operator,
+        "operator instruction accepted",
+        now,
+    )?;
+
     let contract = WorkerContract::seal(WorkerContractSpec {
         run_id: RunId::new(),
-        task_id: TaskId::new(),
+        task_id,
         cell_id: cell.cell_id.clone(),
-        goal: body.goal,
+        goal: goal.to_owned(),
         workspace: cell.workspace_strategy,
-        runner: cell.manager.runner.clone(),
+        runner,
         tool_grants: cell.tool_grants(),
         tool_level: cell.manager.tools,
         autonomy_ceiling: cell.policy.autonomy_ceiling,
-        // `23 prototype loose ends`: the task starts with the owning cell's
-        // pool; every delegated worker narrows and draws down from this root.
         budget: cell.budget,
         definition_of_done: String::new(),
     });
-    let project = body
-        .project
-        .as_deref()
-        .map(|path| projects::resolve(&state, path))
-        .transpose()?;
-    let run_id = spawn_run(&state, contract, RunRole::Manager, cell, project, None)?;
+    let run_id = match spawn_run(&state, contract, RunRole::Manager, cell, project, None) {
+        Ok(run_id) => run_id,
+        Err(error) => {
+            state.store().transition_task(
+                task_id,
+                farseer_core::TaskState::Cancelled,
+                farseer_core::Actor::System,
+                "manager run could not start",
+                now_ms(),
+            )?;
+            return Err(error);
+        }
+    };
+    if let Some(parent) = previous_run {
+        state
+            .store()
+            .record_run_parent(run_id, parent, "continuation")?;
+    }
 
     Ok((
         StatusCode::ACCEPTED,
         Json(InstructResponse {
             run_id: run_id.to_string(),
+            task_id: task_id.to_string(),
+            conversation_id: conversation_id.to_string(),
         }),
     ))
 }
@@ -1308,6 +1480,7 @@ pub(crate) fn spawn_run(
             .unwrap_or_else(|e| e.into_inner())
             .insert(run_id);
     }
+    let drives_task = matches!(role, RunRole::Manager) && caller_children.is_none();
     let background_state = Arc::clone(state);
     tokio::task::spawn_blocking(move || {
         let _config_guard = SecretFileGuard(config_path);
@@ -1320,6 +1493,9 @@ pub(crate) fn spawn_run(
             Some(cancel_requested.as_ref()),
         );
         observe_window(&background_state, &contract, &result);
+        if drives_task {
+            finish_task_driver_run(&background_state, contract.task_id, run_id);
+        }
         background_state.managers().remove(&run_id);
         if let Some(children) = &caller_children {
             children
@@ -1342,6 +1518,47 @@ pub(crate) fn spawn_run(
     });
 
     Ok(run_id)
+}
+
+/// Project a task-driving manager's terminal result onto the durable board.
+///
+/// A delegated cell also runs a manager but owns no task transition in its
+/// caller's board, which is why `spawn_run` decides this before the manager
+/// context is removed.
+fn finish_task_driver_run(state: &AppState, task_id: TaskId, run_id: RunId) {
+    let store = state.store();
+    let Ok(Some(row)) = store.run(run_id) else {
+        return;
+    };
+    let Ok(Some(task)) = store.task(task_id) else {
+        return;
+    };
+    if task.state != farseer_core::TaskState::InProgress {
+        return;
+    }
+    let (to, reason) = match row.outcome.as_deref() {
+        Some("ok") => (
+            farseer_core::TaskState::Review,
+            "task-driving manager run finished",
+        ),
+        Some("cancelled") => (
+            farseer_core::TaskState::Cancelled,
+            "task-driving manager run was cancelled",
+        ),
+        _ => (
+            farseer_core::TaskState::Blocked,
+            "task-driving manager run did not complete",
+        ),
+    };
+    if let Err(error) = store.transition_task(
+        task_id,
+        to,
+        farseer_core::Actor::System,
+        reason,
+        row.finished_ts.unwrap_or(row.started_ts),
+    ) {
+        eprintln!("task {task_id} did not follow terminal run {run_id}: {error}");
+    }
 }
 
 /// Record a window transition the run happened to observe, per `27 quota accounting`.
@@ -1686,12 +1903,31 @@ async fn respawn(
     let run_id = original.spec.run_id;
     let cell_id = original.spec.cell_id.clone();
     let goal = original.spec.goal.clone();
+    let task_id = original.spec.task_id;
+    let drives_task = matches!(original.role, RunRole::Manager);
+    if drives_task {
+        let store = state.store();
+        let task = store.task(task_id)?.ok_or(ApiError::NotFound("task"))?;
+        if task.state != farseer_core::TaskState::InProgress {
+            store.transition_task(
+                task_id,
+                farseer_core::TaskState::InProgress,
+                farseer_core::Actor::Operator,
+                if changed_goal {
+                    "operator rescoped the task"
+                } else {
+                    "operator reran the task"
+                },
+                now_ms(),
+            )?;
+        }
+    }
     // The edge stays: `11 analytics questions`'s rework-depth query walks it,
     // and a chain of re-runs has to read like a chain of re-scopes to that
     // query. What it cannot do is tell the manager, because nothing reads the
     // edge on a wake - so the event is appended beside it rather than instead.
     state.store().record_rescope(run_id, parent_run_id)?;
-    let run_id = spawn_run(
+    let run_id = match spawn_run(
         state,
         WorkerContract::seal(original.spec),
         original.role,
@@ -1700,11 +1936,28 @@ async fn respawn(
         // An operator re-run belongs to the operator, not to whatever manager
         // owned the run it repeats.
         None,
-    )?;
+    ) {
+        Ok(run_id) => run_id,
+        Err(error) => {
+            if drives_task {
+                let _ = state.store().transition_task(
+                    task_id,
+                    farseer_core::TaskState::Blocked,
+                    farseer_core::Actor::System,
+                    "task-driving manager could not start",
+                    now_ms(),
+                );
+            }
+            return Err(error);
+        }
+    };
     // Appended to the parent, per `16 local api surface` section 8: the manager
     // whose plan was overridden is the one watching that run, and it decides
     // for itself what to do about it - the same shape as `07`'s intervention.
     let verb = if changed_goal { "rescope" } else { "rerun" };
+    state
+        .store()
+        .record_run_parent(run_id, parent_run_id, verb)?;
     if let Err(error) = state.store().append(&farseer_core::NewEvent::new(
         cell_id,
         parent_run_id,
@@ -2807,7 +3060,7 @@ grants_shell = true
             cell_id: cell.cell_id.clone(),
             goal: "manage the task".into(),
             workspace: cell.workspace_strategy,
-            runner: cell.manager.runner.clone(),
+            runner: cell.manager.runner().to_string(),
             tool_grants: cell.tool_grants(),
             tool_level: Default::default(),
             autonomy_ceiling: cell.policy.autonomy_ceiling,
@@ -3042,7 +3295,7 @@ grants_shell = true
 
         let (status, cell) = h.get("/v1/cells/zero").await;
         assert_eq!(status, StatusCode::OK);
-        assert_eq!(cell["manager"]["runner"], "claude-code");
+        assert_eq!(cell["manager"]["runners"], json!(["claude-code"]));
 
         assert_eq!(h.get("/v1/cells/missing").await.0, StatusCode::NOT_FOUND);
 
@@ -3606,7 +3859,7 @@ grants_shell = true
             cell_id: cell.cell_id.clone(),
             goal: "the callee's own goal".into(),
             workspace: WorkspaceStrategy::PlainDirectory,
-            runner: cell.manager.runner.clone(),
+            runner: cell.manager.runner().to_string(),
             tool_grants: cell.tool_grants(),
             tool_level: Default::default(),
             autonomy_ceiling: cell.policy.autonomy_ceiling,
@@ -5842,5 +6095,90 @@ runner = "{runner}"
         );
         // And it is not handed credentials for a face it cannot call.
         assert!(!prompt.contains("manager_token"), "{prompt}");
+    }
+    #[tokio::test]
+    async fn work_endpoints_preserve_task_transition_provenance() {
+        let h = harness();
+        let (status, conversation) = h
+            .post("/v1/conversations", json!({"title": "Ship durable work"}))
+            .await;
+        assert_eq!(status, StatusCode::CREATED);
+        let conversation_id = conversation["conversation_id"]
+            .as_str()
+            .unwrap()
+            .parse::<farseer_core::ConversationId>()
+            .unwrap();
+        let task_id = TaskId::new();
+        let now = now_ms();
+        h.state
+            .store()
+            .create_task(&farseer_core::Task {
+                task_id,
+                conversation_id,
+                goal: "Finish the work model".into(),
+                title: "Finish the work model".into(),
+                project_path: None,
+                state: farseer_core::TaskState::Inbox,
+                priority: 0,
+                created_ts: now,
+                updated_ts: now,
+            })
+            .unwrap();
+
+        let (status, transition) = h
+            .post(
+                &format!("/v1/tasks/{task_id}/transition"),
+                json!({"state": "in_progress", "reason": "operator started it"}),
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(transition["actor"], "operator");
+        assert_eq!(transition["reason"], "operator started it");
+
+        let (status, detail) = h.get(&format!("/v1/tasks/{task_id}")).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(detail["task"]["state"], "in_progress");
+        assert_eq!(detail["transitions"].as_array().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn work_endpoints_refuse_an_invalid_task_transition() {
+        let h = harness();
+        let now = now_ms();
+        let conversation = farseer_core::Conversation {
+            conversation_id: farseer_core::ConversationId::new(),
+            title: "Done work".into(),
+            project_path: None,
+            manager_runner: Some("claude-code".into()),
+            created_ts: now,
+            updated_ts: now,
+            archived_ts: None,
+        };
+        let task_id = TaskId::new();
+        {
+            let store = h.state.store();
+            store.create_conversation(&conversation).unwrap();
+            store
+                .create_task(&farseer_core::Task {
+                    task_id,
+                    conversation_id: conversation.conversation_id,
+                    goal: "Stay done".into(),
+                    title: "Stay done".into(),
+                    project_path: None,
+                    state: farseer_core::TaskState::Done,
+                    priority: 0,
+                    created_ts: now,
+                    updated_ts: now,
+                })
+                .unwrap();
+        }
+
+        let (status, _) = h
+            .post(
+                &format!("/v1/tasks/{task_id}/transition"),
+                json!({"state": "in_progress", "reason": "try to reopen"}),
+            )
+            .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
     }
 }

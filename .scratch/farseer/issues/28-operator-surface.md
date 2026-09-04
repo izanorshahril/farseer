@@ -501,3 +501,15 @@ Drag starts on the grip and drops on the whole widget - a 12px drop target is on
 ### Spend stays per window
 
 Farseer's spend is counted from when it **first saw that window**, and two windows on one account began at different moments. Adding them would produce a total nothing measured, so each tile carries its own.
+
+## Amended by 40
+
+`40 Work model and session explorer` fixes the fresh-install surface and shared navigation.
+
+The default canvas contains four first-party operational widgets: **Conversation**, **Work**, **Fleet**, and **Capacity**.
+Clock remains optional and Settings moves to shell chrome.
+The Work widget owns Board, Conversations, Graph, task detail, and completed-work faces.
+The Graph face expands to the full canvas when needed and visually separates observed topology from derived similarity.
+Conversation, project path, task, and run selections are shared subject context across first-party widgets.
+Every request still goes to the top manager while direct run verbs still target the selected run.
+Agent-authored widgets remain sandboxed presentation and never own work truth, runtime control, transcript custody, resource sampling, or semantic indexing.

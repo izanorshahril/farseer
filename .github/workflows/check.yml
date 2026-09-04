@@ -87,6 +87,12 @@ jobs:
         working-directory: ui
         run: bun install --frozen-lockfile
 
+      # `24 ui state persistence` leaves layout validation to the canvas, so
+      # its malformed-blob and snapping checks run wherever the canvas builds.
+      - name: Test the canvas
+        working-directory: ui
+        run: bun run test
+
       # `bun run build` is `tsc --noEmit && vite build`, so this type-checks and
       # compiles in one step. The shell reads `ui/dist` at runtime rather than
       # embedding it, so this is genuinely independent of the Rust job.

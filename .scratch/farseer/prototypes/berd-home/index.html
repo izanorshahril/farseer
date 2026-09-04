@@ -1,0 +1,161 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <title>Farseer Home - Berd-inspired prototype</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body><!--
+  THESIS: Farseer's fleet becomes a calm personal workbench, refusing both the metric dashboard and the terminal wall.
+  OWN-WORLD: Berd's pale dotted canvas, warm-white panels, ink-black pill controls, 18px object corners, quiet hairlines, workhorse sans type, and state color used only as truth.
+  STORY: Reorient in seconds, see what needs attention, choose a project or live run, then resume through the top manager.
+  FIRST VIEWPORT: A persistent 248px sidebar and compact top bar frame a free canvas; an optional clock widget anchors the center, four unequal fleet pins orbit it, and the top-manager composer floats at bottom center.
+  FORM: Close Berd home homage, user-pinned canon, seed b452fefe; the canvas interaction is translated from single-agent pins to fleet objects.
+  FINISH: unreviewed and undocumented is unfinished; this build ends with the finish review, the verdict, DESIGN.md, and every shipping raster carrying its provenance
+  -->
+  <div class="shell" id="shell">
+    <aside class="sidebar" id="sidebar" aria-label="Primary navigation">
+      <div class="brand-row">
+        <a class="brand" href="#home" aria-label="Farseer home">
+          <svg viewBox="0 0 28 28" aria-hidden="true"><path d="M4 14c2.8-5 6.1-7.5 10-7.5S21.2 9 24 14c-2.8 5-6.1 7.5-10 7.5S6.8 19 4 14Z"/><circle cx="14" cy="14" r="3.2"/></svg>
+          <span>farseer</span>
+        </a>
+        <button class="icon-button collapse" id="collapseSidebar" aria-label="Collapse sidebar" title="Collapse sidebar">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m14.5 6-6 6 6 6"/></svg>
+        </button>
+      </div>
+
+      <button class="fleet-switcher" type="button" aria-haspopup="listbox">
+        <span class="fleet-mark" aria-hidden="true">F</span>
+        <span><b>Local fleet</b><small>3 cells</small></span>
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m8 10 4 4 4-4"/></svg>
+      </button>
+
+      <nav class="nav-list" aria-label="Workspace">
+        <button class="nav-item active" data-view="Home" aria-current="page">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m4 11 8-7 8 7v9h-6v-6h-4v6H4Z"/></svg><span>Home</span>
+        </button>
+        <button class="nav-item" data-view="Projects">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3.5 6.5h6l2 2h9v10h-17Z"/></svg><span>Projects</span><span class="nav-count">3</span>
+        </button>
+        <button class="nav-item" data-view="Runs">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 4.5h14v15H5Z"/><path d="m10 9 5 3-5 3Z"/></svg><span>Runs</span><span class="nav-count attention">1</span>
+        </button>
+        <button class="nav-item" data-view="Activity">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 15h3l2-7 4 11 2-7h5"/></svg><span>Activity</span>
+        </button>
+        <button class="nav-item" data-view="Cells">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3.5" y="3.5" width="7" height="7" rx="2"/><rect x="13.5" y="3.5" width="7" height="7" rx="2"/><rect x="3.5" y="13.5" width="7" height="7" rx="2"/><rect x="13.5" y="13.5" width="7" height="7" rx="2"/></svg><span>Cells</span>
+        </button>
+        <button class="nav-item" data-view="Memory">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 4h12v16H6Z"/><path d="M9 8h6M9 12h6M9 16h4"/></svg><span>Memory</span>
+        </button>
+      </nav>
+
+      <div class="sidebar-section">
+        <div class="section-label"><span>Projects</span><button class="mini-button" aria-label="Add project"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg></button></div>
+        <button class="project-link selected" data-project="farseer"><span class="project-dot blue"></span><span>farseer</span><small>2 live</small></button>
+        <button class="project-link" data-project="berd study"><span class="project-dot violet"></span><span>berd study</span><small>quiet</small></button>
+        <button class="project-link" data-project="orca"><span class="project-dot amber"></span><span>orca</span><small>quiet</small></button>
+      </div>
+
+      <div class="sidebar-foot">
+        <button class="quota-line" data-view="Windows">
+          <span class="status-orb ok" aria-hidden="true"></span>
+          <span><b>Windows healthy</b><small>Claude resets in 2h 14m</small></span>
+        </button>
+        <button class="nav-item" data-view="Settings">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M12 3v2M12 19v2M3 12h2M19 12h2M5.6 5.6 7 7M17 17l1.4 1.4M18.4 5.6 17 7M7 17l-1.4 1.4"/></svg><span>Settings</span><kbd>Ctrl ,</kbd>
+        </button>
+      </div>
+    </aside>
+
+    <main class="workspace">
+      <header class="topbar">
+        <button class="icon-button menu" id="openSidebar" aria-label="Open sidebar">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M4 12h16M4 17h16"/></svg>
+        </button>
+        <div class="crumb"><span id="viewName">Home</span><small>Preview data</small></div>
+        <div class="top-actions">
+          <span class="fleet-state"><span class="status-orb ok"></span>3 cells</span>
+          <button class="icon-button" id="searchButton" aria-label="Search" title="Search">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="10.5" cy="10.5" r="6.5"/><path d="m15.5 15.5 5 5"/></svg>
+          </button>
+          <button class="icon-button" id="clockToggle" aria-pressed="true" aria-label="Hide clock widget" title="Hide clock widget">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="7.5"/><path d="M12 7.5V12l3 2"/></svg>
+          </button>
+          <button class="icon-button" id="themeButton" aria-label="Toggle theme" title="Toggle theme">
+            <svg class="sun" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3.5"/><path d="M12 2v2M12 20v2M2 12h2M20 12h2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M19.1 4.9l-1.4 1.4M6.3 17.7l-1.4 1.4"/></svg>
+          </button>
+          <button class="profile" aria-label="Operator profile"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="8.5" r="3.5"/><path d="M5.5 20c.8-4 3-6 6.5-6s5.7 2 6.5 6"/></svg></button>
+        </div>
+      </header>
+
+      <section class="home-canvas" id="canvas" aria-label="Home canvas">
+        <article class="pin pin-clock" id="clockWidget" data-pin style="--x:38%;--y:33%;--w:320px" tabindex="0" aria-labelledby="clockWidgetTitle">
+          <header class="clock-head"><div><h2 id="clockWidgetTitle">Local time</h2><p>Home</p></div><button class="pin-menu" id="hideClock" aria-label="Hide clock widget"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 4l16 16M10.6 10.7a2 2 0 0 0 2.7 2.7M9.9 5.4A10.8 10.8 0 0 1 12 5.2c4 0 7.2 2.3 9 6.8a14.5 14.5 0 0 1-2.2 3.8M6.2 6.2A14.3 14.3 0 0 0 3 12c1.8 4.5 5 6.8 9 6.8 1 0 1.9-.1 2.7-.4"/></svg></button></header>
+          <div class="clock-face"><time id="clock" datetime="">10:42</time><p id="greeting">Good morning</p></div>
+        </article>
+
+        <article class="pin pin-attention" data-pin style="--x:7%;--y:10%;--w:286px" tabindex="0" aria-labelledby="attentionTitle">
+          <header><span class="pin-icon coral"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 4 21 20H3Z"/><path d="M12 9v5M12 17.5v.5"/></svg></span><div><h2 id="attentionTitle">Needs you</h2><p>One run is waiting</p></div><button class="pin-menu" aria-label="Needs you options"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="5" cy="12" r="1"/><circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/></svg></button></header>
+          <button class="attention-row" data-action="Open stalled run"><span class="status-orb warn"></span><span><b>Review workspace choice</b><small>top manager · 8m</small></span><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m9 6 6 6-6 6"/></svg></button>
+        </article>
+
+        <article class="pin pin-run" data-pin style="--x:68%;--y:13%;--w:320px" tabindex="0" aria-labelledby="runTitle">
+          <header><span class="pin-icon ink"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 4.5h14v15H5Z"/><path d="m10 9 5 3-5 3Z"/></svg></span><div><h2 id="runTitle">Active run</h2><p>farseer · top manager</p></div><span class="state-badge live"><i></i>running</span></header>
+          <div class="run-copy"><b>Build a second operator surface</b><p>Reading Berd's home canvas and preserving Farseer's fleet model.</p></div>
+          <footer><span>pi · 6m 24s</span><button data-action="Open active run">Open run</button></footer>
+        </article>
+
+        <article class="pin pin-projects" data-pin style="--x:12%;--y:58%;--w:310px" tabindex="0" aria-labelledby="projectsTitle">
+          <header><span class="pin-icon blue"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3.5 6.5h6l2 2h9v10h-17Z"/></svg></span><div><h2 id="projectsTitle">Projects</h2><p>Authorized roots</p></div><button class="pin-menu" aria-label="Project options"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="5" cy="12" r="1"/><circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/></svg></button></header>
+          <div class="project-stack">
+            <button data-project="farseer"><span class="project-dot blue"></span><span><b>farseer</b><small>D:\Dev\farseer</small></span><span class="state-badge">2 live</span></button>
+            <button data-project="berd study"><span class="project-dot violet"></span><span><b>berd study</b><small>D:\Dev\berd</small></span><span class="state-badge">quiet</span></button>
+          </div>
+        </article>
+
+        <article class="pin pin-cells" data-pin style="--x:70%;--y:60%;--w:294px" tabindex="0" aria-labelledby="cellsTitle">
+          <header><span class="pin-icon mint"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3.5" y="3.5" width="7" height="7" rx="2"/><rect x="13.5" y="3.5" width="7" height="7" rx="2"/><rect x="3.5" y="13.5" width="7" height="7" rx="2"/><rect x="13.5" y="13.5" width="7" height="7" rx="2"/></svg></span><div><h2 id="cellsTitle">Cells</h2><p>Fleet at a glance</p></div><button class="pin-menu" aria-label="Cell options"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="5" cy="12" r="1"/><circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/></svg></button></header>
+          <ul class="cell-list">
+            <li><span class="avatar black">0</span><span><b>zero</b><small>pi · manager</small></span><span class="status-orb ok" title="ready"></span></li>
+            <li><span class="avatar soft">S</span><span><b>social</b><small>goose · manager</small></span><span class="status-orb ok" title="ready"></span></li>
+            <li><span class="avatar soft">R</span><span><b>research</b><small>codex · manager</small></span><span class="status-orb idle" title="idle"></span></li>
+          </ul>
+        </article>
+
+        <div class="canvas-controls" aria-label="Canvas controls">
+          <button class="icon-button" id="recenterButton" aria-label="Recenter canvas" title="Recenter canvas"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="7"/><circle cx="12" cy="12" r="2"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3"/></svg></button>
+          <button class="icon-button" id="arrangeButton" aria-pressed="true" aria-label="Toggle arrangement" title="Toggle arrangement"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M4 12h16M4 17h16"/><circle cx="9" cy="7" r="2"/><circle cx="15" cy="12" r="2"/><circle cx="7" cy="17" r="2"/></svg></button>
+        </div>
+
+        <form class="home-composer" id="composer">
+          <div class="composer-context"><button type="button" class="context-chip" id="projectContext"><span class="project-dot blue"></span><span id="projectContextName">farseer</span><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m8 10 4 4 4-4"/></svg></button><span class="route-chip">to top manager</span></div>
+          <label for="prompt" class="sr-only">Ask the top manager</label>
+          <textarea id="prompt" rows="1" placeholder="What should the fleet do next?"></textarea>
+          <div class="composer-actions">
+            <button type="button" class="icon-button" aria-label="Attach context"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m8.5 12.5 5.8-5.8a3 3 0 0 1 4.2 4.2l-7.2 7.2a5 5 0 0 1-7.1-7.1l7-7"/></svg></button>
+            <span>Prototype only</span>
+            <button class="send-button" aria-label="Send to top manager"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m5 12 14-7-4 14-3-6Z"/></svg></button>
+          </div>
+        </form>
+      </section>
+    </main>
+  </div>
+
+  <div class="command-palette" id="commandPalette" hidden>
+    <button class="palette-backdrop" data-close aria-label="Close search"></button>
+    <div class="palette-panel" role="dialog" aria-modal="true" aria-labelledby="searchTitle">
+      <label id="searchTitle" for="searchInput">Search Farseer</label>
+      <input id="searchInput" type="search" placeholder="Projects, runs, cells, memory...">
+      <div class="palette-results"><button data-action="Open farseer project"><span>Project</span><b>farseer</b><kbd>Enter</kbd></button><button data-action="Open active run"><span>Run</span><b>Build a second operator surface</b></button><button data-action="Open zero cell"><span>Cell</span><b>zero</b></button></div>
+    </div>
+  </div>
+
+  <div class="toast" id="toast" role="status" aria-live="polite"></div>
+  <script src="app.js"></script>
+</body>
+</html>

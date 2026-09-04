@@ -94,7 +94,14 @@ uuid_id!(
     RunId,
     "One worker contract's execution, per `07 attach semantics`."
 );
-uuid_id!(TaskId, "Groups runs, per `11 analytics questions`.");
+uuid_id!(
+    ConversationId,
+    "One durable operator-visible thread that groups tasks, per `40 work model and session explorer`."
+);
+uuid_id!(
+    TaskId,
+    "The operator's whole request, grouped by one conversation, per `40 work model and session explorer`."
+);
 uuid_id!(
     CallId,
     "One cell call, per `06 cell transport`. Returned to the caller immediately, because a cell call is fire-and-forget and its result arrives on the event stream."

@@ -21,9 +21,12 @@ use crate::run::WorkspaceStrategy;
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Manager {
-    /// A name from the runner inventory. `10 runner inventory` made the inventory a menu an
-    /// author picks from, not a survey.
-    pub runner: String,
+    /// Ordered candidates from the runner inventory.
+    ///
+    /// `40 work model and session explorer` pins one candidate per conversation.
+    /// A one-item list remains the ordinary case from `26 routing policy`.
+    #[serde(alias = "runner", deserialize_with = "one_or_many")]
+    pub runners: Vec<String>,
     #[serde(default)]
     pub prompt: String,
     /// Skills this manager runs with, by directory name under the cell file's
@@ -46,6 +49,17 @@ pub struct Manager {
     /// rather than ignoring the field.
     #[serde(default)]
     pub tools: ToolLevel,
+}
+
+impl Manager {
+    /// The default candidate for a new conversation.
+    pub fn runner(&self) -> &str {
+        self.runners.first().map(String::as_str).unwrap_or_default()
+    }
+
+    pub fn has_runner(&self, runner: &str) -> bool {
+        self.runners.iter().any(|candidate| candidate == runner)
+    }
 }
 
 /// Accept either `runner = "pi"` or `runners = ["pi", "omp"]`.
@@ -195,7 +209,9 @@ pub enum ValidationError {
     EmptyCellId,
     #[error("name is empty; `21 a2a conformance` generates the A2A agent card from it")]
     EmptyName,
-    #[error("manager.runner is empty; `01 cell primitive` makes the manager mandatory")]
+    #[error(
+        "manager.runners must contain at least one non-empty runner; `01 cell primitive` makes the manager mandatory"
+    )]
     EmptyManagerRunner,
     #[error("roster entry `{0}` is declared more than once")]
     DuplicateRosterName(String),
@@ -294,7 +310,13 @@ impl CellDefinition {
         if self.name.trim().is_empty() {
             report.errors.push(ValidationError::EmptyName);
         }
-        if self.manager.runner.trim().is_empty() {
+        if self.manager.runners.is_empty()
+            || self
+                .manager
+                .runners
+                .iter()
+                .any(|runner| runner.trim().is_empty())
+        {
             report.errors.push(ValidationError::EmptyManagerRunner);
         }
 
@@ -451,7 +473,7 @@ also_read = ["social"]
     fn a_hand_written_definition_loads_and_keeps_its_shape() {
         let (cell, _) = CellDefinition::load(CODING).unwrap();
         assert_eq!(cell.cell_id.as_str(), "zero");
-        assert_eq!(cell.manager.runner, "claude-code");
+        assert_eq!(cell.manager.runners, ["claude-code"]);
         assert_eq!(cell.roster.len(), 3);
         assert_eq!(cell.budget.usd_micros, Some(5_000_000));
         assert!(matches!(
@@ -466,6 +488,14 @@ also_read = ["social"]
         assert_eq!(cell.tool_grants(), ["shell"]);
         assert_eq!(cell.policy.worker_cap, 4);
         assert!(cell.record_scope.also_read.contains(&CellId::new("social")));
+    }
+
+    #[test]
+    fn a_manager_accepts_ordered_runner_candidates() {
+        let text = CODING.replace("runner = \"claude-code\"", "runners = [\"pi\", \"omp\"]");
+        let (cell, _) = CellDefinition::load(&text).unwrap();
+        assert_eq!(cell.manager.runners, ["pi", "omp"]);
+        assert_eq!(cell.manager.runner(), "pi");
     }
 
     #[test]

@@ -1,123 +1,703 @@
-/*
-  One dark operator console. Dense on purpose: a canvas that fits three widgets
-  on a screen is a canvas the operator has to scroll to read, and this surface is
-  meant to be glanceable.
-*/
 :root {
-  --bg: #0b0d10;
-  --panel: #12161b;
-  --panel-2: #171c23;
-  --line: #232b35;
-  --ink: #e6edf3;
-  --dim: #8b97a6;
-  /* 4.51:1 on the lightest panel, so the small text this is used for -
-     timestamps, run ids, durations, caveats - clears WCAG AA. It was #5c6673,
-     which measured 3.12:1: legible on a good monitor in a lit room, and the
-     first thing to disappear at 3am on a laptop, which is exactly when this
-     console is read and exactly the information it hides. */
-  --faint: #7a8491;
-  --accent: #58a6ff;
-  --ok: #3fb950;
-  --warn: #d29922;
-  --bad: #f85149;
+  --bg: #f4f4f2;
+  --canvas: #f8f8f6;
+  --panel: #ffffff;
+  --panel-2: #f5f5f3;
+  --line: #e5e5e1;
+  --line-strong: #d4d4cf;
+  --ink: #252525;
+  --dim: #666662;
+  --faint: #73736e;
+  --accent: #4d72ff;
+  --accent-soft: #e9edff;
+  --ok: #23805f;
+  --warn: #98601b;
+  --bad: #c14539;
   --mono: ui-monospace, "Cascadia Mono", Consolas, monospace;
-  color-scheme: dark;
+  --shadow: 0 12px 36px rgba(29, 29, 27, 0.07), 0 2px 5px rgba(29, 29, 27, 0.04);
+  color-scheme: light;
 }
 
 * {
   box-sizing: border-box;
 }
 
-/*
-  Keyboard focus, which this sheet did not have at all.
-
-  Every control here is reachable by tab and none of them said so: measured
-  across the first twelve tabbable elements, focus changed no computed style.
-  A dense console is exactly where keyboard use pays off, and an invisible
-  focus ring makes tabbing a guessing game.
-
-  `:focus-visible` rather than `:focus`, so a mouse click does not leave a ring
-  behind on a button that has already done its job.
-*/
-:focus-visible {
-  outline: 2px solid var(--accent);
-  outline-offset: 2px;
-  border-radius: 4px;
+html,
+body,
+#root {
+  height: 100%;
 }
 
 body {
   margin: 0;
+  overflow: hidden;
   background: var(--bg);
   color: var(--ink);
-  font: 13px/1.5 system-ui, "Segoe UI", sans-serif;
+  font: 13px/1.5 Inter, "Segoe UI Variable Text", "Segoe UI", sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+
+button,
+input,
+textarea,
+select {
+  color: inherit;
+  font: inherit;
+}
+
+button {
+  border: 0;
+}
+
+::selection {
+  background: var(--accent);
+  color: #ffffff;
+}
+
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+::-webkit-scrollbar-thumb {
+  border: 3px solid transparent;
+  border-radius: 99px;
+  background: var(--line-strong);
+  background-clip: content-box;
 }
 
 .app {
-  display: flex;
-  flex-direction: column;
-  min-height: 100vh;
+  display: grid;
+  grid-template-columns: 248px minmax(0, 1fr);
+  gap: 8px;
+  height: 100%;
+  padding: 8px;
+  transition: grid-template-columns 0.38s cubic-bezier(0.16, 1, 0.3, 1);
 }
 
-header,
-footer {
+.sidebar {
+  z-index: 20;
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  overflow: hidden;
+  padding: 12px 10px;
+  border: 1px solid var(--line);
+  border-radius: 18px;
+  background: var(--panel);
+}
+
+.brand-row {
+  display: flex;
+  height: 40px;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 5px 0 9px;
+}
+
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  font-size: 18px;
+  font-weight: 680;
+  letter-spacing: -0.035em;
+}
+
+.brand svg {
+  width: 22px;
+  height: 22px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.7;
+}
+
+.icon-button {
+  display: inline-grid;
+  width: 34px;
+  height: 34px;
+  flex: none;
+  place-items: center;
+  padding: 0;
+  border-radius: 10px;
+  background: transparent;
+  color: var(--dim);
+  cursor: pointer;
+  transition: color 0.18s, background 0.18s, transform 0.18s;
+}
+
+.icon-button:hover {
+  background: var(--panel-2);
+  color: var(--ink);
+}
+
+.icon-button:active {
+  transform: scale(0.94);
+}
+
+.icon-button svg,
+.profile svg {
+  width: 18px;
+  height: 18px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.7;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.fleet-switcher {
+  display: grid;
+  grid-template-columns: 32px minmax(0, 1fr);
+  gap: 9px;
+  align-items: center;
+  min-height: 52px;
+  margin: 10px 0 12px;
+  padding: 6px 8px;
+  border: 1px solid var(--line);
+  border-radius: 13px;
+  background: var(--panel-2);
+}
+
+.fleet-mark {
+  display: grid;
+  width: 32px;
+  height: 32px;
+  place-items: center;
+  border-radius: 9px;
+  background: var(--ink);
+  color: var(--panel);
+  font-weight: 700;
+}
+
+.fleet-copy,
+.sidebar-foot-copy,
+.widget-toggle-copy {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+}
+
+.fleet-copy b,
+.sidebar-foot-copy b {
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.fleet-copy small,
+.sidebar-foot-copy small,
+.widget-toggle-copy small {
+  overflow: hidden;
+  color: var(--dim);
+  font-size: 10px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.widget-nav {
+  min-height: 0;
+  overflow: auto;
+}
+
+.group-label {
+  margin: 14px 7px 7px;
+  color: var(--faint);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+}
+
+.authored-label {
+  padding-top: 10px;
+  border-top: 1px solid var(--line);
+}
+
+.widget-toggle {
+  display: grid;
+  width: 100%;
+  min-height: 42px;
+  grid-template-columns: 28px minmax(0, 1fr) 8px;
+  gap: 9px;
+  align-items: center;
+  padding: 4px 7px;
+  border-radius: 9px;
+  background: transparent;
+  color: var(--dim);
+  cursor: pointer;
+  text-align: left;
+}
+
+.widget-toggle:hover,
+.widget-toggle.active {
+  background: var(--panel-2);
+  color: var(--ink);
+}
+
+.widget-toggle-copy b {
+  font-size: 12px;
+  font-weight: 620;
+}
+
+.widget-avatar {
+  display: grid;
+  width: 28px;
+  height: 28px;
+  place-items: center;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  background: var(--panel);
+  color: var(--dim);
+  font-size: 10px;
+  font-weight: 700;
+}
+
+.widget-avatar-clock {
+  border-color: transparent;
+  background: var(--ink);
+  color: var(--panel);
+}
+
+.widget-avatar-runs,
+.widget-avatar-run {
+  border-color: transparent;
+  background: #ffebe7;
+  color: var(--bad);
+}
+
+.widget-avatar-fleet,
+.widget-avatar-runners {
+  border-color: transparent;
+  background: #e2f2ed;
+  color: var(--ok);
+}
+
+.widget-avatar-projects,
+.widget-avatar-activity {
+  border-color: transparent;
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+.mount-state,
+.status-orb {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--line-strong);
+}
+
+.mount-state.on,
+.status-orb {
+  background: var(--ok);
+  box-shadow: 0 0 0 3px rgba(35, 128, 95, 0.12);
+}
+
+.unit-controls {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 6px;
+  margin: 10px 7px 0;
+  padding: 8px;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+}
+
+.unit-controls legend {
+  padding: 0 4px;
+  color: var(--faint);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.unit-controls label {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  gap: 4px;
+  align-items: center;
+  color: var(--dim);
+  font-size: 10px;
+}
+
+.unit-controls input {
+  width: 100%;
+  min-width: 0;
+  padding: 4px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--panel);
+  color: var(--ink);
+  font: inherit;
+  text-align: right;
+}
+
+.sidebar-foot {
+  display: grid;
+  grid-template-columns: 8px minmax(0, 1fr);
+  gap: 10px;
+  align-items: center;
+  margin-top: auto;
+  padding: 12px 9px 2px;
+  border-top: 1px solid var(--line);
+}
+
+.sidebar-backdrop {
+  display: none;
+}
+
+.workspace {
+  position: relative;
+  display: flex;
+  min-width: 0;
+  min-height: 0;
+  flex-direction: column;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 18px;
+  background: var(--canvas);
+}
+
+.topbar {
+  z-index: 10;
+  display: flex;
+  height: 52px;
+  flex: none;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 12px 0 18px;
+  border-bottom: 1px solid var(--line);
+  background: var(--canvas);
+}
+
+.open-sidebar {
+  display: none;
+}
+
+.crumb {
   display: flex;
   align-items: center;
   gap: 10px;
-  padding: 9px 14px;
+}
+
+.crumb b {
+  font-size: 13px;
+  font-weight: 650;
+}
+
+.crumb span {
+  padding: 3px 7px;
+  border: 1px solid var(--line);
+  border-radius: 99px;
+  background: var(--panel-2);
+  color: var(--dim);
+  font-size: 10px;
+}
+
+.top-actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.saved-state {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin-right: 8px;
+  color: var(--dim);
+  font-size: 11px;
+}
+
+.profile {
+  display: grid;
+  width: 30px;
+  height: 30px;
+  margin-left: 4px;
+  place-items: center;
+  border-radius: 50%;
+  background: var(--ink);
+  color: var(--panel);
+}
+
+.gate {
+  flex: none;
+}
+
+.canvas {
+  display: grid;
+  min-height: 0;
+  flex: 1;
+  grid-template-columns: repeat(auto-fill, var(--unit-width, 300px));
+  grid-auto-rows: var(--unit-height, 220px);
+  grid-auto-flow: row dense;
+  gap: 12px;
+  align-content: start;
+  align-items: stretch;
+  overflow: auto;
+  padding: 14px 14px 154px;
+  background-color: var(--canvas);
+  background-image: radial-gradient(circle, var(--line-strong) 0.8px, transparent 0.9px);
+  background-position: 10px 10px;
+  background-size: 20px 20px;
+}
+
+.widget {
+  position: relative;
+  display: flex;
+  min-height: 0;
+  grid-column: span var(--w, 1);
+  grid-row: span var(--h, 1);
+  flex-direction: column;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 18px;
   background: var(--panel);
+  box-shadow: var(--shadow);
+  transition: border-color 0.2s, box-shadow 0.28s cubic-bezier(0.16, 1, 0.3, 1), transform 0.28s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.widget:hover {
+  border-color: var(--line-strong);
+  transform: translateY(-2px);
+}
+
+.widget .head {
+  display: flex;
+  min-height: 48px;
+  flex: none;
+  align-items: center;
+  gap: 8px;
+  padding: 9px 12px;
   border-bottom: 1px solid var(--line);
 }
 
-footer {
-  border: 0;
-  border-top: 1px solid var(--line);
-  flex-direction: column;
-  align-items: stretch;
-  gap: 6px;
-  position: sticky;
-  bottom: 0;
+.widget h2 {
+  margin: 0;
+  font: inherit;
+  font-size: 13px;
+  font-weight: 680;
 }
 
-footer form {
+.widget .body {
+  min-height: 0;
+  flex: 1;
+  overflow-y: auto;
+  padding: 11px 13px;
+}
+
+.grip {
+  display: inline-grid;
+  min-width: 28px;
+  min-height: 28px;
+  place-items: center;
+  margin: -3px 0 -3px -5px;
+  border-radius: 8px;
+  color: var(--faint);
+  cursor: grab;
+  touch-action: none;
+  user-select: none;
+}
+
+.grip:hover {
+  background: var(--panel-2);
+  color: var(--ink);
+}
+
+.grip svg {
+  width: 16px;
+  height: 16px;
+  fill: currentColor;
+}
+
+.resize {
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  display: grid;
+  width: 24px;
+  height: 24px;
+  place-items: center;
+  border-radius: 8px 0 17px;
+  color: var(--faint);
+  cursor: nwse-resize;
+  touch-action: none;
+}
+
+.resize:hover,
+.resize:focus-visible {
+  background: var(--panel-2);
+  color: var(--ink);
+}
+
+.badge.size {
+  padding: 2px 4px;
+  border-color: transparent;
+  background: transparent;
+  color: var(--faint);
+  font-size: 9px;
+  cursor: pointer;
+}
+
+.home-composer {
+  position: absolute;
+  z-index: 12;
+  bottom: 18px;
+  left: 50%;
+  width: min(600px, calc(100% - 180px));
+  min-height: 112px;
+  padding: 10px 11px 9px;
+  transform: translateX(-50%);
+  border: 1px solid var(--line-strong);
+  border-radius: 22px;
+  background: var(--panel);
+  box-shadow: 0 18px 55px rgba(29, 29, 27, 0.13), 0 2px 5px rgba(29, 29, 27, 0.05);
+}
+
+.home-composer:focus-within {
+  border-color: var(--accent);
+  box-shadow: 0 20px 60px rgba(29, 29, 27, 0.15), 0 0 0 3px rgba(77, 114, 255, 0.13);
+}
+
+.home-composer form {
+  display: flex;
+  height: 100%;
+  flex-direction: column;
+}
+
+.composer-context {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.route-chip,
+.anchor-chip {
+  height: 25px;
+  padding: 0 8px;
+  border-radius: 8px;
+  font-size: 10px;
+}
+
+.route-chip {
+  display: inline-flex;
+  align-items: center;
+  color: var(--dim);
+}
+
+.anchor-chip {
+  border: 1px solid var(--line);
+  background: var(--panel-2);
+  cursor: pointer;
+}
+
+.anchor-chip:hover {
+  border-color: var(--line-strong);
+}
+
+.home-composer textarea {
+  width: 100%;
+  min-height: 40px;
+  max-height: 78px;
+  resize: none;
+  border: 0;
+  outline: 0;
+  background: transparent;
+  padding: 9px 4px 4px;
+  caret-color: var(--accent);
+}
+
+.home-composer textarea::placeholder {
+  color: var(--faint);
+  opacity: 1;
+}
+
+.composer-actions {
   display: flex;
   align-items: center;
   gap: 8px;
 }
 
-footer input {
-  flex: 1;
+.composer-actions p {
   min-width: 0;
-  padding: 9px 10px;
-  border-radius: 5px;
-  border: 1px solid var(--line);
-  background: var(--panel-2);
-  color: var(--ink);
-  font: inherit;
+  flex: 1;
+  overflow: hidden;
+  margin: 0;
+  color: var(--faint);
+  font-size: 10px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
-footer input:focus {
-  outline: none;
-  border-color: var(--accent);
+.send-button {
+  display: grid;
+  width: 30px;
+  height: 30px;
+  place-items: center;
+  border-radius: 10px;
+  background: var(--ink);
+  color: var(--panel);
+  cursor: pointer;
 }
 
-.brand {
-  font-weight: 650;
+.send-button:disabled {
+  cursor: default;
+  opacity: 0.5;
 }
-.brand span {
-  color: var(--accent);
+
+.send-button svg {
+  width: 15px;
+  height: 15px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.7;
+  stroke-linecap: round;
+  stroke-linejoin: round;
 }
+
+.clock-face {
+  display: grid;
+  height: 100%;
+  place-content: center;
+  text-align: center;
+}
+
+.clock-face time {
+  font-size: clamp(38px, 4vw, 58px);
+  font-weight: 540;
+  line-height: 1;
+  letter-spacing: -0.05em;
+  font-variant-numeric: tabular-nums;
+}
+
+.clock-face p {
+  margin: 8px 0 0;
+  color: var(--dim);
+  font-size: 12px;
+}
+
 .grow {
   flex: 1;
 }
+
 .dim {
   color: var(--dim);
 }
+
 .small {
-  font-size: 11px;
+  font-size: 10px;
 }
+
 .mono {
   font-family: var(--mono);
 }
+
 .bad {
   color: var(--bad);
 }
@@ -130,135 +710,163 @@ footer input:focus {
 
 .chip {
   padding: 5px 10px;
-  border-radius: 5px;
   border: 1px solid var(--line);
+  border-radius: 8px;
   background: var(--panel-2);
   color: var(--dim);
-  font: inherit;
   font-size: 11px;
   cursor: pointer;
 }
-.chip:hover {
-  color: var(--ink);
-  border-color: var(--accent);
-}
+
+.chip:hover,
 .chip.on {
-  color: var(--ink);
   border-color: var(--accent);
+  color: var(--ink);
 }
+
 .chip:disabled {
-  opacity: 0.5;
   cursor: default;
+  opacity: 0.5;
 }
 
-.canvas {
-  flex: 1;
+.loading {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
-  gap: 12px;
-  padding: 14px;
-  align-content: start;
-  /* Each card is its own content height. A grid row is as tall as its tallest
-     item and stretches the rest to match, so one long widget - Settings, with a
-     card per runner - made every card beside it a column of empty panel. */
-  align-items: start;
+  height: 100%;
+  place-items: center;
+  background: var(--canvas);
+  color: var(--dim);
 }
 
-.widget {
-  display: flex;
-  flex-direction: column;
-  background: var(--panel);
-  border: 1px solid var(--line);
-  border-radius: 6px;
-  overflow: hidden;
+.app.sidebar-collapsed {
+  grid-template-columns: 72px minmax(0, 1fr);
 }
-.widget.wide {
-  grid-column: span 2;
+
+.sidebar-collapsed .brand span,
+.sidebar-collapsed .collapse-sidebar,
+.sidebar-collapsed .fleet-copy,
+.sidebar-collapsed .widget-toggle-copy,
+.sidebar-collapsed .mount-state,
+.sidebar-collapsed .group-label,
+.sidebar-collapsed .sidebar-foot-copy {
+  display: none;
 }
-@media (max-width: 720px) {
-  .widget.wide {
-    grid-column: span 1;
+
+.sidebar-collapsed .brand-row,
+.sidebar-collapsed .fleet-switcher,
+.sidebar-collapsed .widget-toggle,
+.sidebar-collapsed .sidebar-foot {
+  justify-content: center;
+}
+
+.sidebar-collapsed .fleet-switcher,
+.sidebar-collapsed .widget-toggle,
+.sidebar-collapsed .sidebar-foot {
+  grid-template-columns: auto;
+}
+
+.sidebar-collapsed .unit-controls {
+  display: none;
+}
+
+@media (max-width: 900px) {
+  .app {
+    display: block;
+    padding: 0;
+  }
+
+  .workspace {
+    height: 100%;
+    border: 0;
+    border-radius: 0;
+  }
+
+  .sidebar {
+    position: fixed;
+    top: 8px;
+    bottom: 8px;
+    left: 8px;
+    width: min(280px, calc(100% - 32px));
+    transform: translateX(calc(-100% - 16px));
+    transition: transform 0.32s cubic-bezier(0.16, 1, 0.3, 1);
+    box-shadow: 0 24px 64px rgba(29, 29, 27, 0.18);
+  }
+
+  .sidebar-open .sidebar {
+    transform: none;
+  }
+
+  .sidebar-open .sidebar-backdrop {
+    position: fixed;
+    inset: 0;
+    z-index: 19;
+    display: block;
+    background: rgba(29, 29, 27, 0.2);
+  }
+
+  .open-sidebar {
+    display: inline-grid;
+  }
+
+  .topbar {
+    padding-left: 10px;
+  }
+
+  .canvas {
+    grid-template-columns: 1fr;
+    padding: 14px;
+    border-bottom: 1px solid var(--line);
+  }
+
+  .widget {
+    grid-column: 1 / -1;
+  }
+
+  .widget-clock {
+    order: -1;
+  }
+
+  .resize {
+    display: none;
+  }
+
+  .home-composer {
+    position: relative;
+    bottom: auto;
+    left: auto;
+    width: calc(100% - 20px);
+    margin: 8px 10px 10px;
+    transform: none;
+    border-radius: 18px;
   }
 }
 
-.widget .head {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 8px 10px;
-  border-bottom: 1px solid var(--line);
-}
-.grip {
-  color: var(--faint);
-  letter-spacing: -2px;
-  cursor: grab;
-  /* 24px square minimum. The glyph is 10px wide and the box measured 16x24,
-     which is under every pointer-target guideline there is - and this is a
-     control you have to hit precisely, by dragging, on a dense grid. */
-  min-width: 24px;
-  min-height: 24px;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  /* A hit target rather than three dots. The glyph is 10px wide; the padding is
-     what makes it grabbable without aiming. */
-  padding: 2px 4px;
-  margin: -2px -2px -2px -4px;
-  border-radius: 4px;
-  user-select: none;
-}
-.grip:hover {
-  color: var(--fg);
-  background: var(--line);
-}
-.grip:active {
-  cursor: grabbing;
+@media (max-width: 560px) {
+  .saved-state,
+  .profile,
+  .crumb span {
+    display: none;
+  }
+
+  .widget .head .dim,
+  .badge.size {
+    display: none;
+  }
+
+  .home-composer textarea {
+    font-size: 16px;
+  }
 }
 
-/*
-  The header's widget list, which is a navigation model until it is a crowd.
-
-  Twelve chips in one unbroken row on this build, growing every time a cell
-  writes a widget, with nothing separating the ones farseer ships from the ones
-  an agent wrote. It also could not wrap: on a narrower window the row pushed
-  the page sideways rather than folding.
-*/
-header .chips {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 6px;
-  justify-content: flex-end;
-  min-width: 0;
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    scroll-behavior: auto !important;
+    transition-duration: 0.01ms !important;
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+  }
 }
-header .chips .divider {
-  align-self: stretch;
-  width: 1px;
-  background: var(--line);
-  margin: 2px 4px;
-}
-header .chips .group-label {
-  color: var(--faint);
-  /* 11px like every other label here. 10px was small enough to read as an
-     ornament rather than a word, which is the thing this sheet had just
-     finished removing everywhere else. */
-  font: 11px/1 var(--mono);
-  text-transform: uppercase;
-  letter-spacing: 0.08em;
-}
-.widget .body {
-  padding: 10px 12px;
-  /* Bounded, and it scrolls itself. Without a cap a widget's own length is the
-     canvas's length, which is how a nine-runner Settings card came to set the
-     height of the whole screen. A wide card is the one the operator chose to
-     give room to, so it gets more. */
-  max-height: 46vh;
-  overflow-y: auto;
-}
-.widget.wide .body {
-  max-height: 62vh;
-}
-
 .badge {
   font: 11px/1 var(--mono);
   padding: 4px 6px;
@@ -772,10 +1380,99 @@ code {
   padding-top: 9px;
 }
 
-/* The grip is a handle, so it has to look like one and the widget has to move. */
+/* Lift the picked widget above the grid so pointer capture never looks inert. */
 .grip { cursor: grab; }
-.widget.dragging { opacity: 0.45; }
-.widget.drop-target { outline: 2px dashed var(--accent); outline-offset: 2px; }
+.widget.dragging {
+  z-index: 2;
+  border-color: var(--accent);
+  opacity: 0.94;
+  box-shadow: 0 18px 44px rgba(8, 14, 28, 0.28);
+  animation: widget-picked-float 0.8s ease-in-out infinite alternate;
+}
+.widget.dragging .grip {
+  color: var(--accent);
+  cursor: grabbing;
+}
+.widget.drop-target {
+  outline: 2px dashed var(--accent);
+  outline-offset: 2px;
+  animation: widget-drop-pulse 0.65s ease-in-out infinite alternate;
+}
+
+@keyframes widget-picked-float {
+  from { transform: translateY(-7px) scale(1.015) rotate(-0.15deg); }
+  to { transform: translateY(-11px) scale(1.025) rotate(0.15deg); }
+}
+
+@keyframes widget-drop-pulse {
+  from { box-shadow: var(--shadow); }
+  to { box-shadow: 0 0 0 5px var(--accent-soft), 0 16px 40px rgba(29, 29, 27, 0.13); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .widget.dragging {
+    animation: none;
+    transform: translateY(-8px) scale(1.02);
+  }
+  .widget.drop-target {
+    animation: none;
+    box-shadow: 0 0 0 5px var(--accent-soft), var(--shadow);
+  }
+}
+
+.widget-context-menu {
+  position: fixed;
+  z-index: 30;
+  display: grid;
+  width: 188px;
+  overflow: hidden;
+  padding: 6px;
+  border: 1px solid var(--line-strong);
+  border-radius: 12px;
+  background: var(--panel);
+  box-shadow: 0 18px 48px rgba(29, 29, 27, 0.2);
+}
+
+.widget-context-menu p {
+  margin: 0 6px 5px;
+  padding: 4px 2px 7px;
+  overflow: hidden;
+  border-bottom: 1px solid var(--line);
+  color: var(--dim);
+  font-size: 11px;
+  font-weight: 680;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.widget-context-menu button {
+  min-height: 30px;
+  padding: 6px 8px;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--ink);
+  font: inherit;
+  font-size: 12px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.widget-context-menu button:hover:not(:disabled),
+.widget-context-menu button:focus-visible {
+  outline: none;
+  background: var(--panel-2);
+}
+
+.widget-context-menu button:disabled {
+  color: var(--faint);
+  cursor: default;
+  opacity: 0.45;
+}
+
+.widget-context-menu button.danger {
+  color: var(--bad);
+}
 
 /* The menu a cell can actually order from - see `/v1/skills`. */
 .skills {
@@ -794,10 +1491,7 @@ code {
   border-radius: 6px;
 }
 
-/* The composer inside the Conversation widget. `28 operator surface` keeps the
-   footer one - the widget you type from is the anchor, never the destination -
-   and this answers what the footer could not: a reply belongs under the thing
-   it replies to. */
+/* Run-detail forms use the same compact inline treatment as the canvas. */
 .composer {
   display: flex;
   align-items: flex-end;
@@ -811,14 +1505,15 @@ code {
   resize: vertical;
   min-height: 38px;
   font: inherit;
-  color: var(--fg);
+  color: var(--ink);
   background: var(--bg);
   border: 1px solid var(--line);
   border-radius: 6px;
   padding: 8px 10px;
 }
-.composer textarea:focus {
-  outline: none;
+.composer textarea:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
   border-color: var(--accent);
 }
 .composer textarea:disabled {
@@ -850,7 +1545,7 @@ code {
 .exchanges .asked {
   border-left: 2px solid var(--accent);
   padding-left: 8px;
-  color: var(--fg);
+  color: var(--ink);
 }
 .exchanges .answered {
   border-left: 2px solid var(--line);
@@ -858,36 +1553,35 @@ code {
   color: var(--dim);
 }
 
-/* The thread scrolls; the composer under it does not move. The widget body's
-   own cap would scroll both together, which walks the one control on this
-   widget off the bottom of the card exactly when a reply arrives.
-
-   A column rather than two fixed heights: the meta strip above the thread is
-   ten fields that wrap differently at every width, so any height picked for the
-   thread is wrong at some width. Letting the thread take what is left is right
-   at all of them. */
+/* The conversation thread scrolls while its runner metadata stays visible.
+   A flex column lets the metadata wrap naturally and gives the remaining
+   height to the thread at every widget width. */
 .widget .body:has(> .thread) {
   display: flex;
   flex-direction: column;
 }
 .widget .body > .thread {
   flex: 1 1 auto;
-  /* Without this a flex child refuses to shrink below its content, and the
-     scrollbar lands on the body again - taking the composer with it. */
+  /* Without this a flex child refuses to shrink below its content and moves
+     the scrollbar back to the whole widget body. */
   min-height: 0;
   overflow-y: auto;
 }
 
-/* The footer's anchor, made visible. Two composers that both say "to: top
-   manager" are two identical controls; the anchor is what makes them two jobs. */
+/* `28 operator surface` exposes one top-manager composer and its current
+   context. The anchor button resets that context to the canvas. */
 .badge.accent {
   color: var(--accent);
   border-color: var(--accent);
 }
+.badge.anchor {
+  background: transparent;
+  cursor: pointer;
+}
 
-/* A runner folds to one line. The note and its caveats are what an author reads
-   once while choosing; leaving all nine open made Settings the tallest card on
-   the canvas, and a grid row is as tall as its tallest card. */
+/* `28 operator surface` gives Settings a bounded row span. Folding each runner
+   keeps its caveats available without making the card a scroll of nine open
+   explanations. */
 .disclose {
   display: flex;
   align-items: center;
@@ -933,7 +1627,7 @@ code {
   background: none;
   border: 0;
   font: inherit;
-  color: var(--fg);
+  color: var(--ink);
   text-align: left;
   cursor: pointer;
 }
@@ -1047,9 +1741,10 @@ code {
   border-radius: 6px;
   padding: 5px 8px;
 }
-.new-project input:focus,
-.add-root input:focus {
-  outline: none;
+.new-project input:focus-visible,
+.add-root input:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
   border-color: var(--accent);
 }
 .add-root {
@@ -1098,7 +1793,201 @@ code {
   border-radius: 6px;
   padding: 5px 8px;
 }
-.project-filter input:focus {
-  outline: none;
+.project-filter input:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
   border-color: var(--accent);
+}
+
+/* `40 work model and session explorer`: one face owns board, conversations,
+   detail, completed work, and the topology/similarity explorer. */
+.widget-avatar-work,
+.widget-avatar-capacity {
+  border-color: transparent;
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+.settings-popover {
+  position: absolute;
+  z-index: 25;
+  top: 58px;
+  right: 12px;
+  width: min(440px, calc(100% - 24px));
+  max-height: calc(100% - 76px);
+  padding: 12px;
+  overflow: auto;
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  background: var(--panel);
+  box-shadow: var(--shadow);
+}
+
+.settings-popover > .row {
+  justify-content: space-between;
+  margin-bottom: 10px;
+}
+
+.work-panel {
+  display: flex;
+  min-height: 100%;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.widget:has(.work-panel.expanded) {
+  z-index: 8;
+  grid-column: 1 / -1 !important;
+  grid-row: span 3 !important;
+  min-height: min(720px, calc(100vh - 110px));
+}
+
+.work-toolbar,
+.work-toolbar [role="tablist"],
+.task-actions,
+.task-runs,
+.graph-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+}
+
+.work-toolbar {
+  justify-content: space-between;
+}
+
+.work-board {
+  display: grid;
+  min-height: 180px;
+  grid-auto-columns: minmax(150px, 1fr);
+  grid-auto-flow: column;
+  gap: 8px;
+  overflow: auto;
+}
+
+.work-column {
+  padding: 7px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--canvas);
+}
+
+.work-column h4 {
+  display: flex;
+  justify-content: space-between;
+  margin: 0 0 6px;
+  color: var(--dim);
+  font-size: 10px;
+  text-transform: uppercase;
+}
+
+.work-card,
+.row-button {
+  display: flex;
+  width: 100%;
+  margin: 0 0 5px;
+  padding: 8px;
+  align-items: center;
+  gap: 8px;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  background: var(--panel);
+  color: var(--ink);
+  text-align: left;
+}
+
+.work-card {
+  flex-direction: column;
+  align-items: flex-start;
+}
+
+.work-card:hover,
+.row-button:hover,
+.work-card.selected,
+.row-button.selected {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+
+.work-card small,
+.row-button small {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--dim);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.work-conversations form,
+.transcript-form,
+.runner-picker {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 6px;
+}
+
+.runner-picker {
+  align-items: center;
+  color: var(--dim);
+}
+
+.plain-list,
+.similarity-list {
+  margin: 8px 0;
+  padding: 0;
+  list-style: none;
+}
+
+.task-detail {
+  padding: 10px;
+  border: 1px solid var(--line-strong);
+  border-radius: 12px;
+  background: var(--panel-2);
+}
+
+.task-detail > .row {
+  justify-content: space-between;
+}
+
+.transcript-form {
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  margin-top: 8px;
+}
+
+.work-graph {
+  min-height: 0;
+  overflow: auto;
+}
+
+.work-graph svg {
+  width: 100%;
+  min-width: 680px;
+  min-height: 420px;
+}
+
+.observed-edge {
+  stroke: var(--line-strong);
+  stroke-width: 2;
+}
+
+.graph-node circle {
+  fill: var(--panel);
+  stroke: var(--accent);
+  stroke-width: 2;
+}
+
+.graph-node.task circle { stroke: var(--ok); }
+.graph-node.run circle { stroke: var(--warn); }
+.graph-node.session circle { stroke: #a371f7; }
+.graph-node text { fill: var(--ink); font-size: 10px; }
+.derived { color: #a371f7; }
+
+@media (max-width: 900px) {
+  .widget:has(.work-panel.expanded) {
+    min-height: 70vh;
+  }
+
+  .transcript-form {
+    grid-template-columns: 1fr;
+  }
 }

@@ -26,6 +26,7 @@ mod quota;
 mod roots;
 mod schema;
 mod ui_state;
+mod work;
 
 pub use analytics::{CostRow, InterventionRow, LessonRow, ReworkRow};
 pub use farseer_core::MemoryId;
@@ -33,6 +34,7 @@ pub use lifecycle::{Lifecycle, Purged};
 pub use memory::{MemoryCaps, MemoryClaim, MemoryScope, NewMemory, Promotion};
 pub use quota::WindowRow;
 pub use ui_state::{UI_STATE_CAP_BYTES, UI_STATE_KEY_CAP_BYTES};
+pub use work::{RunParent, SimilarityEdge, TaskFilter, TranscriptAttachment};
 
 #[derive(Debug, thiserror::Error)]
 pub enum StoreError {
@@ -55,6 +57,15 @@ pub enum StoreError {
     GlobalPromotionNeedsOperator,
     #[error("no memory claim with id {0}")]
     NoSuchMemory(MemoryId),
+    #[error("no conversation with id {0}")]
+    NoSuchConversation(farseer_core::ConversationId),
+    #[error("no task with id {0}")]
+    NoSuchTask(farseer_core::TaskId),
+    #[error("task cannot transition from {from} to {to}")]
+    InvalidTaskTransition {
+        from: farseer_core::TaskState,
+        to: farseer_core::TaskState,
+    },
     #[error("ui state for `{key}` is {size} bytes, over the {cap} byte cap")]
     UiStateTooLarge {
         key: String,

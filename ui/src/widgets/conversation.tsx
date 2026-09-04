@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import type { Bridge } from "../bridge";
+import { onSubjectSelection, selectedSubject } from "../selection";
 import { follow, type RecordEvent } from "../stream";
-
 /**
  * What the top manager said, as a conversation.
  *
@@ -33,7 +33,7 @@ type Meta = {
   /** A **hint**: what the runner is configured to reach for, not what this turn used. */
   effort?: string;
   effortFrom?: string;
-  session_id?: string;
+  sessions: { kind: string; id: string }[];
   cell?: string;
   cost?: number;
   tokens?: number;
@@ -134,81 +134,22 @@ function turnFrom(event: RecordEvent): Turn | null {
   return null;
 }
 
-/**
- * Type to the top manager from inside the conversation.
- *
- * The canvas has always had one composer, in the footer, and `28 operator
- * surface`'s rule is why: **the widget you type from is the anchor, never the
- * destination.** That rule is about where the work goes, not about where the
- * box is - so a second composer here breaks nothing, and answers the thing the
- * footer could not: a reply belongs under the thing it replies to.
- *
- * It calls the same `bridge.ask`, anchored to this widget, and gets back a run
- * id rather than an answer. The answer arrives on the stream and lands in the
- * thread above, which is what makes this a conversation rather than a form.
- */
-function Composer({ bridge }: { bridge: Bridge }) {
-  const [sending, setSending] = useState(false);
-  const [failed, setFailed] = useState<string | null>(null);
-  const field = useRef<HTMLTextAreaElement>(null);
-
-  const send = async () => {
-    const text = field.current?.value.trim();
-    if (!text || sending) return;
-    setSending(true);
-    setFailed(null);
-    try {
-      await bridge.ask({ widget: "Conversation" }, text);
-      if (field.current) field.current.value = "";
-    } catch (e) {
-      setFailed((e as Error).message);
-    } finally {
-      setSending(false);
-    }
-  };
-
-  return (
-    <form
-      className="composer"
-      onSubmit={(event) => {
-        event.preventDefault();
-        void send();
-      }}
-    >
-      <textarea
-        ref={field}
-        rows={2}
-        disabled={sending}
-        // Named, not just prompted: a placeholder vanishes on the first
-        // keystroke, so a control carrying only one has no name at all.
-        aria-label="Say something to the top manager"
-        placeholder="Say something to the top manager - Enter sends, Shift+Enter for a new line"
-        // A textarea rather than an input, because a goal is usually a
-        // paragraph. Enter still sends, since the common case is one line.
-        onKeyDown={(event) => {
-          if (event.key === "Enter" && !event.shiftKey) {
-            event.preventDefault();
-            void send();
-          }
-        }}
-      />
-      <button className="chip on" disabled={sending}>
-        {sending ? "sending" : "send"}
-      </button>
-      {failed && <span className="bad small">{failed}</span>}
-    </form>
-  );
-}
 
 export function ConversationWidget({ bridge }: { bridge: Bridge }) {
+  const initial = selectedSubject();
+  const [subject, setSubject] = useState(initial);
   const [turns, setTurns] = useState<Turn[]>([]);
-  const [meta, setMeta] = useState<Meta>({});
+  const [meta, setMeta] = useState<Meta>({ sessions: [] });
   const [error, setError] = useState<string | null>(null);
   const [showSilent, setShowSilent] = useState(false);
   const thread = useRef<HTMLOListElement>(null);
 
+  useEffect(() => onSubjectSelection(setSubject), []);
   useEffect(() => {
     let live = true;
+    setTurns([]);
+    setMeta({ sessions: [] });
+    setError(null);
     const add = (event: RecordEvent) => {
       const payload = (event.payload ?? {}) as Record<string, unknown>;
       const str = (key: string) =>
@@ -216,24 +157,28 @@ export function ConversationWidget({ bridge }: { bridge: Bridge }) {
       const num = (key: string) =>
         typeof payload[key] === "number" ? (payload[key] as number) : undefined;
 
-      // The meta describes the latest session, so later events win. A run that
-      // never named a model leaves the field absent rather than stale.
       if (event.kind === "session_started") {
+        const id = str("session_id");
+        const runner = str("runner") ?? "";
+        const kind =
+          str("session_kind") ??
+          (runner === "codex" || runner === "codex-app-server"
+            ? "thread"
+            : runner === "agy"
+              ? "conversation"
+              : "session");
         setMeta((current) => ({
           ...current,
-          runner: str("runner") ?? current.runner,
+          runner: runner || current.runner,
           model: str("model"),
           provider: str("provider"),
           effort: str("configured_effort"),
           effortFrom: str("configured_from"),
-          session_id: str("session_id"),
+          sessions:
+            id && !current.sessions.some((session) => session.kind === kind && session.id === id)
+              ? [...current.sessions, { kind, id }]
+              : current.sessions,
           cell: event.cell_id,
-          // Cleared, not carried. A new session has spent nothing yet, and a
-          // runner that reports no context window must not inherit the last
-          // one's - `pi` reporting neither was showing a `codex-app-server`
-          // context reading under a pi session id, which is precisely the
-          // absent-because-unreportable / absent-because-nothing-happened
-          // confusion `10 runner inventory`'s rule exists to prevent.
           used: undefined,
           size: undefined,
           tokens: undefined,
@@ -280,27 +225,49 @@ export function ConversationWidget({ bridge }: { bridge: Bridge }) {
       });
     };
 
-    // Replay what was already said, then follow. `tail` rather than `limit`: a
-    // surface opening cold wants what just happened, and reading forward from
-    // zero gives it the oldest 400 events instead - which looked right while
-    // the log was shorter than the limit and would have frozen silently.
+    const subscription = follow((event) => {
+      if (subject.run === event.run_id) add(event);
+    });
+    if (!subject.conversation) {
+      setTurns([]);
+      setMeta({ sessions: [] });
+      return () => subscription.close();
+    }
+
+    let runIds = new Set<string>();
     bridge
-      .read<RecordEvent[]>("/events?tail=400")
-      .then((events) => live && events.forEach(add))
+      .read<{ task_id: string }[]>(
+        `/tasks?conversation_id=${encodeURIComponent(subject.conversation)}&limit=500`,
+      )
+      .then((tasks) =>
+        Promise.all(
+          tasks.map((task) =>
+            bridge.read<{ runs: { run_id: string }[] }>(`/tasks/${task.task_id}`),
+          ),
+        ),
+      )
+      .then((details) => {
+        if (!live) return;
+        runIds = new Set(details.flatMap((detail) => detail.runs.map((run) => run.run_id)));
+        return bridge.read<RecordEvent[]>("/events?tail=1000");
+      })
+      .then((events) => events?.filter((event) => runIds.has(event.run_id)).forEach(add))
       .catch((e: Error) => live && setError(e.message));
-    const subscription = follow(add);
+
+    const selectedSubscription = follow((event) => {
+      if (runIds.has(event.run_id)) add(event);
+    });
     return () => {
       live = false;
       subscription.close();
+      selectedSubscription.close();
     };
-  }, [bridge]);
+  }, [bridge, subject.conversation, subject.task, subject.run]);
 
   // The newest turn is the one being waited for, and a thread that keeps its
   // scroll at the top hides exactly the line the operator is here to read.
   //
-  // The thread scrolls, not the widget body: a composer that scrolls away with
-  // the messages is a composer the operator has to go looking for, and it is
-  // the one control on this widget.
+  // The thread owns its scroll so the runner metadata above it stays visible.
   // Keyed on the newest turn rather than on how many there are. The thread is
   // capped at 40, so **once it fills, the count stops changing** and an effect
   // watching the length never fires again - the widget scrolled itself for the
@@ -339,7 +306,7 @@ export function ConversationWidget({ bridge }: { bridge: Bridge }) {
         // it will reach for, and farseer never sets it, so calling it the level
         // this turn used would be a claim nobody made.
         ["configured effort", meta.effort],
-        ["session", meta.session_id?.slice(0, 8)],
+        ["sessions", meta.sessions.length ? meta.sessions.map((session) => `${session.kind}:${session.id.slice(0, 8)}`).join(", ") : undefined],
         ["context", context(meta)],
         ["tokens", meta.tokens?.toLocaleString()],
         ["cost", typeof meta.cost === "number" ? usd(meta.cost) : undefined],
@@ -384,15 +351,13 @@ export function ConversationWidget({ bridge }: { bridge: Bridge }) {
   );
 
   if (error) return <p className="empty bad">{error}</p>;
+  if (!subject.conversation)
+    return <p className="empty">Start or select a conversation in Work, then use the canvas composer.</p>;
   if (turns.length === 0)
     return (
       <>
         {strip}
-        <p className="empty">
-          Nothing said yet. Type below - it goes to the top manager, and its answer lands here
-          when the run finishes.
-        </p>
-        <Composer bridge={bridge} />
+        <p className="empty">Nothing said in this conversation yet.</p>
       </>
     );
 
@@ -420,7 +385,6 @@ export function ConversationWidget({ bridge }: { bridge: Bridge }) {
         </li>
         ))}
       </ol>
-      <Composer bridge={bridge} />
     </>
   );
 }

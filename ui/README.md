@@ -5,9 +5,27 @@ Farseer's operator surface, decided in [28 operator surface](../.scratch/farseer
 The canvas is the home screen, and **if it is not the canvas it is a widget on it**.
 There is no second layout and no mode switch.
 
+## Home composition
+
+The production home uses the accepted Berd-inspired direction: a pale dotted workbench, persistent widget sidebar, compact top bar, rounded saved widgets, and one floating composer.
+The clock is a normal optional widget, so its visibility, order, and size use the same persisted arrangement as every other widget.
+The visual shell changed without changing the product boundary: widgets still display cells, every AI request still goes to the top manager, and run verbs remain direct.
+The version-eight default keeps four operational faces mounted: Conversation, Work, Fleet, and Capacity.
+Settings is a top-bar popover, while narrower diagnostics remain optional widgets.
+
 ## Running it
 
-Start `farseer serve`, then:
+For the desktop shell, rebuild `ui/dist` and then start Farseer:
+
+```bash
+bun run --cwd ui build
+```
+
+```bash
+cargo run
+```
+
+For Vite development against a running `farseer serve` process:
 
 ```bash
 bun run --cwd ui dev
@@ -15,6 +33,16 @@ bun run --cwd ui dev
 
 The dev server reads farseer's own runtime file for the port and the token, so there is nothing to paste.
 Set `FARSEER_PORT` and `FARSEER_TOKEN` only to point at a second daemon.
+
+Check the canvas layout contract:
+
+```bash
+bun run --cwd ui test
+```
+
+```bash
+bun run --cwd ui check
+```
 
 The **proxy** attaches the token, so the browser never holds it.
 That is `28`'s third gate applied one level up: a widget must not hold the operator token, and holding it in the host page would only move the problem into `localStorage`, where clearing site data or any script on the page reaches it.
@@ -24,13 +52,18 @@ Whatever packages this later - served by farseer itself, Tauri, Electron - has t
 
 | File | What it decides |
 | --- | --- |
-| [`src/App.tsx`](src/App.tsx) | the canvas, the widget registry, and the one composer |
-| [`src/bridge.ts`](src/bridge.ts) | **everything a widget may reach, and nothing else** |
-| [`src/widgets/quota.tsx`](src/widgets/quota.tsx) | `27 quota accounting`'s utilisation surface |
+| [`src/App.tsx`](src/App.tsx) | the canvas shell, version-eight four-widget default, optional registry, settings popover, and one composer |
+| [`src/layout.ts`](src/layout.ts) | validates, snaps and bounds the persisted widget arrangement |
+| [`src/selection.ts`](src/selection.ts) | one shared conversation, task, run, project, and manager-runner context |
+| [`src/widgets/work.tsx`](src/widgets/work.tsx) | task board, conversation list, causal graph, completed work, transcript custody, and manager selection |
+| [`src/widgets/conversation.tsx`](src/widgets/conversation.tsx) | the selected durable conversation across all of its runs and harness sessions |
 | [`src/widgets/fleet.tsx`](src/widgets/fleet.tsx) | the loaded cell definitions |
+| [`src/widgets/quota.tsx`](src/widgets/quota.tsx) | `27 quota accounting`'s Capacity surface |
+| [`src/widgets/clock.tsx`](src/widgets/clock.tsx) | the optional local-time widget |
+| [`src/bridge.ts`](src/bridge.ts) | **everything a widget may reach, and nothing else** |
 | [`src/stream.ts`](src/stream.ts) | follows `/v1/stream`, reconnecting on its own |
 | [`src/widgets/activity.tsx`](src/widgets/activity.tsx) | the record, live - where an answer lands |
-| [`src/widgets/runs.tsx`](src/widgets/runs.tsx) | the fleet, with `05`'s verbs on the line |
+| [`src/widgets/runs.tsx`](src/widgets/runs.tsx) | optional run-level diagnostics and control |
 
 ### The bridge is the seam
 
@@ -40,11 +73,16 @@ It reaches farseer only through the `Bridge` object the host passes in, and `28`
 There is deliberately **no `instructCell(id)`**.
 `28`'s correction: a widget **displays** a cell and never **addresses** one, so `ask` goes to the top manager, always, carrying an anchor that says what the operator was looking at.
 Routing is a decision, not a click.
+Ask goals also carry the shared project, conversation, and selected manager candidate, and the accepted task/run becomes the new shared subject.
 
 ### The arrangement lives in farseer, not the browser
 
 `PUT /v1/ui-state/canvas`, which farseer stores as an **opaque blob it never parses**, per [24 ui state persistence](../.scratch/farseer/issues/24-ui-state-persistence.md).
 `localStorage` was rejected there for three reasons the operator would actually hit: a Tauri window and a browser tab would not share a layout, clearing site data would destroy the dashboard silently, and it is not covered by any backup of farseer's data directory.
+Every widget starts at `1x1` and can use `1x1`, `2x1`, `2x2`, or `1x2`.
+The sidebar configures the width and height represented by `1x` in one-pixel steps, and that metric is stored with the arrangement.
+Dragging lifts the picked widget and pulses the hovered target, then places the picked widget into that target's original slot from either direction.
+Right-click a widget to move it left or right, reset it to `1x1`, or unpin it from the canvas.
 
 ### The quota widget has no progress bar, on purpose
 

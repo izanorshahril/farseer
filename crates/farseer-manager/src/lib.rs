@@ -997,6 +997,11 @@ impl StartedWorker {
                                 "session_id": info.session_id,
                                 "provider": info.provider,
                                 "runner": contract.runner,
+                                "session_kind": match contract.runner.as_str() {
+                                    "codex" | "codex-app-server" => "thread",
+                                    "agy" => "conversation",
+                                    _ => "session",
+                                },
                                 // Hints, named as hints on the wire so a reader
                                 // cannot mistake them for what the turn used.
                                 "configured_model": info.configured.as_ref().and_then(|c| c.model.clone()),

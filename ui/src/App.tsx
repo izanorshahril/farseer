@@ -1,8 +1,29 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { createBridge, type Anchor } from "./bridge";
+import {
+  DEFAULT_WIDGET_SPAN,
+  DEFAULT_WIDGET_UNIT,
+  MAX_UNIT_HEIGHT,
+  MAX_UNIT_WIDTH,
+  MIN_UNIT_HEIGHT,
+  MIN_UNIT_WIDTH,
+  WIDGET_SPANS,
+  moveBy,
+  moveToSlot,
+  normalizeLayout,
+  normalizeSpan,
+  normalizeUnit,
+  nudged,
+  resized,
+  toggleMounted,
+  type CanvasLayout,
+  type Span,
+  type WidgetUnit,
+} from "./layout";
 import { onSelection } from "./selection";
 import { restoreProject } from "./project";
 import { QuotaWidget } from "./widgets/quota";
+import { ClockWidget } from "./widgets/clock";
 import { FleetWidget } from "./widgets/fleet";
 import { ActivityWidget } from "./widgets/activity";
 import { RunsWidget } from "./widgets/runs";
@@ -10,6 +31,7 @@ import { RunnersWidget } from "./widgets/runners";
 import { SettingsWidget } from "./widgets/settings";
 import { ProjectsWidget } from "./widgets/projects";
 import { ConversationWidget } from "./widgets/conversation";
+import { WorkWidget } from "./widgets/work";
 import { DelegationWidget } from "./widgets/delegation";
 import { RunWidget } from "./widgets/run";
 import { SandboxWidget } from "./SandboxWidget";
@@ -32,10 +54,8 @@ const bridge = createBridge();
 /**
  * The widgets this build knows how to render.
  *
- * Agent-authored widgets from `widgets/` in git mount here later, through
- * `28`'s three gates. Today the registry is static, which is the honest state:
- * the host contract is proven by two widgets before it is asked to compile a
- * third one written by a manager.
+ * Agent-authored widgets from `widgets/` join this built registry through
+ * `28 operator surface`'s import, sandbox, and keep-or-undo gates.
  */
 const REGISTRY = {
   conversation: {
@@ -43,27 +63,32 @@ const REGISTRY = {
     subtitle: "you and the top manager",
     render: ConversationWidget,
   },
+  work: {
+    title: "Work",
+    subtitle: "board, conversations and graph",
+    render: WorkWidget,
+  },
+  fleet: { title: "Fleet", subtitle: "cell definitions", render: FleetWidget },
+  capacity: { title: "Capacity", subtitle: "provider accounts", render: QuotaWidget },
+  clock: { title: "Clock", subtitle: "local time", render: ClockWidget },
   delegation: {
     title: "Delegation",
-    subtitle: "the top manager and its workers",
+    subtitle: "manager and workers",
     render: DelegationWidget,
   },
-  quota: { title: "Windows", subtitle: "by account", render: QuotaWidget },
-  fleet: { title: "Cells", subtitle: "loaded definitions", render: FleetWidget },
-  activity: { title: "Activity", subtitle: "the record, live", render: ActivityWidget },
+  activity: { title: "Activity", subtitle: "record, live", render: ActivityWidget },
   runners: {
     title: "Runners",
-    subtitle: "spawned right now",
+    subtitle: "active processes",
     render: RunnersWidget,
   },
-  runs: { title: "Runs", subtitle: "with 05's verbs", render: RunsWidget },
-  run: { title: "Run", subtitle: "one run, whole", render: RunWidget },
+  runs: { title: "Runs", subtitle: "recent work", render: RunsWidget },
+  run: { title: "Run", subtitle: "selected run", render: RunWidget },
   projects: {
     title: "Projects",
-    subtitle: "folders farseer may work in",
+    subtitle: "authorized folders",
     render: ProjectsWidget,
   },
-  settings: { title: "Settings", subtitle: "the harness in front", render: SettingsWidget },
 } as const;
 
 type WidgetId = string;
@@ -75,44 +100,23 @@ type WidgetId = string;
  */
 type AgentWidget = { id: string; title: string; subtitle: string; cell?: string };
 
-/**
- * The blob. Farseer never reads this shape; only the canvas does.
- *
- * `v` is the canvas's own, and a stored blob from an older one is **replaced
- * rather than migrated**. `24 ui state persistence` made this an arrangement,
- * not data: nothing is lost by starting again from a better default, and a
- * migration for a value the operator can restore by dragging two cards is
- * machinery that has to be right forever to save one gesture once.
- */
-type Layout = { v?: number; mounted: WidgetId[]; wide: WidgetId[] };
 
-const LAYOUT_VERSION = 4;
+const LAYOUT_VERSION = 8;
 
 /**
- * The two conversations first, side by side, and everything else below them.
- *
- * Reading order is the argument: the operator's own exchange with the top
- * manager is what they came to the screen for, and what the manager did about it
- * is the next question rather than a separate one. Both are `wide`, so on any
- * screen wide enough for four columns they occupy the top row together.
+ * `40 work model and session explorer` makes the fresh-install home four
+ * operational faces. Detailed and optional widgets remain available.
  */
-const DEFAULT_LAYOUT: Layout = {
+const DEFAULT_LAYOUT: CanvasLayout = {
   v: LAYOUT_VERSION,
-  mounted: [
-    "conversation",
-    "delegation",
-    "runs",
-    "run",
-    "activity",
-    "quota",
-    "runners",
-    "fleet",
-    "projects",
-  ],
-  // Projects is wide because a folder with two dozen repositories in it is the
-  // ordinary case, and a column of wrapped chips two abreast is a list nobody
-  // scans.
-  wide: ["conversation", "delegation", "runs", "run", "projects"],
+  mounted: ["conversation", "work", "fleet", "capacity"],
+  span: {
+    conversation: DEFAULT_WIDGET_SPAN,
+    work: DEFAULT_WIDGET_SPAN,
+    fleet: DEFAULT_WIDGET_SPAN,
+    capacity: DEFAULT_WIDGET_SPAN,
+  },
+  unit: DEFAULT_WIDGET_UNIT,
 };
 
 /**
@@ -125,59 +129,253 @@ const DEFAULT_LAYOUT: Layout = {
 function WidgetChip({
   id,
   title,
+  subtitle,
   layout,
   persist,
 }: {
   id: WidgetId;
   title: string;
-  layout: Layout;
-  persist: (change: (current: Layout) => Layout) => void;
+  subtitle: string;
+  layout: CanvasLayout;
+  persist: (change: (current: CanvasLayout) => CanvasLayout) => void;
 }) {
   const mounted = layout.mounted.includes(id);
   return (
     <button
-      className={mounted ? "chip on" : "chip"}
+      className={mounted ? "widget-toggle active" : "widget-toggle"}
       aria-pressed={mounted}
-      title={mounted ? `hide ${title}` : `show ${title}`}
-      onClick={() =>
-        persist((current) => ({
-          ...current,
-          mounted: current.mounted.includes(id)
-            ? current.mounted.filter((m) => m !== id)
-            : [...current.mounted, id],
-        }))
-      }
+      title={mounted ? `Hide ${title}` : `Show ${title}`}
+      onClick={() => persist((current) => toggleMounted(current, id))}
     >
-      {title}
+      <span className={`widget-avatar widget-avatar-${id}`} aria-hidden>
+        {title.slice(0, 1)}
+      </span>
+      <span className="widget-toggle-copy">
+        <b>{title}</b>
+        <small>{subtitle}</small>
+      </span>
+      <span className={mounted ? "mount-state on" : "mount-state"} aria-hidden />
     </button>
   );
 }
 
+/** The pixel metric behind every widget's 1x dimension. */
+function UnitControls({
+  unit,
+  persist,
+}: {
+  unit: WidgetUnit;
+  persist: (change: (current: CanvasLayout) => CanvasLayout) => void;
+}) {
+  const [draft, setDraft] = useState({
+    width: String(unit.width),
+    height: String(unit.height),
+  });
+
+  useEffect(() => {
+    setDraft({ width: String(unit.width), height: String(unit.height) });
+  }, [unit.width, unit.height]);
+
+  const commit = (part: keyof WidgetUnit) => {
+    const value = Number(draft[part]);
+    if (!Number.isFinite(value)) {
+      setDraft((current) => ({ ...current, [part]: String(unit[part]) }));
+      return;
+    }
+    const next = normalizeUnit({ ...unit, [part]: value });
+    setDraft({ width: String(next.width), height: String(next.height) });
+    persist((current) =>
+      current.unit.width === next.width && current.unit.height === next.height
+        ? current
+        : { ...current, unit: next },
+    );
+  };
+
+  return (
+    <fieldset className="unit-controls">
+      <legend>1x widget metric</legend>
+      <label>
+        <span>W</span>
+        <input
+          type="number"
+          min={MIN_UNIT_WIDTH}
+          max={MAX_UNIT_WIDTH}
+          step={1}
+          value={draft.width}
+          onChange={(event) => {
+            const width = event.currentTarget.value;
+            setDraft((current) => ({ ...current, width }));
+          }}
+          onBlur={() => commit("width")}
+          onKeyDown={(event) => {
+            if (event.key === "Enter") event.currentTarget.blur();
+          }}
+        />
+        <small>px</small>
+      </label>
+      <label>
+        <span>H</span>
+        <input
+          type="number"
+          min={MIN_UNIT_HEIGHT}
+          max={MAX_UNIT_HEIGHT}
+          step={1}
+          value={draft.height}
+          onChange={(event) => {
+            const height = event.currentTarget.value;
+            setDraft((current) => ({ ...current, height }));
+          }}
+          onBlur={() => commit("height")}
+          onKeyDown={(event) => {
+            if (event.key === "Enter") event.currentTarget.blur();
+          }}
+        />
+        <small>px</small>
+      </label>
+    </fieldset>
+  );
+}
+
+/**
+ * The corner a card is resized by.
+ *
+ * `28 operator surface` makes the canvas arrangeable. Pointer capture keeps
+ * the resize alive when the pointer leaves the card, using the same WebView2-
+ * safe gesture as movement.
+ */
+function ResizeHandle({
+  id,
+  title,
+  span,
+  gridStep,
+  preview,
+  persist,
+}: {
+  id: WidgetId;
+  title: string;
+  span: Span;
+  gridStep: () => { x: number; y: number };
+  preview: (next: { id: WidgetId; span: Span } | null) => void;
+  persist: (change: (current: CanvasLayout) => CanvasLayout) => void;
+}) {
+  // The gesture's own state. Not React state: it is read on every pointermove
+  // and never rendered, and a re-render per pixel is exactly what the preview
+  // above exists to avoid.
+  const from = useRef<{ x: number; y: number; span: Span } | null>(null);
+
+  const commit = useCallback(
+    (next: Span) => {
+      preview(null);
+      persist((current) => ({ ...current, span: { ...current.span, [id]: next } }));
+    },
+    [id, preview, persist],
+  );
+
+  return (
+    <span
+      className="resize"
+      role="button"
+      tabIndex={0}
+      aria-label={`resize the ${title} widget - arrow keys, or drag`}
+      aria-keyshortcuts="ArrowLeft ArrowRight ArrowUp ArrowDown"
+      title={`drag to resize, or focus and press an arrow key - now ${span.w}x${span.h}`}
+      onPointerDown={(event) => {
+        // Left button only. A right-click that started a resize would leave the
+        // gesture running under the context menu.
+        if (event.button !== 0) return;
+        event.preventDefault();
+        from.current = { x: event.clientX, y: event.clientY, span };
+        event.currentTarget.setPointerCapture(event.pointerId);
+      }}
+      onPointerMove={(event) => {
+        const start = from.current;
+        if (!start) return;
+        preview({
+          id,
+          span: resized(start.span, event.clientX - start.x, event.clientY - start.y, gridStep()),
+        });
+      }}
+      onPointerUp={(event) => {
+        const start = from.current;
+        from.current = null;
+        if (!start) return;
+        event.currentTarget.releasePointerCapture(event.pointerId);
+        commit(resized(start.span, event.clientX - start.x, event.clientY - start.y, gridStep()));
+      }}
+      // A cancelled gesture - a browser stealing the pointer, a touch turning
+      // into a scroll - puts the card back rather than leaving it mid-drag.
+      onPointerCancel={() => {
+        from.current = null;
+        preview(null);
+      }}
+      onKeyDown={(event) => {
+        const next = nudged(span, event.key);
+        if (!next) return;
+        event.preventDefault();
+        commit(next);
+      }}
+    >
+      <svg viewBox="0 0 10 10" width="10" height="10" aria-hidden focusable="false">
+        <path d="M9 1 1 9M9 5 5 9" stroke="currentColor" strokeWidth="1.2" fill="none" />
+      </svg>
+    </span>
+  );
+}
+
 export function App() {
-  const [layout, setLayout] = useState<Layout | null>(null);
+  const [layout, setLayout] = useState<CanvasLayout | null>(null);
+  const layoutRef = useRef<CanvasLayout | null>(null);
+  const saveQueue = useRef(Promise.resolve());
   const [agentWidgets, setAgentWidgets] = useState<AgentWidget[]>([]);
   const [anchor, setAnchor] = useState<Anchor>({ widget: "canvas" });
   const [asking, setAsking] = useState(false);
   const [lastRun, setLastRun] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
-  // Which widget is being dragged, and which one it is currently over.
-  // `24 ui state persistence` already stores the order; the grip has looked
-  // like a handle since the first canvas and never moved anything.
-  //
-  // **The grip is the draggable element**, and the first attempt at this made
-  // the whole card `draggable={dragging === id}` on the grip's `mousedown`.
-  // That cannot work: the browser decides whether a gesture is a drag at
-  // mousedown, and React sets the attribute a render later - by which time the
-  // gesture has already been rejected as a text selection. The card stays a
-  // plain drop target, which is the half that was right.
+  const [sidebarOpen, setSidebarOpen] = useState(false);
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  // Pointer capture works in both Chromium and the desktop WebView2. Native
+  // HTML drag-and-drop did not: WebView2 emitted dragover but no drop for the
+  // same grip gesture that completed in the browser.
   const [dragging, setDragging] = useState<WidgetId | null>(null);
   const [over, setOver] = useState<WidgetId | null>(null);
+  const moving = useRef<{ id: WidgetId; pointerId: number } | null>(null);
+  // `28 operator surface` makes the rendered grid the source of truth for both
+  // pointer axes, including its padding and gutters.
+  const board = useRef<HTMLElement | null>(null);
+  // `28 operator surface` previews a resize locally and persists only its final
+  // snapped span, rather than issuing one PUT per pointer pixel.
+  const [preview, setPreview] = useState<{ id: WidgetId; span: Span } | null>(null);
+  const [contextMenu, setContextMenu] = useState<{
+    id: WidgetId;
+    title: string;
+    x: number;
+    y: number;
+  } | null>(null);
+
+  const gridStep = useCallback(() => {
+    const element = board.current;
+    const unit = layoutRef.current?.unit ?? DEFAULT_WIDGET_UNIT;
+    if (!element) return { x: unit.width, y: unit.height };
+    const style = getComputedStyle(element);
+    return {
+      x: unit.width + (Number.parseFloat(style.columnGap) || 0),
+      y: unit.height + (Number.parseFloat(style.rowGap) || 0),
+    };
+  }, []);
 
   useEffect(() => {
     bridge
-      .loadState<Layout>("canvas")
-      .then((stored) => setLayout(stored?.v === LAYOUT_VERSION ? stored : DEFAULT_LAYOUT))
-      .catch(() => setLayout(DEFAULT_LAYOUT));
+      .loadState<unknown>("canvas")
+      .then((stored) => {
+        const next = normalizeLayout(stored, DEFAULT_LAYOUT);
+        layoutRef.current = next;
+        setLayout(next);
+      })
+      .catch(() => {
+        layoutRef.current = DEFAULT_LAYOUT;
+        setLayout(DEFAULT_LAYOUT);
+      });
     // Discovered, not imported: a widget appears because a file exists, which
     // is what makes "ask for a widget" a thing the operator can do.
     // Which project the canvas is pointed at, restored before anything can be
@@ -190,17 +388,43 @@ export function App() {
       .catch(() => setAgentWidgets([]));
   }, []);
 
+  useEffect(() => {
+    const closeOverlays = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      setSidebarOpen(false);
+      setContextMenu(null);
+      setSettingsOpen(false);
+    };
+    const closeContextMenu = (event: PointerEvent) => {
+      if (!(event.target instanceof Element) || !event.target.closest(".widget-context-menu")) {
+        setContextMenu(null);
+      }
+    };
+    document.addEventListener("keydown", closeOverlays);
+    document.addEventListener("pointerdown", closeContextMenu);
+    return () => {
+      document.removeEventListener("keydown", closeOverlays);
+      document.removeEventListener("pointerdown", closeContextMenu);
+    };
+  }, []);
+
   /**
-   * Layout edits compose: two toggles in the same tick must not race, and a
-   * closure over the last render's `layout` is exactly how one silently loses.
+   * Compose layout edits synchronously, then serialize their opaque PUTs.
+   *
+   * `24 ui state persistence` deliberately has no concurrency control. Keeping
+   * the current layout in this client and saving in order prevents Strict Mode
+   * duplicate effects and an older response from winning a rapid later edit.
    */
-  const persist = useCallback((change: (current: Layout) => Layout) => {
-    setLayout((current) => {
-      if (!current) return current;
-      const next = change(current);
-      bridge.saveState("canvas", next).catch((e: Error) => setError(e.message));
-      return next;
-    });
+  const persist = useCallback((change: (current: CanvasLayout) => CanvasLayout) => {
+    const current = layoutRef.current;
+    if (!current) return;
+    const next = change(current);
+    if (next === current) return;
+    layoutRef.current = next;
+    setLayout(next);
+    saveQueue.current = saveQueue.current
+      .then(() => bridge.saveState("canvas", next))
+      .catch((e: Error) => setError(e.message));
   }, []);
 
   // Selecting a run has to *show* one. A click that opens a widget the operator
@@ -211,9 +435,7 @@ export function App() {
       onSelection((runId) => {
         if (!runId) return;
         persist((current) =>
-          current.mounted.includes("run")
-            ? current
-            : { ...current, mounted: [...current.mounted, "run"] },
+          current.mounted.includes("run") ? current : toggleMounted(current, "run"),
         );
       }),
     // `persist` is stable, and re-subscribing on every layout change would drop
@@ -246,82 +468,201 @@ export function App() {
   }));
   const authored = agentWidgets.map((widget) => ({ ...widget, agent: true as const }));
   const available = [...built, ...authored];
+  const contextIndex = contextMenu ? layout.mounted.indexOf(contextMenu.id) : -1;
 
   return (
-    <div className="app">
-      <header>
-        <span className="brand">
-          far<span>seer</span>
-        </span>
-        <span className="dim small">
-          canvas - arrangement saved to farseer, not to this browser
-        </span>
-        <span className="grow" />
-        {/* Two groups, not one row of twelve. What farseer ships and what a cell
-            wrote are different kinds of thing - one is the product and the other
-            is something an agent made last week - and the list only grows in the
-            second half. The row wraps rather than pushing the page sideways. */}
-        <div className="chips">
-          {built.map(({ id, title }) => (
-            <WidgetChip key={id} id={id} title={title} layout={layout} persist={persist} />
+    <div
+      className={[
+        "app",
+        sidebarOpen ? "sidebar-open" : "",
+        sidebarCollapsed ? "sidebar-collapsed" : "",
+      ]
+        .filter(Boolean)
+        .join(" ")}
+    >
+      <button
+        className="sidebar-backdrop"
+        aria-label="Close widget navigation"
+        onClick={() => setSidebarOpen(false)}
+      />
+      <aside className="sidebar" aria-label="Widget navigation">
+        <div className="brand-row">
+          <div className="brand">
+            <svg viewBox="0 0 28 28" aria-hidden>
+              <path d="M4 14c2.8-5 6.1-7.5 10-7.5S21.2 9 24 14c-2.8 5-6.1 7.5-10 7.5S6.8 19 4 14Z" />
+              <circle cx="14" cy="14" r="3.2" />
+            </svg>
+            <span>farseer</span>
+          </div>
+          <button
+            className="icon-button collapse-sidebar"
+            aria-label={sidebarCollapsed ? "Expand sidebar" : "Collapse sidebar"}
+            onClick={() => setSidebarCollapsed((current) => !current)}
+          >
+            <svg viewBox="0 0 24 24" aria-hidden>
+              <path d={sidebarCollapsed ? "m9.5 6 6 6-6 6" : "m14.5 6-6 6 6 6"} />
+            </svg>
+          </button>
+        </div>
+
+        <div className="fleet-switcher">
+          <span className="fleet-mark" aria-hidden>F</span>
+          <span className="fleet-copy">
+            <b>Local fleet</b>
+            <small>layout saved to farseer</small>
+          </span>
+        </div>
+
+        <nav className="widget-nav" aria-label="Home widgets">
+          <p className="group-label">Home widgets</p>
+          {built.map(({ id, title, subtitle }) => (
+            <WidgetChip
+              key={id}
+              id={id}
+              title={title}
+              subtitle={subtitle}
+              layout={layout}
+              persist={persist}
+            />
           ))}
           {authored.length > 0 && (
             <>
-              <span className="divider" aria-hidden />
-              <span className="group-label" title="written into widgets/ by a cell, compiled and sandboxed">
-                authored
-              </span>
-              {authored.map(({ id, title }) => (
-                <WidgetChip key={id} id={id} title={title} layout={layout} persist={persist} />
+              <p className="group-label authored-label">Authored</p>
+              {authored.map(({ id, title, subtitle }) => (
+                <WidgetChip
+                  key={id}
+                  id={id}
+                  title={title}
+                  subtitle={subtitle}
+                  layout={layout}
+                  persist={persist}
+                />
               ))}
             </>
           )}
+        </nav>
+
+        <UnitControls unit={layout.unit} persist={persist} />
+
+        <div className="sidebar-foot">
+          <span className="status-orb" aria-hidden />
+          <span className="sidebar-foot-copy">
+            <b>Windows native</b>
+            <small>local operator surface</small>
+          </span>
         </div>
-      </header>
+      </aside>
 
-      <GateBar />
+      <section className="workspace">
+        <header className="topbar">
+          <button
+            className="icon-button open-sidebar"
+            aria-label="Open widget navigation"
+            onClick={() => {
+              setSidebarCollapsed(false);
+              setSidebarOpen(true);
+            }}
+          >
+            <svg viewBox="0 0 24 24" aria-hidden>
+              <path d="M4 7h16M4 12h16M4 17h16" />
+            </svg>
+          </button>
+          <div className="crumb">
+            <b>Home</b>
+            <span>live canvas</span>
+          </div>
+          <div className="top-actions">
+            <span className="saved-state"><span className="status-orb" aria-hidden />arrangement saved</span>
+            <button
+              className="icon-button"
+              aria-pressed={layout.mounted.includes("clock")}
+              aria-label={layout.mounted.includes("clock") ? "Hide clock widget" : "Show clock widget"}
+              title={layout.mounted.includes("clock") ? "Hide clock widget" : "Show clock widget"}
+              onClick={() => persist((current) => toggleMounted(current, "clock", true))}
+            >
+              <svg viewBox="0 0 24 24" aria-hidden>
+                <circle cx="12" cy="12" r="7.5" />
+                <path d="M12 7.5V12l3 2" />
+              </svg>
+            </button>
+            <button
+              className="icon-button"
+              aria-pressed={settingsOpen}
+              aria-label={settingsOpen ? "Close settings" : "Open settings"}
+              title={settingsOpen ? "Close settings" : "Open settings"}
+              onClick={() => setSettingsOpen((current) => !current)}
+            >
+              <svg viewBox="0 0 24 24" aria-hidden>
+                <circle cx="12" cy="12" r="3" />
+                <path d="M12 3v3M12 18v3M3 12h3M18 12h3M5.6 5.6l2.1 2.1M16.3 16.3l2.1 2.1M18.4 5.6l-2.1 2.1M7.7 16.3l-2.1 2.1" />
+              </svg>
+            </button>
+            <span className="profile" aria-label="Local operator">
+              <svg viewBox="0 0 24 24" aria-hidden>
+                <circle cx="12" cy="8.5" r="3.5" />
+                <path d="M5.5 20c.8-4 3-6 6.5-6s5.7 2 6.5 6" />
+              </svg>
+            </span>
+          </div>
+        </header>
+        {settingsOpen && (
+          <aside className="settings-popover" aria-label="Settings">
+            <div className="row">
+              <b>Settings</b>
+              <button className="chip" onClick={() => setSettingsOpen(false)}>close</button>
+            </div>
+            <SettingsWidget bridge={bridge} />
+          </aside>
+        )}
 
-      <main className="canvas">
+        <GateBar />
+
+        <main
+          className="canvas"
+          ref={board}
+          style={
+            {
+              "--unit-width": `${layout.unit.width}px`,
+              "--unit-height": `${layout.unit.height}px`,
+            } as React.CSSProperties
+          }
+        >
         {layout.mounted.map((id) => {
           const widget = available.find((candidate) => candidate.id === id);
           if (!widget) return null;
-          const wide = layout.wide.includes(id);
+          const span = normalizeSpan(preview?.id === id ? preview.span : layout.span[id]);
           return (
             <section
               key={id}
+              aria-labelledby={`widget-${id}-title`}
+              data-widget-id={id}
               className={[
-                wide ? "widget wide" : "widget",
+                "widget",
+                `widget-${id}`,
                 dragging === id ? "dragging" : "",
                 over === id && dragging !== id ? "drop-target" : "",
               ]
                 .filter(Boolean)
                 .join(" ")}
+              // `28 operator surface` makes CSS grid spans the sole rendered
+              // interpretation of the arrangement blob.
+              style={
+                {
+                  "--w": span.w,
+                  "--h": span.h,
+                } as React.CSSProperties
+              }
               onFocus={() => setAnchor({ widget: widget.title })}
               onMouseEnter={() => setAnchor({ widget: widget.title })}
-              // Drop lands on the whole widget rather than the grip, because a
-              // 12px target is a target nobody hits.
-              onDragOver={(event) => {
-                if (!dragging) return;
+              onPointerDown={() => setAnchor({ widget: widget.title })}
+              onContextMenu={(event) => {
                 event.preventDefault();
-                setOver(id);
-              }}
-              onDragLeave={() => setOver((current) => (current === id ? null : current))}
-              onDrop={(event) => {
-                event.preventDefault();
-                setOver(null);
-                // Read from the transfer rather than from state: a drop is
-                // handled on a different element than the one that set the
-                // state, and Firefox clears `dragging` before it fires.
-                const from = event.dataTransfer.getData("text/farseer-widget") || dragging;
-                setDragging(null);
-                if (!from || from === id) return;
-                // Move rather than swap: an operator dragging one card past
-                // another expects the rest to close up behind it.
-                persist((current) => {
-                  const order = current.mounted.filter((w) => w !== from);
-                  const at = order.indexOf(id);
-                  order.splice(at < 0 ? order.length : at, 0, from);
-                  return { ...current, mounted: order };
+                setAnchor({ widget: widget.title });
+                setContextMenu({
+                  id,
+                  title: widget.title,
+                  x: Math.max(8, Math.min(event.clientX, window.innerWidth - 196)),
+                  y: Math.max(8, Math.min(event.clientY, window.innerHeight - 174)),
                 });
               }}
             >
@@ -330,7 +671,7 @@ export function App() {
                   className="grip"
                   role="button"
                   aria-label={`move the ${widget.title} widget - arrow keys, or drag`}
-                  aria-keyshortcuts="ArrowLeft ArrowRight"
+                  aria-keyshortcuts="ArrowLeft ArrowRight ArrowUp ArrowDown"
                   title="drag to move this widget, or focus it and press an arrow key"
                   // Focusable, because a grip that only answers to a drag is a
                   // canvas a keyboard cannot arrange at all - and the drag was
@@ -358,22 +699,56 @@ export function App() {
                       return { ...current, mounted: order };
                     });
                   }}
-                  // Only the grip drags, so selecting text in a widget body is
-                  // still a selection.
-                  draggable
-                  onDragStart={(event) => {
-                    event.dataTransfer.effectAllowed = "move";
-                    event.dataTransfer.setData("text/farseer-widget", id);
+                  // Pointer events are shared by Chromium and WebView2, unlike
+                  // native HTML drag-and-drop, which never completed its drop
+                  // in the desktop shell.
+                  onPointerDown={(event) => {
+                    if (event.button !== 0) return;
+                    event.preventDefault();
+                    moving.current = { id, pointerId: event.pointerId };
                     setDragging(id);
+                    event.currentTarget.setPointerCapture(event.pointerId);
                   }}
-                  onDragEnd={() => {
+                  onPointerMove={(event) => {
+                    const active = moving.current;
+                    if (!active || active.pointerId !== event.pointerId) return;
+                    const target = document
+                      .elementFromPoint(event.clientX, event.clientY)
+                      ?.closest<HTMLElement>("[data-widget-id]")?.dataset.widgetId;
+                    setOver(target && target !== active.id ? target : null);
+                  }}
+                  onPointerUp={(event) => {
+                    const active = moving.current;
+                    if (!active || active.pointerId !== event.pointerId) return;
+                    const target = document
+                      .elementFromPoint(event.clientX, event.clientY)
+                      ?.closest<HTMLElement>("[data-widget-id]")?.dataset.widgetId;
+                    moving.current = null;
+                    setDragging(null);
+                    setOver(null);
+                    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+                      event.currentTarget.releasePointerCapture(event.pointerId);
+                    }
+                    if (!target || target === active.id) return;
+                    persist((current) => {
+                      const mounted = moveToSlot(current.mounted, active.id, target);
+                      return mounted === current.mounted ? current : { ...current, mounted };
+                    });
+                  }}
+                  onPointerCancel={() => {
+                    moving.current = null;
                     setDragging(null);
                     setOver(null);
                   }}
                 >
-                  ⠿
+                  <svg viewBox="0 0 16 16" aria-hidden focusable="false">
+                    <circle cx="5" cy="5" r="1" />
+                    <circle cx="11" cy="5" r="1" />
+                    <circle cx="5" cy="11" r="1" />
+                    <circle cx="11" cy="11" r="1" />
+                  </svg>
                 </span>
-                <b>{widget.title}</b>
+                <h2 id={`widget-${id}-title`}>{widget.title}</h2>
                 <span className="dim small">{widget.subtitle}</span>
                 {widget.agent && (
                   <span className="badge agent" title="written into widgets/ and compiled here, sandboxed">
@@ -381,20 +756,27 @@ export function App() {
                   </span>
                 )}
                 <span className="grow" />
-                <button
-                  className="chip"
-                  title={wide ? "make it narrow" : "make it wide"}
-                  onClick={() =>
+                <select
+                  className="badge size"
+                  aria-label={`Size of ${widget.title} widget`}
+                  value={`${span.w}x${span.h}`}
+                  onChange={(event) => {
+                    const next = WIDGET_SPANS.find(
+                      (candidate) => `${candidate.w}x${candidate.h}` === event.currentTarget.value,
+                    );
+                    if (!next) return;
                     persist((current) => ({
                       ...current,
-                      wide: current.wide.includes(id)
-                        ? current.wide.filter((w) => w !== id)
-                        : [...current.wide, id],
-                    }))
-                  }
+                      span: { ...current.span, [id]: next },
+                    }));
+                  }}
                 >
-                  {wide ? "narrow" : "wide"}
-                </button>
+                  {WIDGET_SPANS.map((candidate) => (
+                    <option key={`${candidate.w}x${candidate.h}`} value={`${candidate.w}x${candidate.h}`}>
+                      {candidate.w}x{candidate.h}
+                    </option>
+                  ))}
+                </select>
               </div>
               <div className="body">
                 {widget.agent ? (
@@ -411,72 +793,146 @@ export function App() {
                   })()
                 )}
               </div>
+              <ResizeHandle
+                id={id}
+                title={widget.title}
+                span={span}
+                gridStep={gridStep}
+                preview={setPreview}
+                persist={persist}
+              />
             </section>
           );
         })}
         {layout.mounted.length === 0 && (
-          <p className="empty">Nothing mounted. Add a widget from the header.</p>
+          <p className="empty">Nothing is visible. Show a widget from the sidebar.</p>
         )}
       </main>
-
-      <footer>
-        <form
-          onSubmit={(event) => {
-            event.preventDefault();
-            const field = new FormData(event.currentTarget).get("ask");
-            const text = typeof field === "string" ? field.trim() : "";
-            if (text) {
-              void ask(text);
-              event.currentTarget.reset();
-            }
-          }}
-        >
-          {/* The anchor is the whole reason this box exists beside the one in
-              the Conversation widget. Both go to the top manager - `28 operator
-              surface`: the widget you type from is the anchor, never the
-              destination - so with the anchor invisible they were two identical
-              boxes, and a duplicate control with no visible difference reads as
-              a bug. Naming what it is anchored to is the difference. */}
-          <span
-            className="badge"
-            title="every request goes to the top manager, whatever you are looking at"
+        {contextMenu && (
+          <div
+            className="widget-context-menu"
+            role="menu"
+            aria-label={`${contextMenu.title} widget actions`}
+            style={{ left: contextMenu.x, top: contextMenu.y }}
+            onContextMenu={(event) => event.preventDefault()}
           >
-            to: top manager
-          </span>
-          <span className="badge accent" title="what the top manager is told you were looking at">
-            about: {anchor.widget}
-          </span>
-          <input
-            name="ask"
-            autoComplete="off"
-            disabled={asking}
-            // A placeholder is not a name: it disappears the moment anyone types
-            // into it, and a screen reader announcing nothing is what a control
-            // with only a placeholder amounts to.
-            aria-label={`Ask the top manager about ${anchor.widget}`}
-            placeholder={`Ask about ${anchor.widget} - hover another widget to ask about that instead`}
-          />
-          <button className="chip on" disabled={asking}>
-            {asking ? "sending" : "send"}
-          </button>
-        </form>
-        <p className="dim small">
-          {error ? (
-            <span className="bad">{error}</span>
-          ) : lastRun ? (
-            <>
-              accepted as run <span className="mono">{lastRun.slice(0, 8)}</span> - the answer
-              arrives on the event stream, not here
-            </>
-          ) : (
-            <>
-              The widget you type from is the anchor, never the destination. The top manager
-              decides where the work goes - to say something unanchored, use the box inside the
-              Conversation widget.
-            </>
-          )}
-        </p>
-      </footer>
+            <p>{contextMenu.title}</p>
+            <button
+              type="button"
+              role="menuitem"
+              disabled={contextIndex <= 0}
+              onClick={() => {
+                persist((current) => {
+                  const mounted = moveBy(current.mounted, contextMenu.id, -1);
+                  return mounted === current.mounted ? current : { ...current, mounted };
+                });
+                setContextMenu(null);
+              }}
+            >
+              Move left
+            </button>
+            <button
+              type="button"
+              role="menuitem"
+              disabled={contextIndex < 0 || contextIndex >= layout.mounted.length - 1}
+              onClick={() => {
+                persist((current) => {
+                  const mounted = moveBy(current.mounted, contextMenu.id, 1);
+                  return mounted === current.mounted ? current : { ...current, mounted };
+                });
+                setContextMenu(null);
+              }}
+            >
+              Move right
+            </button>
+            <button
+              type="button"
+              role="menuitem"
+              onClick={() => {
+                persist((current) => ({
+                  ...current,
+                  span: { ...current.span, [contextMenu.id]: DEFAULT_WIDGET_SPAN },
+                }));
+                setContextMenu(null);
+              }}
+            >
+              Reset to 1x1
+            </button>
+            <button
+              type="button"
+              role="menuitem"
+              className="danger"
+              onClick={() => {
+                persist((current) => ({
+                  ...current,
+                  mounted: current.mounted.filter((id) => id !== contextMenu.id),
+                }));
+                setContextMenu(null);
+              }}
+            >
+              Unpin from canvas
+            </button>
+          </div>
+        )}
+
+        <footer className="home-composer">
+          <form
+            onSubmit={(event) => {
+              event.preventDefault();
+              const field = new FormData(event.currentTarget).get("ask");
+              const text = typeof field === "string" ? field.trim() : "";
+              if (text) {
+                void ask(text);
+                event.currentTarget.reset();
+              }
+            }}
+          >
+            <div className="composer-context">
+              <span className="route-chip" title="every request goes to the top manager">
+                to top manager
+              </span>
+              <button
+                type="button"
+                className="anchor-chip"
+                title="reset the request context to the canvas"
+                onClick={() => setAnchor({ widget: "canvas" })}
+              >
+                about {anchor.widget}
+              </button>
+            </div>
+            <textarea
+              name="ask"
+              rows={1}
+              autoComplete="off"
+              disabled={asking}
+              aria-label={`Ask the top manager about ${anchor.widget}`}
+              placeholder={`Ask the top manager about ${anchor.widget}`}
+            />
+            <div className="composer-actions">
+              <p role={error ? "alert" : "status"}>
+                {error ? (
+                  <span className="bad">{error}</span>
+                ) : lastRun ? (
+                  <>
+                    accepted as run <span className="mono">{lastRun.slice(0, 8)}</span>
+                  </>
+                ) : (
+                  "Point to a widget to change context."
+                )}
+              </p>
+              <button
+                className="send-button"
+                disabled={asking}
+                aria-label={asking ? "Sending to top manager" : "Send to top manager"}
+              >
+                <svg viewBox="0 0 24 24" aria-hidden>
+                  <path d="m5 12 14-7-4 14-3-6Z" />
+                </svg>
+              </button>
+            </div>
+          </form>
+        </footer>
+      </section>
     </div>
   );
 }

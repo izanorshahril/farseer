@@ -6,6 +6,7 @@
     "dev": "vite",
     "build": "tsc --noEmit && vite build && bun run scripts/build-widgets.ts",
     "check": "tsc --noEmit",
+    "test": "bun test tests",
     "build:widgets": "bun run scripts/build-widgets.ts"
   },
   "dependencies": {

@@ -24,6 +24,42 @@ type Listener = (runId: string | null) => void;
 let selected: string | null = null;
 const listeners = new Set<Listener>();
 
+export type SubjectSelection = {
+  conversation: string | null;
+  task: string | null;
+  run: string | null;
+  project: string | null;
+  managerRunner: string | null;
+};
+
+type SubjectListener = (selection: SubjectSelection) => void;
+
+let subject: SubjectSelection = {
+  conversation: null,
+  task: null,
+  run: null,
+  project: null,
+  managerRunner: null,
+};
+const subjectListeners = new Set<SubjectListener>();
+
+/** Shared first-party subject context from `40 work model and session explorer`. */
+export function selectedSubject(): SubjectSelection {
+  return subject;
+}
+
+export function selectSubject(change: Partial<SubjectSelection>): void {
+  subject = { ...subject, ...change };
+  selected = subject.run;
+  for (const listener of [...listeners]) listener(selected);
+  for (const listener of [...subjectListeners]) listener(subject);
+}
+
+export function onSubjectSelection(listener: SubjectListener): () => void {
+  subjectListeners.add(listener);
+  return () => subjectListeners.delete(listener);
+}
+
 /** The run currently selected, or `null` when none is. */
 export function selectedRun(): string | null {
   return selected;
@@ -31,11 +67,8 @@ export function selectedRun(): string | null {
 
 /** Point the canvas at a run. Passing the selected run again clears it. */
 export function selectRun(runId: string | null): void {
-  // Clicking the open run closes it, which is the behaviour of every list that
-  // drives a detail pane, and the only way back to "nothing selected" without
-  // a second control.
-  selected = selected === runId ? null : runId;
-  for (const listener of [...listeners]) listener(selected);
+  const next = selected === runId ? null : runId;
+  selectSubject({ run: next });
 }
 
 /** Listen for changes. Returns the unsubscribe. */

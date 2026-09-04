@@ -565,6 +565,10 @@ impl FarseerMcp {
             ));
         }
         let run_id = RunId::new();
+        self.state
+            .store()
+            .record_run_parent(run_id, manager.contract.run_id, "delegation")
+            .map_err(store_error)?;
         manager
             .child_runs
             .lock()
@@ -780,6 +784,10 @@ impl FarseerMcp {
                 return Err(api_error(error));
             }
         };
+        self.state
+            .store()
+            .record_run_parent(run_id, manager.contract.run_id, "cell_call")
+            .map_err(store_error)?;
 
         // The caller's own record entry for the call, per `06 cell transport`
         // section 6, and the link `02 record scope` left open between a
@@ -911,7 +919,7 @@ fn cell_call_contract(
         cell_id: callee.cell_id.clone(),
         goal: call.goal.clone(),
         workspace: callee.workspace_strategy,
-        runner: callee.manager.runner.clone(),
+        runner: callee.manager.runner().to_string(),
         tool_grants: callee.tool_grants(),
         // The callee's own, like the runner and the grants beside it: a caller
         // does not get to widen what the cell it is calling may touch.

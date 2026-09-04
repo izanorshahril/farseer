@@ -1,0 +1,191 @@
+{
+  "schema": "farseer.prototype.design",
+  "version": 1,
+  "seed": "b452fefe",
+  "status": "accepted-static-interactive-prototype",
+  "boundary": ".scratch/farseer/prototypes/berd-home/",
+  "provenance": {
+    "implementation": ["index.html", "style.css", "app.js"],
+    "review_rasters": [".impeccable/review/desktop.png", ".impeccable/review/mobile.png"],
+    "surface_record": ".impeccable/surfaces/scratch-farseer-prototypes-berd-home-index-html.md",
+    "product_record": "PRODUCT.md",
+    "production_ui_status": "the accepted direction is implemented in ui/; this prototype remains its approval reference"
+  },
+  "intent": {
+    "job": "Reorient a local fleet operator after an interruption within five seconds.",
+    "primary_action": "Start or resume work through the home composer.",
+    "composition": "Berd home canvas homage translated from single-agent pins to Farseer fleet objects.",
+    "routing": "AI requests route to the top manager; direct verbs remain run controls.",
+    "deferred": ["chat history", "full conversation screen", "final chat composition"]
+  },
+  "tokens": {
+    "light": {
+      "bg": "#f4f4f2",
+      "canvas": "#f8f8f6",
+      "panel": "#ffffff",
+      "panel_2": "#f5f5f3",
+      "ink": "#252525",
+      "muted": "#70706d",
+      "faint": "#92928e",
+      "line": "#e5e5e1",
+      "line_strong": "#d4d4cf",
+      "blue": "#4d72ff",
+      "blue_soft": "#e9edff",
+      "violet": "#7d64d9",
+      "violet_soft": "#eeeafc",
+      "coral": "#d95f4b",
+      "coral_soft": "#ffebe7",
+      "mint": "#31846f",
+      "mint_soft": "#e2f2ed",
+      "amber": "#b06d20",
+      "healthy_status": "#38a275"
+    },
+    "dark": {
+      "bg": "#161615",
+      "canvas": "#1b1b1a",
+      "panel": "#242423",
+      "panel_2": "#2b2b29",
+      "ink": "#f1f1ed",
+      "muted": "#b4b4ae",
+      "faint": "#8a8a84",
+      "line": "#373735",
+      "line_strong": "#4a4a46",
+      "blue": "#8298ff",
+      "blue_soft": "#2d3454",
+      "violet": "#ad9ee7",
+      "violet_soft": "#39334b",
+      "coral": "#ee8979",
+      "coral_soft": "#4b302d",
+      "mint": "#74bda9",
+      "mint_soft": "#293e38",
+      "amber": "#dba45f",
+      "healthy_status": "#38a275"
+    },
+    "typography": {
+      "body_family": "Inter, Segoe UI Variable Text, Segoe UI, sans-serif",
+      "body_size_px": 14,
+      "brand": {"size_px": 18, "weight": 680, "letter_spacing_em": -0.035},
+      "navigation": {"size_px": 13, "weight": 620},
+      "clock": {"size_px": 46, "weight": 540, "line_height": 1, "letter_spacing_em": -0.05, "numeric": "tabular-nums"},
+      "greeting": {"size_px": 12, "letter_spacing_em": -0.01},
+      "pin_title": {"size_px": 14, "weight": 680, "letter_spacing_em": -0.015},
+      "pin_subtitle": {"size_px": 11, "color_token": "muted"},
+      "supporting_copy": {"size_px": [10, 11, 12, 13], "color_token": "muted"},
+      "section_label": {"size_px": 11, "weight": 650, "transform": "uppercase", "letter_spacing_em": 0.07},
+      "mono_family": "Geist Mono, Cascadia Code, monospace",
+      "kbd_size_px": 9,
+      "path_size_px": 9
+    },
+    "geometry": {
+      "shell": {"outer_inset_px": 8, "column_gap_px": 8, "sidebar_width_px": 248, "sidebar_collapsed_width_px": 72},
+      "radius_px": {"shell_regions": 18, "fleet_switcher": 13, "pin": 18, "composer": 22, "mobile_composer": 18},
+      "topbar_height_px": 52,
+      "sidebar_padding": "12px 10px",
+      "brand_row_height_px": 40,
+      "fleet_switcher": {"height_px": 52, "margin": "10px 0 12px", "padding": "6px 8px", "mark_size_px": 32, "mark_radius_px": 9},
+      "nav_row": {"height_px": 36, "gap_px": 2, "horizontal_padding_px": 10, "radius_px": 9},
+      "project_row": {"height_px": 34, "radius_px": 8},
+      "canvas_dots": {"dot_radius_px": 0.8, "transparent_cutoff_px": 0.9, "size_px": 20, "position": "10px 10px", "drag_size_px": 16},
+      "pins": {
+        "padding_px": 15,
+        "max_width_expression": "min(var(--w), calc(100% - 28px))",
+        "icon_tile": {"size_px": 34, "radius_px": 10},
+        "header_gap_px": 10,
+        "initial": {
+          "clock": {"left": "38%", "top": "33%", "width_px": 320},
+          "attention": {"left": "7%", "top": "10%", "width_px": 286},
+          "run": {"left": "68%", "top": "13%", "width_px": 320},
+          "projects": {"left": "12%", "top": "58%", "width_px": 310},
+          "cells": {"left": "70%", "top": "60%", "width_px": 294}
+        }
+      },
+      "composer": {"max_width_px": 580, "narrow_max_width_px": 520, "min_height_px": 112, "padding": "10px 11px 9px", "bottom_px": 24, "textarea_height_px": 38, "textarea_max_height_px": 84, "send_size_px": 30},
+      "canvas_controls": {"right_px": 14, "bottom_px": 14, "padding_px": 3},
+      "toast": {"desktop_bottom_px": 154, "mobile_bottom_px": 128, "duration_ms": 2600}
+    }
+  },
+  "composition": {
+    "desktop": {
+      "sidebar": "Persistent left column.",
+      "topbar": ["Home", "Preview data", "3 cells", "Search", "clock visibility toggle", "theme toggle", "operator profile"],
+      "clock": {"kind": "optional draggable pin", "left": "38%", "top": "33%", "width_px": 320},
+      "pins": ["clock", "attention", "run", "projects", "cells"],
+      "composer": "Centered at the bottom of the canvas.",
+      "controls": "Recenter and arrangement controls at the lower right."
+    },
+    "mobile": {
+      "breakpoint_max_width_px": 820,
+      "shell": "Single full-width document with no outer inset.",
+      "topbar": "Sticky 52px row with menu, Home, clock visibility, and theme affordances.",
+      "canvas": {"min_height": "calc(100vh - 52px)", "padding": "14px 14px 170px", "gap_px": 12},
+      "clock": {"kind": "normal-flow optional pin", "font_size_px": 46, "greeting_margin_top_px": 7},
+      "pin_flow": {"position": "relative", "width": "100%", "max_width_px": 540, "order": ["clock", "attention", "run", "projects", "composer", "cells"]},
+      "composer": {"position": "sticky", "bottom_px": 10, "width": "calc(100% - 20px)", "min_height_px": 105},
+      "hidden": ["canvas controls", "fleet state"],
+      "small_breakpoint_max_width_px": 480,
+      "small_breakpoint_changes": ["hide search", "hide profile", "hide Preview data badge", "hide Prototype only helper", "textarea size 16px"]
+    },
+    "intermediate": {"breakpoint_max_width_px": 1100, "run_left": "62%", "cells_left": "64%", "composer_width": "min(520px, calc(100% - 130px))"}
+  },
+  "depth": {
+    "light": {
+      "standard": ["0 12px 36px rgba(29,29,27,.07)", "0 2px 5px rgba(29,29,27,.04)"],
+      "lift": ["0 24px 64px rgba(29,29,27,.14)", "0 4px 12px rgba(29,29,27,.08)"],
+      "sidebar": "0 1px 2px rgba(0,0,0,.02)",
+      "composer": ["0 18px 55px rgba(29,29,27,.13)", "0 2px 5px rgba(29,29,27,.05)"]
+    },
+    "dark": {
+      "standard": ["0 12px 36px rgba(0,0,0,.24)", "0 2px 5px rgba(0,0,0,.16)"],
+      "lift": ["0 24px 64px rgba(0,0,0,.42)", "0 4px 12px rgba(0,0,0,.24)"]
+    },
+    "hover": "Pins translate upward 2px and use line-strong borders.",
+    "dragging": "Pins use lift depth, scale 1.018, rotate .35deg, z-index 8, and a grabbing cursor."
+  },
+  "motion": {
+    "easing": "cubic-bezier(.16,1,.3,1)",
+    "durations_ms": {"icon": 180, "shell": 380, "canvas": 400, "pin_border": 200, "pin_elevation": 280, "composer": 200, "send": 180, "toast_opacity": 200, "toast_position": 300, "entry": 480},
+    "entry": {"pin": {"opacity": 0.72, "filter": "blur(3px)", "transform": "translateY(8px) scale(.985)"}, "composer": {"opacity": 0.7, "transform": "translate(-50%, 9px)"}},
+    "running_badge": {"animation": "pulse", "duration_ms": 2000, "timing": "ease-in-out"},
+    "reduced_motion": "All animation and transition durations become .01ms, smooth scrolling is disabled, and pin entry blur is removed."
+  },
+  "interaction": {
+    "sidebar": {"collapse_class": "collapsed", "collapsed_grid_width_px": 72, "mobile_open_class": "sidebar-open", "escape_closes_mobile": true},
+    "search": {"open": ["search button", "Ctrl-K", "Meta-K"], "surface": "modal command palette", "focus": "search input after requestAnimationFrame", "close": ["backdrop", "Escape"], "return_focus": "search button"},
+    "theme": {"root_attribute": "data-theme", "values": ["light", "dark"], "feedback": "toast"},
+    "navigation": "Non-home navigation and the Windows health row show a home-entry toast instead of changing product surfaces.",
+    "projects": "Matching data-project controls become selected, the composer context name updates, and a toast confirms the project.",
+    "pin_actions": "Pin action buttons show a toast that detail views come after home approval.",
+    "arrangement": {"initial": true, "aria_pressed": true, "true_behavior": "pins unlocked for dragging", "false_behavior": "pins locked in place"},
+    "drag": {"pointer": "primary button only", "button_targets_ignored": true, "pointer_capture": true, "canvas_inset_px": 12, "finish_events": ["pointerup", "pointercancel"]},
+    "keyboard_pin_movement": {"keys": ["ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight"], "step_px": 8, "shift_step_px": 24, "clamped": true},
+    "recenter": "Resets each pin left and top to its original CSS variable position.",
+    "composer": {"auto_height": {"base_px": 38, "max_px": 84}, "empty_submit": "Focus prompt and show instruction-required toast.", "nonempty_submit": "Show no-request-sent toast, clear value, and reset height to 38px."},
+    "clock": {"source": "local browser time", "format": "Intl.DateTimeFormat([], { hour: '2-digit', minute: '2-digit' })", "refresh_ms": 15000, "greeting": {"before_12": "Good morning", "before_18": "Good afternoon", "otherwise": "Good evening"}, "visibility": {"initial": true, "hide_control": "clock pin", "toggle_control": "persistent top bar", "aria_pressed_tracks_visible": true, "feedback": "toast"}}
+  },
+  "fleet_semantics": {
+    "fleet": {"name": "Local fleet", "cell_count": 3, "topbar_summary": "3 cells"},
+    "projects": [
+      {"name": "farseer", "marker": "blue", "status": "2 live", "root": "D:\\Dev\\farseer"},
+      {"name": "berd study", "marker": "violet", "status": "quiet", "root": "D:\\Dev\\berd"},
+      {"name": "orca", "marker": "amber", "status": "quiet"}
+    ],
+    "attention": {"title": "Needs you", "subtitle": "One run is waiting", "run": "Review workspace choice", "route": "top manager", "age": "8m"},
+    "active_run": {"project": "farseer", "route": "top manager", "title": "Build a second operator surface", "description": "Reading Berd's home canvas and preserving Farseer's fleet model.", "runner": "pi", "elapsed": "6m 24s", "state": "running"},
+    "cells": [
+      {"name": "zero", "runner": "pi", "role": "manager", "state": "ready", "avatar": "0"},
+      {"name": "social", "runner": "goose", "role": "manager", "state": "ready", "avatar": "S"},
+      {"name": "research", "runner": "codex", "role": "manager", "state": "idle", "avatar": "R"}
+    ],
+    "rules": ["A cell widget represents a cell and never addresses one runner.", "Every AI request routes to the top manager.", "State color communicates truth such as attention, running, ready, idle, or project identity."]
+  },
+  "scope_limits": [
+    "This record describes a static interactive approval prototype only.",
+    "The prototype does not replace or modify production ui/.",
+    "The composer sends no AI request and implements no chat, history, or conversation screen.",
+    "Navigation, search, actions, settings, project changes, theme changes, and toasts are demo feedback rather than production routing.",
+    "Pin arrangement is transient DOM state and is not persisted to the runtime arrangement blob.",
+    "Projects, runs, cells, paths, times, and statuses are synthetic preview data.",
+    "Backend APIs, runner processes, worker contracts, quota accounting, memory records, lifecycle control, and evidence records are outside scope.",
+    "The later chat composition remains a separate design decision and may use Claude Code desktop as a reference."
+  ]
+}

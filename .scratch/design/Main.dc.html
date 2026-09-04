@@ -1,0 +1,234 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+  <style>
+    body { margin: 0; font: 13px/1.5 system-ui, "Segoe UI", sans-serif; background: #0b0d10; color: #e6edf3; }
+    a { color: #58a6ff; } a:hover { color: #79b8ff; }
+    .hd { display: flex; align-items: center; gap: 8px; padding: 8px 10px; border-bottom: 1px solid #232b35; }
+    .hd b { font-size: 13px; font-weight: 600; }
+    .sub { color: #8b97a6; font-size: 11px; }
+    .sz { font: 10px/1 ui-monospace, Consolas, monospace; color: #7a8491; }
+    .card { display: flex; flex-direction: column; background: #12161b; border: 1px solid #232b35; border-radius: 6px; overflow: hidden; }
+    .bd { padding: 10px 12px; display: flex; flex-direction: column; overflow: hidden; }
+    .m { font-family: ui-monospace, Consolas, monospace; }
+    .dot { width: 6px; height: 6px; border-radius: 50%; flex-shrink: 0; }
+    .rail-i { width: 30px; height: 30px; border-radius: 5px; display: grid; place-items: center; }
+    .zone { font: 10px/1 ui-monospace, Consolas, monospace; color: #7a8491; letter-spacing: 0.08em; }
+    .pin { display: flex; align-items: center; gap: 8px; padding: 5px 8px; border-radius: 5px; font-size: 12px; color: #8b97a6; }
+    .ev { display: grid; grid-template-columns: 52px 1fr; gap: 8px; font: 11px/1.5 ui-monospace, Consolas, monospace; padding: 2px 0; border-bottom: 1px solid rgba(35,43,53,0.5); }
+    .rr { display: grid; grid-template-columns: 62px 128px 58px 62px 54px 1fr; gap: 8px; align-items: baseline; font-size: 12px; padding: 3px 0; border-bottom: 1px solid rgba(35,43,53,0.5); }
+    .vb { padding: 2px 6px; border-radius: 4px; border: 1px solid #232b35; color: #8b97a6; font-size: 10px; }
+    .bar { height: 4px; border-radius: 2px; background: #232b35; overflow: hidden; }
+  </style>
+</helmet>
+<div style="width: 1440px; height: 900px; display: flex; flex-direction: column; background: #0b0d10; overflow: hidden;">
+
+  <div style="display: flex; align-items: center; gap: 10px; padding: 9px 14px; background: #12161b; border-bottom: 1px solid #232b35; flex-shrink: 0;">
+    <span style="font-weight: 650;">far<span style="color: #58a6ff;">seer</span></span>
+    <div style="display: flex; align-items: center; gap: 4px; margin-left: 8px;">
+      <span style="padding: 5px 10px; border-radius: 5px; border: 1px solid #58a6ff; background: #171c23; color: #e6edf3; font-size: 11px;">fleet</span>
+      <span style="padding: 5px 10px; border-radius: 5px; border: 1px solid #232b35; background: #171c23; color: #8b97a6; font-size: 11px;">content</span>
+      <span style="padding: 5px 10px; border-radius: 5px; border: 1px solid #232b35; background: #171c23; color: #8b97a6; font-size: 11px;">markets</span>
+      <span style="padding: 5px 8px; border-radius: 5px; border: 1px dashed #232b35; color: #7a8491; font-size: 11px;">+</span>
+    </div>
+    <span style="flex: 1;"></span>
+    <div style="display: flex; align-items: center; gap: 6px; padding: 5px 10px; border-radius: 5px; border: 1px solid #232b35; background: #171c23; width: 260px;">
+      <svg width="12" height="12" viewBox="0 0 16 16" fill="none"><circle cx="7" cy="7" r="4.5" stroke="#7a8491" stroke-width="1.3"/><path d="M10.5 10.5 14 14" stroke="#7a8491" stroke-width="1.3" stroke-linecap="round"/></svg>
+      <span style="color: #7a8491; font-size: 11px;">runs, cells, widgets</span>
+      <span style="flex: 1;"></span>
+      <span class="m" style="font-size: 10px; color: #7a8491; border: 1px solid #232b35; border-radius: 3px; padding: 3px 4px;">Ctrl K</span>
+    </div>
+    <div style="display: flex; align-items: center; gap: 4px;">
+      <span style="padding: 5px 10px; border-radius: 5px; border: 1px solid #58a6ff; background: #171c23; color: #e6edf3; font-size: 11px;">Runs</span>
+      <span style="padding: 5px 10px; border-radius: 5px; border: 1px solid #232b35; background: #171c23; color: #8b97a6; font-size: 11px;">Activity</span>
+      <span style="padding: 5px 10px; border-radius: 5px; border: 1px solid #232b35; background: #171c23; color: #8b97a6; font-size: 11px;">Cells</span>
+    </div>
+  </div>
+
+  <div style="flex: 1; display: flex; min-height: 0; position: relative;">
+
+    <div style="width: 48px; flex-shrink: 0; background: #12161b; border-right: 1px solid #232b35; display: flex; flex-direction: column; align-items: center; gap: 6px; padding: 8px 0;">
+      <div class="rail-i" style="background: #171c23; border: 1px solid #58a6ff;">
+        <svg width="16" height="16" viewBox="0 0 20 20" fill="none"><rect x="2.5" y="2.5" width="6" height="6" rx="1" stroke="#58a6ff" stroke-width="1.3"/><rect x="11.5" y="2.5" width="6" height="6" rx="1" stroke="#58a6ff" stroke-width="1.3"/><rect x="2.5" y="11.5" width="6" height="6" rx="1" stroke="#58a6ff" stroke-width="1.3"/><rect x="11.5" y="11.5" width="6" height="6" rx="1" stroke="#58a6ff" stroke-width="1.3"/></svg>
+      </div>
+      <div class="rail-i"><svg width="16" height="16" viewBox="0 0 20 20" fill="none"><path d="M3 5.5h14M3 10h14M3 14.5h9" stroke="#7a8491" stroke-width="1.3" stroke-linecap="round"/></svg></div>
+      <div class="rail-i"><svg width="16" height="16" viewBox="0 0 20 20" fill="none"><rect x="2.5" y="3.5" width="4" height="13" rx="1" stroke="#7a8491" stroke-width="1.3"/><rect x="8" y="3.5" width="4" height="9" rx="1" stroke="#7a8491" stroke-width="1.3"/><rect x="13.5" y="3.5" width="4" height="6" rx="1" stroke="#7a8491" stroke-width="1.3"/></svg></div>
+      <div style="width: 22px; height: 1px; background: #232b35; margin: 2px 0;"></div>
+      <div class="rail-i" style="position: relative;">
+        <svg width="16" height="16" viewBox="0 0 20 20" fill="none"><path d="M10 2.5 12.2 7.4 17.5 8 13.6 11.6 14.7 16.8 10 14.2 5.3 16.8 6.4 11.6 2.5 8 7.8 7.4z" stroke="#7a8491" stroke-width="1.3" stroke-linejoin="round"/></svg>
+        <span style="position: absolute; top: 3px; right: 2px; width: 5px; height: 5px; border-radius: 50%; background: #d29922;"></span>
+      </div>
+      <div class="rail-i"><svg width="16" height="16" viewBox="0 0 20 20" fill="none"><circle cx="10" cy="10" r="7" stroke="#7a8491" stroke-width="1.3"/><path d="M10 6v4l2.5 2" stroke="#7a8491" stroke-width="1.3" stroke-linecap="round"/></svg></div>
+      <span style="flex: 1;"></span>
+      <div class="rail-i"><svg width="16" height="16" viewBox="0 0 20 20" fill="none"><circle cx="10" cy="10" r="2.6" stroke="#7a8491" stroke-width="1.3"/><path d="M10 2.5v2.2M10 15.3v2.2M17.5 10h-2.2M4.7 10H2.5M15.3 4.7l-1.6 1.6M6.3 13.7l-1.6 1.6M15.3 15.3l-1.6-1.6M6.3 6.3 4.7 4.7" stroke="#7a8491" stroke-width="1.3" stroke-linecap="round"/></svg></div>
+    </div>
+
+    <div style="position: absolute; left: 48px; top: 0; bottom: 0; width: 232px; background: #12161b; border-right: 1px solid #232b35; box-shadow: 12px 0 28px rgba(0,0,0,0.55); z-index: 4; display: flex; flex-direction: column; padding: 10px 0;">
+      <div style="display: flex; align-items: center; gap: 6px; padding: 0 12px 8px;">
+        <span class="zone">CELLS</span><span style="flex: 1; height: 1px; background: #232b35;"></span>
+      </div>
+      <div style="display: flex; flex-direction: column; gap: 1px; padding: 0 6px;">
+        <div class="pin" style="background: #171c23; color: #e6edf3;"><span class="dot" style="background: #3fb950;"></span>zero<span style="flex: 1;"></span><span class="m" style="font-size: 10px; color: #7a8491;">4</span></div>
+        <div class="pin"><span class="dot" style="background: #3fb950;"></span>social<span style="flex: 1;"></span><span class="m" style="font-size: 10px; color: #7a8491;">1</span></div>
+        <div class="pin"><span class="dot" style="background: #7a8491;"></span>research<span style="flex: 1;"></span><span class="m" style="font-size: 10px; color: #7a8491;">paused</span></div>
+      </div>
+
+      <div style="display: flex; align-items: center; gap: 6px; padding: 14px 12px 8px;">
+        <span class="zone">PINNED</span><span style="flex: 1; height: 1px; background: #232b35;"></span>
+      </div>
+      <div style="display: flex; flex-direction: column; gap: 1px; padding: 0 6px;">
+        <div class="pin"><svg width="13" height="13" viewBox="0 0 20 20" fill="none"><path d="M3 5.5h14M3 10h14M3 14.5h9" stroke="#58a6ff" stroke-width="1.4" stroke-linecap="round"/></svg>Runs</div>
+        <div class="pin"><svg width="13" height="13" viewBox="0 0 20 20" fill="none"><rect x="2.5" y="4" width="15" height="12" rx="1.5" stroke="#58a6ff" stroke-width="1.4"/><path d="M6 8.5h5" stroke="#58a6ff" stroke-width="1.4" stroke-linecap="round"/></svg>Conversation</div>
+        <div class="pin"><svg width="13" height="13" viewBox="0 0 20 20" fill="none"><path d="M4 16V9M10 16V4M16 16v-5" stroke="#58a6ff" stroke-width="1.4" stroke-linecap="round"/></svg>Windows</div>
+        <div class="pin"><svg width="13" height="13" viewBox="0 0 20 20" fill="none"><circle cx="10" cy="10" r="6.5" stroke="#d29922" stroke-width="1.4"/><path d="M10 6.5V10" stroke="#d29922" stroke-width="1.4" stroke-linecap="round"/></svg>nightly digest<span style="flex: 1;"></span><span class="m" style="font-size: 10px; color: #d29922;">1</span></div>
+      </div>
+
+      <div style="display: flex; align-items: center; gap: 6px; padding: 14px 12px 8px;">
+        <span class="zone">BOARD</span><span style="flex: 1; height: 1px; background: #232b35;"></span>
+      </div>
+      <div style="display: flex; flex-direction: column; gap: 1px; padding: 0 6px;">
+        <div class="pin">Needs you<span style="flex: 1;"></span><span class="m" style="font-size: 10px; color: #d29922; border: 1px solid #d29922; border-radius: 3px; padding: 2px 4px;">2</span></div>
+        <div class="pin">In review<span style="flex: 1;"></span><span class="m" style="font-size: 10px; color: #7a8491;">3</span></div>
+      </div>
+
+      <span style="flex: 1;"></span>
+      <div style="padding: 8px 12px; border-top: 1px solid #232b35; color: #7a8491; font-size: 11px;">
+        hover the rail to peek &middot; <span class="m">Ctrl B</span> keeps it open
+      </div>
+    </div>
+
+    <div style="flex: 1; min-width: 0; padding: 14px; background: repeating-linear-gradient(to right, rgba(35,43,53,0.28) 0 1px, transparent 1px 100%) 14px 0 / 105.9px 100% no-repeat padding-box, #0b0d10;">
+      <div style="display: grid; grid-template-columns: repeat(12, minmax(0, 1fr)); gap: 12px; align-content: start;">
+
+        <div class="card" style="grid-column: span 5;">
+          <div class="hd"><span style="color: #7a8491; letter-spacing: -2px;">&#10287;</span><b>Conversation</b><span class="sub">you and the top manager</span><span style="flex: 1;"></span><span class="sz">5&times;9</span></div>
+          <div class="bd" style="gap: 8px; height: 268px;">
+            <div style="display: flex; gap: 8px;"><span class="m" style="font-size: 10px; line-height: 1.6; color: #7a8491;">you</span><span style="font-size: 12px;">Ship the changelog for 0.4 and post it to the release channel.</span></div>
+            <div style="display: flex; gap: 8px;"><span class="m" style="font-size: 10px; line-height: 1.6; color: #58a6ff;">mgr</span><span style="font-size: 12px; color: #8b97a6;">Three workers out: <span style="color: #e6edf3;">draft</span> on pi, <span style="color: #e6edf3;">diff-scan</span> on codex, <span style="color: #e6edf3;">post</span> held at your ceiling.</span></div>
+            <div style="display: flex; gap: 8px;"><span class="m" style="font-size: 10px; line-height: 1.6; color: #d29922;">ask</span><span style="font-size: 12px;">Posting is irreversible. Approve <span class="m" style="color: #d29922;">post</span> for this run only?</span></div>
+            <div style="display: flex; gap: 6px; padding-left: 30px;">
+              <span style="padding: 4px 9px; border-radius: 5px; border: 1px solid #3fb950; color: #3fb950; font-size: 11px;">approve once</span>
+              <span style="padding: 4px 9px; border-radius: 5px; border: 1px solid #232b35; color: #8b97a6; font-size: 11px;">deny</span>
+            </div>
+            <span style="flex: 1;"></span>
+            <div style="display: flex; align-items: center; gap: 8px; padding: 7px 9px; border-radius: 5px; border: 1px solid #232b35; background: #171c23;">
+              <span class="m" style="font-size: 10px; color: #7a8491; border: 1px solid #232b35; border-radius: 3px; padding: 3px 5px;">zero</span>
+              <span style="color: #7a8491; font-size: 12px;">say something to the top manager</span>
+            </div>
+          </div>
+        </div>
+
+        <div class="card" style="grid-column: span 4;">
+          <div class="hd"><span style="color: #7a8491; letter-spacing: -2px;">&#10287;</span><b>Delegation</b><span style="flex: 1;"></span><span class="sz">4&times;9</span></div>
+          <div class="bd" style="gap: 7px; height: 268px;">
+            <div style="display: flex; align-items: center; gap: 8px;"><span class="dot" style="background: #3fb950;"></span><span style="font-size: 12px;">changelog</span><span style="flex: 1;"></span><span class="m" style="font-size: 10px; color: #8b97a6;">manager</span></div>
+            <div style="display: flex; align-items: center; gap: 8px; padding-left: 14px; border-left: 1px solid #232b35; margin-left: 2px;"><span class="dot" style="background: #3fb950;"></span><span style="font-size: 12px; color: #8b97a6;">draft</span><span style="flex: 1;"></span><span class="m" style="font-size: 10px; color: #7a8491;">pi &middot; 2m14s</span></div>
+            <div style="display: flex; align-items: center; gap: 8px; padding-left: 14px; border-left: 1px solid #232b35; margin-left: 2px;"><span class="dot" style="background: #3fb950;"></span><span style="font-size: 12px; color: #8b97a6;">diff-scan</span><span style="flex: 1;"></span><span class="m" style="font-size: 10px; color: #7a8491;">codex &middot; 48s</span></div>
+            <div style="display: flex; align-items: center; gap: 8px; padding-left: 14px; border-left: 1px solid #232b35; margin-left: 2px;"><span class="dot" style="background: #d29922;"></span><span style="font-size: 12px;">post</span><span style="flex: 1;"></span><span class="m" style="font-size: 10px; color: #d29922;">held</span></div>
+            <div style="height: 1px; background: #232b35; margin: 3px 0;"></div>
+            <div style="display: flex; align-items: center; gap: 8px;"><span class="dot" style="background: #7a8491;"></span><span style="font-size: 12px; color: #8b97a6;">weekly-digest</span><span style="flex: 1;"></span><span class="m" style="font-size: 10px; color: #7a8491;">queued</span></div>
+          </div>
+        </div>
+
+        <div class="card" style="grid-column: span 3;">
+          <div class="hd"><span style="color: #7a8491; letter-spacing: -2px;">&#10287;</span><b>Windows</b><span style="flex: 1;"></span><span class="sz">3&times;9</span></div>
+          <div class="bd" style="gap: 11px; height: 268px;">
+            <div style="display: flex; flex-direction: column; gap: 5px;">
+              <div style="display: flex; align-items: baseline; gap: 6px;"><span style="font-size: 12px;">anthropic</span><span style="flex: 1;"></span><span class="m" style="font-size: 11px; color: #d29922;">82%</span></div>
+              <div class="bar"><div style="width: 82%; height: 100%; background: #d29922;"></div></div>
+              <span class="m" style="font-size: 10px; color: #7a8491;">resets in 2h 20m</span>
+            </div>
+            <div style="display: flex; flex-direction: column; gap: 5px;">
+              <div style="display: flex; align-items: baseline; gap: 6px;"><span style="font-size: 12px;">openai-codex</span><span style="flex: 1;"></span><span class="m" style="font-size: 11px; color: #3fb950;">14%</span></div>
+              <div class="bar"><div style="width: 14%; height: 100%; background: #3fb950;"></div></div>
+              <span class="m" style="font-size: 10px; color: #7a8491;">resets in 3h 10m</span>
+            </div>
+            <div style="display: flex; flex-direction: column; gap: 5px;">
+              <div style="display: flex; align-items: baseline; gap: 6px;"><span style="font-size: 12px;">google</span><span style="flex: 1;"></span><span class="m" style="font-size: 11px; color: #3fb950;">7%</span></div>
+              <div class="bar"><div style="width: 7%; height: 100%; background: #3fb950;"></div></div>
+              <span class="m" style="font-size: 10px; color: #7a8491;">resets in 5d 14h</span>
+            </div>
+            <span style="flex: 1;"></span>
+            <span class="m" style="font-size: 10px; line-height: 1.4; color: #7a8491;">read from omp &middot; list price, not billed</span>
+          </div>
+        </div>
+
+        <div class="card" style="grid-column: span 8;">
+          <div class="hd"><span style="color: #7a8491; letter-spacing: -2px;">&#10287;</span><b>Runs</b><span class="sub">manager over its workers</span><span style="flex: 1;"></span><span style="padding: 3px 7px; border-radius: 4px; border: 1px solid #232b35; color: #8b97a6; font-size: 11px;">board</span><span class="sz">8&times;7</span></div>
+          <div class="bd" style="gap: 0; height: 212px;">
+            <div class="rr"><span class="m" style="font-size: 10px; color: #7a8491;">STATE</span><span class="m" style="font-size: 10px; color: #7a8491;">GOAL</span><span class="m" style="font-size: 10px; color: #7a8491;">RUNNER</span><span class="m" style="font-size: 10px; color: #7a8491;">FOR</span><span class="m" style="font-size: 10px; color: #7a8491;">COST</span><span></span></div>
+            <div class="rr"><span class="m" style="font-size: 11px; color: #3fb950;">running</span><span>changelog</span><span class="m" style="font-size: 11px; color: #8b97a6;">pi</span><span class="m" style="font-size: 11px; color: #8b97a6;">2m14s</span><span class="m" style="font-size: 11px; color: #8b97a6;">$0.21</span><span style="display: flex; gap: 4px;"><span class="vb">steer</span><span class="vb">observe</span></span></div>
+            <div class="rr" style="padding-left: 14px; border-left: 1px solid #232b35; margin-left: 3px;"><span class="m" style="font-size: 11px; color: #3fb950;">running</span><span style="color: #8b97a6;">draft</span><span class="m" style="font-size: 11px; color: #8b97a6;">pi</span><span class="m" style="font-size: 11px; color: #8b97a6;">1m02s</span><span class="m" style="font-size: 11px; color: #8b97a6;">$0.08</span><span style="display: flex; gap: 4px;"><span class="vb">take over</span></span></div>
+            <div class="rr" style="padding-left: 14px; border-left: 1px solid #232b35; margin-left: 3px;"><span class="m" style="font-size: 11px; color: #d29922;">held</span><span>post</span><span class="m" style="font-size: 11px; color: #8b97a6;">pi</span><span class="m" style="font-size: 11px; color: #8b97a6;">--</span><span class="m" style="font-size: 11px; color: #8b97a6;">--</span><span style="display: flex; gap: 4px;"><span class="vb" style="border-color: #d29922; color: #d29922;">answer</span></span></div>
+            <div class="rr"><span class="m" style="font-size: 11px; color: #7a8491;">done</span><span style="color: #8b97a6;">audit deps</span><span class="m" style="font-size: 11px; color: #8b97a6;">goose</span><span class="m" style="font-size: 11px; color: #8b97a6;">4m30s</span><span class="m" style="font-size: 11px; color: #8b97a6;">$0.44</span><span style="display: flex; gap: 4px;"><span class="vb">rerun</span><span class="vb">rescope</span></span></div>
+            <div class="rr" style="border: 0;"><span class="m" style="font-size: 11px; color: #f85149;">failed</span><span style="color: #8b97a6;">bump lockfile</span><span class="m" style="font-size: 11px; color: #8b97a6;">agy</span><span class="m" style="font-size: 11px; color: #8b97a6;">12s</span><span class="m" style="font-size: 11px; color: #8b97a6;">$0.01</span><span style="display: flex; gap: 4px;"><span class="vb">rerun</span></span></div>
+          </div>
+        </div>
+
+        <div class="card" style="grid-column: span 4;">
+          <div class="hd"><span style="color: #7a8491; letter-spacing: -2px;">&#10287;</span><b>Activity</b><span class="sub">the record, live</span><span style="flex: 1;"></span><span class="sz">4&times;7</span></div>
+          <div class="bd" style="gap: 0; height: 212px;">
+            <div class="ev"><span style="color: #7a8491;">14:22:07</span><span style="color: #8b97a6;">worker_started <span style="color: #e6edf3;">draft</span></span></div>
+            <div class="ev"><span style="color: #7a8491;">14:22:41</span><span style="color: #8b97a6;">tool_denied <span style="color: #f85149;">git push</span></span></div>
+            <div class="ev"><span style="color: #7a8491;">14:23:02</span><span style="color: #8b97a6;">ceiling_hit <span style="color: #d29922;">irreversible</span></span></div>
+            <div class="ev"><span style="color: #7a8491;">14:23:02</span><span style="color: #8b97a6;">manager_asked</span></div>
+            <div class="ev"><span style="color: #7a8491;">14:23:44</span><span style="color: #8b97a6;">worker_done <span style="color: #3fb950;">diff-scan</span></span></div>
+            <div class="ev" style="border: 0;"><span style="color: #7a8491;">14:24:10</span><span style="color: #8b97a6;">operator_touched <span style="color: #58a6ff;">draft</span></span></div>
+          </div>
+        </div>
+
+        <div style="grid-column: span 5; height: 172px; position: relative;">
+          <div style="position: absolute; inset: 0; border: 1px dashed #58a6ff; border-radius: 6px; background: rgba(88,166,255,0.06);"></div>
+          <div class="card" style="position: absolute; left: 22px; top: -10px; right: -22px; bottom: 10px; background: #171c23; border-color: #58a6ff; box-shadow: 0 14px 34px rgba(0,0,0,0.6); transform: rotate(-0.4deg);">
+            <div class="hd"><span style="color: #58a6ff; letter-spacing: -2px;">&#10287;</span><b>Projects</b><span style="flex: 1;"></span><span class="sz" style="color: #58a6ff;">5&times;4</span></div>
+            <div class="bd" style="flex-direction: row; flex-wrap: wrap; gap: 6px; align-content: flex-start;">
+              <span style="padding: 4px 8px; border-radius: 5px; border: 1px solid #58a6ff; background: #12161b; font-size: 11px;">farseer</span>
+              <span style="padding: 4px 8px; border-radius: 5px; border: 1px solid #232b35; color: #8b97a6; font-size: 11px;">orca</span>
+              <span style="padding: 4px 8px; border-radius: 5px; border: 1px solid #232b35; color: #8b97a6; font-size: 11px;">berd</span>
+              <span style="padding: 4px 8px; border-radius: 5px; border: 1px solid #232b35; color: #8b97a6; font-size: 11px;">notes</span>
+              <span style="padding: 4px 8px; border-radius: 5px; border: 1px solid #232b35; color: #8b97a6; font-size: 11px;">dotfiles</span>
+            </div>
+          </div>
+        </div>
+
+        <div class="card" style="grid-column: span 3; height: 172px;">
+          <div class="hd"><span style="color: #7a8491; letter-spacing: -2px;">&#10287;</span><b>Cells</b><span style="flex: 1;"></span><span class="sz">3&times;4</span></div>
+          <div class="bd" style="gap: 8px;">
+            <div style="display: flex; align-items: center; gap: 8px;"><span class="dot" style="background: #3fb950;"></span><span style="font-size: 12px;">zero</span><span style="flex: 1;"></span><span class="m" style="font-size: 10px; color: #7a8491;">pi &middot; autonomous</span></div>
+            <div style="display: flex; align-items: center; gap: 8px;"><span class="dot" style="background: #3fb950;"></span><span style="font-size: 12px; color: #8b97a6;">social</span><span style="flex: 1;"></span><span class="m" style="font-size: 10px; color: #7a8491;">omp &middot; ask first</span></div>
+            <div style="display: flex; align-items: center; gap: 8px;"><span class="dot" style="background: #7a8491;"></span><span style="font-size: 12px; color: #8b97a6;">research</span><span style="flex: 1;"></span><span class="m" style="font-size: 10px; color: #7a8491;">paused</span></div>
+          </div>
+        </div>
+
+      </div>
+    </div>
+  </div>
+
+  <div style="height: 26px; flex-shrink: 0; display: flex; align-items: center; gap: 12px; padding: 0 12px; background: #12161b; border-top: 1px solid #232b35; font: 11px/1 ui-monospace, Consolas, monospace; color: #8b97a6;">
+    <span style="display: flex; align-items: center; gap: 5px;"><span class="dot" style="background: #3fb950;"></span>daemon 53215</span>
+    <span style="color: #232b35;">|</span>
+    <span><span style="color: #d29922;">82%</span> <span style="color: #7a8491;">anthropic 2h20m</span></span>
+    <span><span style="color: #3fb950;">14%</span> <span style="color: #7a8491;">codex 3h10m</span></span>
+    <span style="color: #232b35;">|</span>
+    <span style="color: #7a8491;">cpu <span style="color: #8b97a6;">31%</span></span>
+    <span style="color: #7a8491;">ram <span style="color: #8b97a6;">1.02 GB</span></span>
+    <span style="color: #7a8491;">disk <span style="color: #8b97a6;">44 GB free</span></span>
+    <span style="flex: 1;"></span>
+    <span style="color: #7a8491;">4 running</span>
+    <span style="color: #d29922;">1 needs you</span>
+    <span style="color: #232b35;">|</span>
+    <span style="color: #7a8491;">Ctrl K search</span>
+    <span style="color: #7a8491;">Ctrl B rail</span>
+    <span style="color: #7a8491;">Ctrl 1-4 channel</span>
+  </div>
+
+</div>
+</x-dc>
+</body>
+</html>

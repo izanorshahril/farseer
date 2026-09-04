@@ -1,0 +1,39 @@
+{
+  "artboards": [
+    { "file": "Main.dc.html", "x": 0, "y": 0, "w": 1440, "h": 900, "title": "Home board" },
+    { "file": "Workspace.dc.html", "x": 1560, "y": 0, "w": 1440, "h": 900, "title": "Widget workspace", "is_interactive": true },
+    { "file": "Board.dc.html", "x": 0, "y": 1080, "w": 1440, "h": 900, "title": "Lifecycle board" },
+    { "file": "StatusBar.dc.html", "x": 1560, "y": 1080, "w": 1440, "h": 560, "title": "Chrome and tokens" }
+  ],
+  "annotations": [
+    {
+      "id": "home-note",
+      "x": 0,
+      "y": -150,
+      "w": 460,
+      "text": "Home board. Rail collapsed to 48px with the peek overlay open beside it - it floats over the board rather than pushing it. Tiles snap to 12 columns and 40px rows; the Projects tile is mid-drag with its snap ghost behind it."
+    },
+    {
+      "id": "workspace-note",
+      "x": 1560,
+      "y": -150,
+      "w": 460,
+      "text": "Widget workspace - the interactive one. The five panel buttons in the header toggle Files, Diff, Terminal, Artifacts and Context; whatever is left reflows to fill. This is the piece you drew, and it needs no docking library."
+    },
+    {
+      "id": "board-note",
+      "x": 0,
+      "y": 930,
+      "w": 460,
+      "text": "Lifecycle board. Columns are what a run is doing, not what someone dragged it to: Working / Needs You / In Review / Done are projections of lifecycle + control, which farseer already stores. Workers sit indented under their manager."
+    },
+    {
+      "id": "chrome-note",
+      "x": 1560,
+      "y": 930,
+      "w": 460,
+      "text": "Chrome and tokens. Status bar anatomy and its three states, the rail's four zones, and every colour lifted from ui/src/style.css rather than re-picked."
+    }
+  ],
+  "launch": { "view": "canvas" }
+}

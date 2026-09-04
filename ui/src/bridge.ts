@@ -14,6 +14,7 @@
  */
 
 import { currentProject } from "./project";
+import { selectSubject, selectedSubject } from "./selection";
 
 /** Which cell farseer's operator talks to. `01 cell primitive` made it the address. */
 const TOP_MANAGER = "zero";
@@ -75,14 +76,10 @@ export function createBridge(): Bridge {
       // `quota/refresh` launches a poll the operator has already enabled in
       // `runners.toml`; the runtime refuses it when they have not.
       const allowed = [
-        // `07 attach semantics`'s control axis joins `05 run state model`'s
-        // verbs here: attach is read-only until a takeover, and `intervene`
-        // is the only one of these that puts words into a live agent.
-        /^\/runs\/[0-9a-f-]+\/(steer|cancel|rerun|rescope|observe|take-over|release|intervene)$/,
+        /^\/runs\/[0-9a-f-]+\/(steer|cancel|rerun|rescope|observe|take-over|release|intervene|transcripts)$/,
+        /^\/tasks\/[0-9a-f-]+\/transition$/,
+        /^\/conversations$/,
         /^\/quota\/refresh$/,
-        // `39 what an installed farseer points at`: authorizing a folder and
-        // creating a project inside one. Neither widens farseer's reach on its
-        // own - the runtime refuses a path outside every authorized root.
         /^\/projects$/,
         /^\/projects\/roots$/,
       ];
@@ -135,20 +132,26 @@ export function createBridge(): Bridge {
     },
 
     ask: async (anchor, text) => {
-      // The anchor rides in the goal as prose because the reader is an LLM.
-      // `16 local api surface`'s additive-only promise leaves room for a
-      // structured `context` field the day something needs to machine-read it.
       const where = anchor.subject ? `${anchor.widget}, showing ${anchor.subject}` : anchor.widget;
-      const body = await json<{ run_id: string }>(`/v1/cells/${TOP_MANAGER}/instruct`, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({
-          goal: `[from the ${where} widget]\n${text}`,
-          // `39 what an installed farseer points at`: which project this goes
-          // to, or nothing at all - which the runtime reads as farseer's own
-          // working directory.
-          project: currentProject(),
-        }),
+      const subject = selectedSubject();
+      const body = await json<{ run_id: string; task_id: string; conversation_id: string }>(
+        `/v1/cells/${TOP_MANAGER}/instruct`,
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            goal: `[from the ${where} widget]\n${text}`,
+            project: subject.project ?? currentProject(),
+            conversation_id: subject.conversation,
+            manager_runner: subject.managerRunner,
+          }),
+        },
+      );
+      selectSubject({
+        conversation: body.conversation_id,
+        task: body.task_id,
+        run: body.run_id,
+        project: subject.project ?? currentProject(),
       });
       return body.run_id;
     },
