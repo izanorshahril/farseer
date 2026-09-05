@@ -790,22 +790,26 @@ impl StartedWorker {
                     // the turn, and the configured one is a hint rather than a
                     // report of what ran. Different fields for that reason.
                     model: None,
+                    session_id: Some(opened.thread_id),
+                    log_pointer: None,
                     provider: None,
                     configured: opened.configured,
-                    session_id: Some(opened.thread_id),
                 });
         let opened = self.acp_opened.take().map(|opened| {
+            // Not from `session/set_model`, which `29 harness protocol` found
+            // unstable upstream and broken in shipped clients - from the
+            // agent's own `configOptions`. `opencode acp` names a model there
+            // and no provider; `goose acp` does the reverse.
+            let model = opened.model().map(str::to_string);
+            let provider = opened.provider().map(str::to_string);
             farseer_runner::claude_code::SessionInfo {
-                // Not from `session/set_model`, which `29 harness protocol`
-                // found unstable upstream and broken in shipped clients - from
-                // the agent's own `configOptions`. `opencode acp` names a model
-                // there and no provider; `goose acp` does the reverse.
-                model: opened.model().map(str::to_string),
-                provider: opened.provider().map(str::to_string),
+                model,
+                session_id: Some(opened.session_id),
+                log_pointer: None,
+                provider,
                 // ACP exposes settings but no notion of a default farseer could
                 // separate from a current value, so there is no hint to give.
                 configured: None,
-                session_id: Some(opened.session_id),
             }
         });
         let ends_at_terminal = self.channel.ends_at_terminal();
@@ -995,6 +999,7 @@ impl StartedWorker {
                             serde_json::json!({
                                 "model": info.model,
                                 "session_id": info.session_id,
+                                "log_pointer": info.log_pointer,
                                 "provider": info.provider,
                                 "runner": contract.runner,
                                 "session_kind": match contract.runner.as_str() {

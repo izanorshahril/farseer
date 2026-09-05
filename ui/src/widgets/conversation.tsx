@@ -79,6 +79,19 @@ const time = (ts: number) => new Date(ts).toLocaleTimeString(undefined, { hour12
 const usd = (micros: number) => `$${(micros / 1_000_000).toFixed(2)}`;
 
 /**
+ * Decode immutable `session_started` records written before
+ * `40 work model and session explorer` added an explicit `session_kind`.
+ *
+ * Current events carry the kind and never consult this frozen compatibility
+ * table, so adding a new runner does not create another evolving registry.
+ */
+function legacySessionKind(runner: string): string {
+  if (runner === "codex" || runner === "codex-app-server") return "thread";
+  if (runner === "agy") return "conversation";
+  return "session";
+}
+
+/**
  * The goal an operator typed, out of the queued event's contract snapshot.
  *
  * The anchor the canvas prepends rides in the goal as prose, so it is shown as
@@ -160,13 +173,7 @@ export function ConversationWidget({ bridge }: { bridge: Bridge }) {
       if (event.kind === "session_started") {
         const id = str("session_id");
         const runner = str("runner") ?? "";
-        const kind =
-          str("session_kind") ??
-          (runner === "codex" || runner === "codex-app-server"
-            ? "thread"
-            : runner === "agy"
-              ? "conversation"
-              : "session");
+        const kind = str("session_kind") ?? legacySessionKind(runner);
         setMeta((current) => ({
           ...current,
           runner: runner || current.runner,

@@ -3,6 +3,7 @@ target/
 
 # Spike fixtures and run artifacts
 node_modules/
+.vite/
 .scratch/farseer/spikes/jobspike/tree/pids-*.txt
 
 # Local runtime output

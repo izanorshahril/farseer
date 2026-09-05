@@ -115,6 +115,11 @@ pub struct SessionInfo {
     /// The runner's own id for the conversation, so an operator can find it in
     /// the runner's own tooling rather than only in farseer's record.
     pub session_id: Option<String>,
+    /// A runner-reported pointer to its own transcript or log.
+    ///
+    /// `40 work model and session explorer` keeps this as an observation:
+    /// absent unless the adapter received a literal pointer from the runner.
+    pub log_pointer: Option<String>,
     /// The account or backend the runner says it is using.
     ///
     /// `28 operator surface` wanted this and could only reach `runners.toml`,
@@ -161,6 +166,7 @@ impl SessionInfo {
     pub fn is_empty(&self) -> bool {
         self.model.is_none()
             && self.session_id.is_none()
+            && self.log_pointer.is_none()
             && self.provider.is_none()
             && self.configured.is_none()
     }
@@ -259,6 +265,7 @@ pub fn parse_line(line: &str) -> Result<Vec<RunnerSignal>, ParseError> {
             let info = SessionInfo {
                 model: text_field(&v, "model"),
                 session_id: text_field(&v, "session_id"),
+                log_pointer: None,
                 // Claude Code names an account on `/status`, which does not
                 // fire headless. Absent rather than assumed.
                 provider: None,
@@ -532,6 +539,7 @@ mod tests {
             [RunnerSignal::Session(SessionInfo {
                 model: Some("claude-opus-5".into()),
                 session_id: Some("abc".into()),
+                log_pointer: None,
                 // Claude Code names no account headless.
                 provider: None,
                 configured: None,
@@ -545,6 +553,17 @@ mod tests {
         // declines to say gets no default invented for it.
         let line = r#"{"type":"system","subtype":"init"}"#;
         assert_eq!(parse_line(line).unwrap(), Vec::new());
+    }
+
+    #[test]
+    fn a_transcript_pointer_is_a_session_observation_on_its_own() {
+        assert!(
+            !SessionInfo {
+                log_pointer: Some("runner://sessions/abc".into()),
+                ..Default::default()
+            }
+            .is_empty()
+        );
     }
 
     #[test]

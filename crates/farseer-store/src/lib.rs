@@ -129,10 +129,50 @@ impl Store {
     fn from_connection(conn: Connection) -> Result<Self> {
         conn.execute_batch(schema::PRAGMAS)?;
         conn.execute_batch(schema::SCHEMA)?;
+        Self::migrate_transcript_attachments(&conn)?;
         Ok(Self {
             conn,
             caps: MemoryCaps::default(),
         })
+    }
+
+    /// Upgrade the first unreleased `40 work model and session explorer` schema,
+    /// where a content digest accidentally owned the run association.
+    ///
+    /// Content remains deduplicated on disk, while SQLite must retain one
+    /// association per `(digest, run_id)`.
+    fn migrate_transcript_attachments(conn: &Connection) -> Result<()> {
+        let composite_key_columns: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('transcript_attachments')
+         WHERE (name = 'digest' AND pk = 1) OR (name = 'run_id' AND pk = 2)",
+            [],
+            |row| row.get(0),
+        )?;
+        if composite_key_columns == 2 {
+            return Ok(());
+        }
+        conn.execute_batch(
+            "BEGIN IMMEDIATE;
+         DROP INDEX IF EXISTS transcript_attachments_run;
+         ALTER TABLE transcript_attachments RENAME TO transcript_attachments_legacy;
+         CREATE TABLE transcript_attachments (
+             digest       TEXT NOT NULL,
+             run_id       BLOB NOT NULL,
+             custody      TEXT NOT NULL,
+             source       TEXT NOT NULL,
+             stored_path  TEXT,
+             created_ts   INTEGER NOT NULL,
+             PRIMARY KEY (digest, run_id)
+         );
+         INSERT INTO transcript_attachments
+             (digest, run_id, custody, source, stored_path, created_ts)
+         SELECT digest, run_id, custody, source, stored_path, created_ts
+         FROM transcript_attachments_legacy;
+         DROP TABLE transcript_attachments_legacy;
+         CREATE INDEX transcript_attachments_run ON transcript_attachments(run_id);
+         COMMIT;",
+        )?;
+        Ok(())
     }
 
     pub fn with_memory_caps(mut self, caps: MemoryCaps) -> Self {
@@ -815,5 +855,46 @@ mod tests {
         }
         let store = Store::open(&path).unwrap();
         assert_eq!(store.latest_seq().unwrap(), 1);
+    }
+    #[test]
+    fn digest_only_transcript_schema_migrates_without_losing_associations() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE transcript_attachments (
+                 digest TEXT PRIMARY KEY,
+                 run_id BLOB NOT NULL,
+                 custody TEXT NOT NULL,
+                 source TEXT NOT NULL,
+                 stored_path TEXT,
+                 created_ts INTEGER NOT NULL
+             );
+             CREATE INDEX transcript_attachments_run
+                 ON transcript_attachments(run_id);",
+        )
+        .unwrap();
+        let first = RunId::new();
+        conn.execute(
+            "INSERT INTO transcript_attachments
+                 (digest, run_id, custody, source, stored_path, created_ts)
+             VALUES ('same-content', ?1, 'copy', 'first.jsonl', NULL, 1)",
+            [&first.as_bytes()[..]],
+        )
+        .unwrap();
+
+        let store = Store::from_connection(conn).unwrap();
+        let second = RunId::new();
+        store
+            .record_transcript_attachment(&TranscriptAttachment {
+                digest: "same-content".into(),
+                run_id: second,
+                custody: farseer_core::TranscriptCustody::Copy,
+                source: "second.jsonl".into(),
+                stored_path: None,
+                created_ts: 2,
+            })
+            .unwrap();
+
+        assert_eq!(store.transcript_attachments(Some(first)).unwrap().len(), 1);
+        assert_eq!(store.transcript_attachments(Some(second)).unwrap().len(), 1);
     }
 }

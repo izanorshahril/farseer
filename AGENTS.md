@@ -65,6 +65,7 @@ Together they are what makes `16 local api surface`'s "the answer arrives on the
 `40 work model and session explorer` is wired end to end: conversations group durable tasks, each instruction creates one task and one root run, and reruns, rescopes, continuations, delegations, and cell calls retain explicit parent edges.
 Task transitions are validated in the store and retain actor, reason, and timestamp; project and global boards are projections over the same rows.
 A run may report several harness-owned session identifiers with their provider kind, and transcript custody is explicitly `reference`, `copy`, or `copy-plus-index`.
+`SessionInfo.log_pointer` carries a runner-reported transcript pointer when one exists; every currently captured runner shape omits it, so the stored value stays absent rather than being derived from private runner directories.
 Copied raw transcript bytes live outside SQLite; only scrubbed derived text is indexed, and similarity edges carry their projection metadata.
 The version-eight canvas defaults to Conversation, Work, Fleet, and Capacity, while Settings is a top-bar popover and narrower diagnostic widgets remain optional.
 

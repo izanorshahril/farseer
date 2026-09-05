@@ -450,9 +450,14 @@ impl Store {
 
     pub fn record_transcript_attachment(&self, attachment: &TranscriptAttachment) -> Result<()> {
         self.conn().execute(
-            "INSERT OR REPLACE INTO transcript_attachments
+            "INSERT INTO transcript_attachments
                (digest, run_id, custody, source, stored_path, created_ts)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+             ON CONFLICT(digest, run_id) DO UPDATE SET
+               custody = excluded.custody,
+               source = excluded.source,
+               stored_path = excluded.stored_path,
+               created_ts = excluded.created_ts",
             rusqlite::params![
                 attachment.digest,
                 &attachment.run_id.as_bytes()[..],
@@ -714,5 +719,26 @@ mod tests {
                 .unwrap();
         }
         assert_eq!(store.harness_sessions(Some(run_id)).unwrap().len(), 2);
+    }
+    #[test]
+    fn identical_transcript_content_remains_attached_to_each_run() {
+        let store = Store::open_in_memory().unwrap();
+        let first = RunId::new();
+        let second = RunId::new();
+        for run_id in [first, second] {
+            store
+                .record_transcript_attachment(&TranscriptAttachment {
+                    digest: "same-content".into(),
+                    run_id,
+                    custody: TranscriptCustody::Copy,
+                    source: "transcript.jsonl".into(),
+                    stored_path: Some("objects/same-content".into()),
+                    created_ts: 1,
+                })
+                .unwrap();
+        }
+
+        assert_eq!(store.transcript_attachments(Some(first)).unwrap().len(), 1);
+        assert_eq!(store.transcript_attachments(Some(second)).unwrap().len(), 1);
     }
 }

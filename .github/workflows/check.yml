@@ -36,6 +36,21 @@ jobs:
     steps:
       - uses: actions/checkout@v4.2.2
 
+      # Tauri embeds the already-built UI during the Rust shell build. Keep
+      # that resource available in this job as well as in the independent
+      # canvas job below; otherwise cargo clippy/test fail on a clean runner.
+      - uses: oven-sh/setup-bun@v2.0.2
+        with:
+          bun-version-file: ui/.bun-version
+
+      - name: Install UI dependencies
+        working-directory: ui
+        run: bun install --frozen-lockfile
+
+      - name: Build the UI assets
+        working-directory: ui
+        run: bun run build
+
       # No toolchain is named here on purpose: `rust-toolchain.toml` pins
       # 1.98.0 with rustfmt and clippy, and naming a version in a second place
       # is two places that can disagree - the rule `runners.toml` already

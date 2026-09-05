@@ -25,13 +25,14 @@ type Conversation = {
 type Run = { run_id: string; runner: string; outcome?: string };
 type Session = { run_id: string; identifier_kind: string; identifier: string; log_pointer?: string };
 type Attachment = { digest: string; run_id: string; custody: string; source: string };
-type TaskDetail = { task: Task; runs: Run[]; sessions: Session[]; attachments: Attachment[]; transitions: { from: TaskState; to: TaskState; actor: string; reason: string; ts: number }[] };
+type TaskDetail = { task: Task; allowed_transitions: TaskState[]; runs: Run[]; sessions: Session[]; attachments: Attachment[]; transitions: { from: TaskState; to: TaskState; actor: string; reason: string; ts: number }[] };
 type Graph = {
   projects: string[];
   conversations: Conversation[];
   tasks: Task[];
   runs: { run_id: string; task_id: string; cell_id: string; runner: string }[];
   sessions: Session[];
+  attachments: Attachment[];
   parents: { run_id: string; parent_run_id: string; kind: string }[];
   similarities: { left_digest: string; right_digest: string; score: number; projection_version: string }[];
 };
@@ -39,15 +40,6 @@ type Cell = { manager: { runners: string[] } };
 type Face = "board" | "conversations" | "graph" | "completed";
 
 const STATES: TaskState[] = ["inbox", "planned", "in_progress", "blocked", "review", "done", "cancelled"];
-const NEXT: Record<TaskState, TaskState[]> = {
-  inbox: ["planned", "in_progress", "cancelled"],
-  planned: ["in_progress", "blocked", "cancelled"],
-  in_progress: ["blocked", "review", "cancelled"],
-  blocked: ["planned", "in_progress", "cancelled"],
-  review: ["in_progress", "done", "cancelled"],
-  done: [],
-  cancelled: [],
-};
 
 const short = (value: string) => value.slice(0, 8);
 const stateLabel = (state: TaskState) => state.replace("_", " ");
@@ -56,6 +48,7 @@ export function WorkWidget({ bridge }: { bridge: Bridge }) {
   const [face, setFace] = useState<Face>("board");
   const [expanded, setExpanded] = useState(false);
   const [tasks, setTasks] = useState<Task[]>([]);
+  const [projectScope, setProjectScope] = useState("");
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [graph, setGraph] = useState<Graph | null>(null);
   const [subject, setSubject] = useState(selectedSubject());
@@ -106,9 +99,17 @@ export function WorkWidget({ bridge }: { bridge: Bridge }) {
     bridge.read<TaskDetail>(`/tasks/${subject.task}`).then(setDetail).catch((failure: Error) => setError(failure.message));
   }, [bridge, subject.task]);
 
-  const grouped = useMemo(
-    () => Object.fromEntries(STATES.map((state) => [state, tasks.filter((task) => task.state === state)])) as Record<TaskState, Task[]>,
+  const projectPaths = useMemo(
+    () => [...new Set(tasks.flatMap((task) => task.project_path ? [task.project_path] : []))].sort(),
     [tasks],
+  );
+  const visibleTasks = useMemo(
+    () => projectScope ? tasks.filter((task) => task.project_path === projectScope) : tasks,
+    [projectScope, tasks],
+  );
+  const grouped = useMemo(
+    () => Object.fromEntries(STATES.map((state) => [state, visibleTasks.filter((task) => task.state === state)])) as Record<TaskState, Task[]>,
+    [visibleTasks],
   );
 
   const chooseTask = (task: Task) => {
@@ -156,6 +157,16 @@ export function WorkWidget({ bridge }: { bridge: Bridge }) {
             </button>
           ))}
         </div>
+        {face === "board" && (
+          <select
+            aria-label="project board"
+            value={projectScope}
+            onChange={(event) => setProjectScope(event.currentTarget.value)}
+          >
+            <option value="">all projects</option>
+            {projectPaths.map((project) => <option key={project} value={project}>{project}</option>)}
+          </select>
+        )}
         <button className="chip" aria-pressed={expanded} onClick={() => setExpanded((current) => !current)}>{expanded ? "restore" : "expand"}</button>
       </div>
       {error && <p className="empty bad" role="alert">{error}</p>}
@@ -215,7 +226,7 @@ export function WorkWidget({ bridge }: { bridge: Bridge }) {
         <aside className="task-detail" aria-label="Selected task detail">
           <div className="row"><b>{detail.task.title}</b><span className="badge">{stateLabel(detail.task.state)}</span><button className="chip" onClick={() => selectSubject({ task: null, run: null })}>close</button></div>
           <p>{detail.task.goal}</p>
-          <div className="task-actions">{NEXT[detail.task.state].map((state) => <button key={state} className="chip" onClick={() => transition(state).catch((failure: Error) => setError(failure.message))}>{stateLabel(state)}</button>)}</div>
+          <div className="task-actions">{detail.allowed_transitions.map((state) => <button key={state} className="chip" onClick={() => transition(state).catch((failure: Error) => setError(failure.message))}>{stateLabel(state)}</button>)}</div>
           <div className="task-runs">{detail.runs.map((run) => <button key={run.run_id} className="chip" onClick={() => selectSubject({ run: run.run_id })}>{short(run.run_id)} · {run.runner} · {run.outcome ?? "running"}</button>)}</div>
           {detail.sessions.map((session) => <p key={`${session.identifier_kind}:${session.identifier}`} className="mono small">{session.identifier_kind} {session.identifier}{session.log_pointer ? ` · ${session.log_pointer}` : ""}</p>)}
           <form className="transcript-form" onSubmit={(event) => { event.preventDefault(); addTranscript().catch((failure: Error) => setError(failure.message)); }}>
@@ -231,6 +242,7 @@ export function WorkWidget({ bridge }: { bridge: Bridge }) {
 }
 
 function WorkGraph({ graph }: { graph: Graph }) {
+  const transcripts = [...new Map(graph.attachments.map((attachment) => [attachment.digest, attachment])).values()];
   const nodes = [
     ...graph.projects.map((project) => ({
       id: `project:${project}`,
@@ -241,7 +253,10 @@ function WorkGraph({ graph }: { graph: Graph }) {
     ...graph.tasks.map((task) => ({ id: task.task_id, label: task.title, kind: "task" })),
     ...graph.runs.map((run) => ({ id: run.run_id, label: run.runner, kind: "run" })),
     ...graph.sessions.map((session) => ({ id: `${session.identifier_kind}:${session.identifier}`, label: `${session.identifier_kind} ${short(session.identifier)}`, kind: "session" })),
-  ].slice(0, 48);
+    ...transcripts.map((attachment) => ({ id: `transcript:${attachment.digest}`, label: `transcript ${short(attachment.digest)}`, kind: "transcript" })),
+  ];
+  const rows = Math.max(2, Math.ceil(nodes.length / 6));
+  const height = 100 + rows * 90;
   const at = new Map(nodes.map((node, index) => [node.id, { x: 90 + (index % 6) * 150, y: 50 + Math.floor(index / 6) * 90 }]));
   const observed = [
     ...graph.conversations
@@ -251,15 +266,29 @@ function WorkGraph({ graph }: { graph: Graph }) {
         to: conversation.conversation_id,
         label: "conversation",
       })),
+    ...graph.tasks
+      .filter((task) => task.project_path)
+      .map((task) => ({
+        from: `project:${task.project_path}`,
+        to: task.task_id,
+        label: "project snapshot",
+      })),
     ...graph.tasks.map((task) => ({ from: task.conversation_id, to: task.task_id, label: "task" })),
     ...graph.runs.map((run) => ({ from: run.task_id, to: run.run_id, label: "run" })),
     ...graph.sessions.map((session) => ({ from: session.run_id, to: `${session.identifier_kind}:${session.identifier}`, label: "session" })),
+    ...graph.attachments.map((attachment) => ({ from: attachment.run_id, to: `transcript:${attachment.digest}`, label: attachment.custody })),
     ...graph.parents.map((parent) => ({ from: parent.parent_run_id, to: parent.run_id, label: parent.kind })),
   ];
+  const derived = graph.similarities.map((edge) => ({
+    from: `transcript:${edge.left_digest}`,
+    to: `transcript:${edge.right_digest}`,
+    label: `${edge.score.toFixed(2)} ${edge.projection_version}`,
+  }));
   return (
     <div className="work-graph">
       <div className="graph-legend"><span>observed topology</span><span className="derived">derived similarity</span></div>
-      <svg viewBox="0 0 950 760" role="img" aria-label="Conversation, task, run, harness session, delegation, cell call, rescope, continuation, and similarity graph">
+      <svg viewBox={`0 0 950 ${height}`} role="img" aria-label="Conversation, task, run, harness session, transcript, delegation, cell call, rescope, continuation, and similarity graph">
+        {derived.map((edge, index) => { const from = at.get(edge.from); const to = at.get(edge.to); return from && to ? <line key={`${edge.from}:${edge.to}:${index}`} x1={from.x} y1={from.y} x2={to.x} y2={to.y} className="derived-edge"><title>{edge.label}</title></line> : null; })}
         {observed.map((edge, index) => { const from = at.get(edge.from); const to = at.get(edge.to); return from && to ? <line key={`${edge.from}:${edge.to}:${index}`} x1={from.x} y1={from.y} x2={to.x} y2={to.y} className="observed-edge"><title>{edge.label}</title></line> : null; })}
         {nodes.map((node) => { const point = at.get(node.id)!; return <g key={node.id} transform={`translate(${point.x},${point.y})`} className={`graph-node ${node.kind}`}><circle r="25"/><text y="42" textAnchor="middle">{node.label.slice(0, 18)}</text></g>; })}
       </svg>

@@ -1970,6 +1970,12 @@ code {
   stroke-width: 2;
 }
 
+.derived-edge {
+  stroke: #a371f7;
+  stroke-width: 2;
+  stroke-dasharray: 6 5;
+}
+
 .graph-node circle {
   fill: var(--panel);
   stroke: var(--accent);
@@ -1979,6 +1985,7 @@ code {
 .graph-node.task circle { stroke: var(--ok); }
 .graph-node.run circle { stroke: var(--warn); }
 .graph-node.session circle { stroke: #a371f7; }
+.graph-node.transcript circle { stroke: #a371f7; stroke-dasharray: 4 3; }
 .graph-node text { fill: var(--ink); font-size: 10px; }
 .derived { color: #a371f7; }
 

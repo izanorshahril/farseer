@@ -64,4 +64,5 @@ No customer testimonials, commercial claims, or usage benchmarks are available a
 
 ## Accessibility & Inclusion
 
-The operator surface must remain fully keyboard operable, expose semantic landmarks and live status, preserve visible focus, meet WCAG AA contrast, and work at desktop and narrow web widths.
+The operator surface must remain fully keyboard operable, expose semantic landmarks and live status, and preserve visible focus.
+It must meet WCAG AA contrast and work at desktop and narrow web widths.

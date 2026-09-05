@@ -132,12 +132,13 @@ CREATE TABLE IF NOT EXISTS harness_sessions (
 
 -- Raw transcript bytes live at stored_path, never in SQLite or the event log.
 CREATE TABLE IF NOT EXISTS transcript_attachments (
-    digest       TEXT PRIMARY KEY,
+    digest       TEXT NOT NULL,
     run_id       BLOB NOT NULL,
     custody      TEXT NOT NULL,
     source       TEXT NOT NULL,
     stored_path  TEXT,
-    created_ts   INTEGER NOT NULL
+    created_ts   INTEGER NOT NULL,
+    PRIMARY KEY (digest, run_id)
 );
 CREATE INDEX IF NOT EXISTS transcript_attachments_run ON transcript_attachments(run_id);
 

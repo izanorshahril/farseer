@@ -296,6 +296,7 @@ fn session_from_state(data: &Value) -> SessionInfo {
             .get("sessionId")
             .and_then(Value::as_str)
             .map(str::to_string),
+        log_pointer: None,
         // pi names the upstream it will call, which is the field `28 operator
         // surface` wanted and only an ACP agent had answered until now.
         provider: data
@@ -743,6 +744,7 @@ mod tests {
             vec![RunnerSignal::Session(SessionInfo {
                 model: Some("gpt-5.6-luna".to_string()),
                 session_id: Some("01a0-4b".to_string()),
+                log_pointer: None,
                 provider: Some("openai-codex".to_string()),
                 configured: Some(Configured {
                     model: Some("gpt-5.6-luna".to_string()),

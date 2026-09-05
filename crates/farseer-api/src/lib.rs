@@ -407,18 +407,6 @@ impl AppState {
     }
 }
 
-/// The provider's own noun for the identifier emitted by each adapter.
-///
-/// `40 work model and session explorer` preserves this kind so a Codex thread
-/// never silently becomes the same thing as an ACP session.
-fn session_identifier_kind(runner: &str) -> &'static str {
-    match runner {
-        "codex" | "codex-app-server" => "thread",
-        "agy" => "conversation",
-        _ => "session",
-    }
-}
-
 /// `farseer-manager` never holds a `Store` across a whole run - see that
 /// crate's own doc comment for why - so `AppState` locks and releases the
 /// store mutex for each individual write instead of handing over one
@@ -433,14 +421,14 @@ impl RunSink for AppState {
                 .get("session_id")
                 .and_then(serde_json::Value::as_str)
         {
-            let runner = event
+            let identifier_kind = event
                 .payload
-                .get("runner")
+                .get("session_kind")
                 .and_then(serde_json::Value::as_str)
-                .unwrap_or_default();
+                .unwrap_or("session");
             store.observe_harness_session(&farseer_core::HarnessSession {
                 run_id: event.run_id,
-                identifier_kind: session_identifier_kind(runner).to_string(),
+                identifier_kind: identifier_kind.to_string(),
                 identifier: identifier.to_string(),
                 log_pointer: event
                     .payload
@@ -6139,6 +6127,10 @@ runner = "{runner}"
         assert_eq!(status, StatusCode::OK);
         assert_eq!(detail["task"]["state"], "in_progress");
         assert_eq!(detail["transitions"].as_array().unwrap().len(), 1);
+        assert_eq!(
+            detail["allowed_transitions"],
+            json!(["blocked", "review", "cancelled"])
+        );
     }
 
     #[tokio::test]

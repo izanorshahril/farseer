@@ -4,6 +4,7 @@
 //! issue validated commands and read projections; they never append raw events.
 
 use std::collections::hash_map::DefaultHasher;
+use std::fmt::Write as _;
 use std::hash::{Hash, Hasher};
 use std::path::Path;
 use std::sync::Arc;
@@ -25,6 +26,7 @@ const REDACTION_VERSION: &str = "farseer-scrub-v1";
 const PROJECTION_VERSION: &str = "hash-tf-v1";
 const EMBEDDING_MODEL: &str = "farseer-hash-tf-64";
 const DIMENSIONS: usize = 64;
+const ALL_ROWS: usize = i64::MAX as usize;
 
 #[derive(Debug, Deserialize)]
 pub(super) struct ConversationQuery {
@@ -135,6 +137,7 @@ pub(super) async fn list_tasks(
 #[derive(Debug, Serialize)]
 pub(super) struct TaskDetail {
     pub task: Task,
+    pub allowed_transitions: Vec<TaskState>,
     pub transitions: Vec<farseer_core::TaskTransition>,
     pub runs: Vec<crate::RunView>,
     pub sessions: Vec<farseer_core::HarnessSession>,
@@ -156,6 +159,10 @@ pub(super) async fn get_task(
         attachments.extend(store.transcript_attachments(Some(row.run_id))?);
     }
     let transitions = store.task_transitions(task_id)?;
+    let allowed_transitions = TaskState::ALL
+        .into_iter()
+        .filter(|to| *to != task.state && task.state.allows(*to))
+        .collect();
     drop(store);
     let runs = rows
         .into_iter()
@@ -163,6 +170,7 @@ pub(super) async fn get_task(
         .collect();
     Ok(Json(TaskDetail {
         task,
+        allowed_transitions,
         transitions,
         runs,
         sessions,
@@ -330,6 +338,7 @@ pub(super) struct WorkGraph {
     pub tasks: Vec<Task>,
     pub runs: Vec<GraphRun>,
     pub sessions: Vec<farseer_core::HarnessSession>,
+    pub attachments: Vec<TranscriptAttachment>,
     pub parents: Vec<farseer_store::RunParent>,
     pub similarities: Vec<SimilarityEdge>,
 }
@@ -345,9 +354,9 @@ pub(super) struct GraphRun {
 
 pub(super) async fn graph(State(state): State<Arc<AppState>>) -> ApiResult<Json<WorkGraph>> {
     let store = state.store();
-    let conversations = store.conversations(1_000)?;
+    let conversations = store.conversations(ALL_ROWS)?;
     let tasks = store.tasks(&TaskFilter {
-        limit: 10_000,
+        limit: ALL_ROWS,
         ..Default::default()
     })?;
     let projects = conversations
@@ -358,7 +367,7 @@ pub(super) async fn graph(State(state): State<Arc<AppState>>) -> ApiResult<Json<
         .into_iter()
         .collect();
     let runs = store
-        .recent_runs(10_000)?
+        .recent_runs(ALL_ROWS)?
         .into_iter()
         .map(|row| GraphRun {
             run_id: row.run_id,
@@ -374,6 +383,7 @@ pub(super) async fn graph(State(state): State<Arc<AppState>>) -> ApiResult<Json<
         tasks,
         runs,
         sessions: store.harness_sessions(None)?,
+        attachments: store.transcript_attachments(None)?,
         parents: store.run_parents()?,
         similarities: store.similarity_edges()?,
     }))
@@ -413,9 +423,19 @@ fn copy_transcript(
 
 fn sha256(bytes: &[u8]) -> String {
     let digest = Sha256::digest(bytes);
-    digest.iter().map(|byte| format!("{byte:02x}")).collect()
+    let mut encoded = String::with_capacity(digest.len() * 2);
+    for byte in digest {
+        write!(&mut encoded, "{byte:02x}").expect("writing to a String cannot fail");
+    }
+    encoded
 }
 
+/// Build the versioned, rebuildable text projection selected by
+/// `40 work model and session explorer`.
+///
+/// The fixed hash-TF buckets are deliberately local and deterministic rather
+/// than a network embedding dependency; changing their meaning requires a new
+/// `PROJECTION_VERSION` and `EMBEDDING_MODEL`.
 fn vector(text: &str) -> [f64; DIMENSIONS] {
     let mut vector = [0.0; DIMENSIONS];
     for token in text
@@ -429,6 +449,10 @@ fn vector(text: &str) -> [f64; DIMENSIONS] {
     vector
 }
 
+/// Score two `40 work model and session explorer` projection vectors.
+///
+/// The metric is stored on every derived edge, so rebuilding with another
+/// metric cannot silently reinterpret prior scores.
 fn cosine(left: &[f64; DIMENSIONS], right: &[f64; DIMENSIONS]) -> f64 {
     let dot = left
         .iter()

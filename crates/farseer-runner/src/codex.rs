@@ -51,6 +51,7 @@ pub fn parse_line(line: &str) -> Result<Vec<RunnerSignal>, ParseError> {
             RunnerSignal::Session(crate::claude_code::SessionInfo {
                 model: None,
                 session_id: Some(thread.to_string()),
+                log_pointer: None,
                 provider: None,
                 configured: None,
             })
