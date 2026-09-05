@@ -13,7 +13,7 @@ That makes this load-bearing rather than administrative.
 - Who merges: never farseer, farseer per project policy, or farseer after CI is green?
 - Draft the deny list of things that must never happen unattended. Starting set: force push, history rewrite, secret files, package publish, anything touching `.env`, migrations against a real database.
 - Note that without a sandbox, deny rules only bind built-in tools. A shell command routes around a file-read deny rule.
-- Is the existing `no-mistakes` skill the delivery gate, or does farseer define its own?
+- Is the repository test and CI workflow the delivery gate, or does farseer define its own?
 - Does a non-coding cell posting publicly need a stricter default than a coding cell writing a diff?
 
 ## Carried from 06
@@ -183,12 +183,12 @@ Purge is also `irreversible` by the table above, so it is gated and the gate is 
 
 ### 6. The delivery gate is a tool, not a runtime concept
 
-The ticket asked whether the existing `no-mistakes` skill is the delivery gate or farseer defines its own.
+The ticket asked whether an external delivery tool is the delivery gate or farseer defines its own.
 
 **Neither. Farseer defines the contract; the gate is a tool the cell may run.**
 
 `05` already put `definition_of_done` on the worker contract. That is farseer's half.
-Whether satisfying it means running `no-mistakes`, running `cargo test`, or a human watching a video is a **tool grant**.
+Whether satisfying it means running repository tests, waiting for CI, or a human watching a video is a **tool grant**.
 
 Hardcoding a specific gate would add a field only coding cells need, which is exactly what `08`'s falsification test forbids.
 A social media cell has no tests, no lint and no CI.

@@ -74,8 +74,28 @@ pub fn thread_start_frame(
     cwd: &str,
     sandbox: &str,
     developer_instructions: Option<&str>,
+    // `31 manager delegation reach`'s third transport: the streamable-HTTP MCP
+    // endpoint, and the **name of an environment variable** holding the bearer.
+    mcp: Option<(&str, &str)>,
 ) -> String {
     let mut params = json!({ "cwd": cwd, "sandbox": sandbox });
+    // Probed 2026-08-28, and the nesting is the whole finding. `mcpServers` at
+    // the top of `params` is **accepted and silently ignored** - the thread
+    // starts, no server is launched, nothing says so. Under `config`, with
+    // Codex's own snake_case spelling, it starts: a deliberately unreachable
+    // URL produced `MCP client for 'farseerprobe' failed to start: Environment
+    // variable ... is not set`, which is the server proving it read the field.
+    //
+    // The token is passed **by the name of an env var**, never inline: Codex
+    // resolves it in its own process, so the value is not in this frame, not in
+    // the record, and not in anything a model in this thread can read.
+    if let Some((url, token_env_var)) = mcp {
+        params["config"] = json!({
+            "mcp_servers": {
+                "farseer": { "url": url, "bearer_token_env_var": token_env_var }
+            }
+        });
+    }
     // Who this manager is and what its roster contains, per `31 manager
     // delegation reach`. `developerInstructions` rather than `baseInstructions`:
     // the base is Codex's own agent prompt, and replacing it would be farseer
@@ -146,6 +166,7 @@ pub fn handshake<F>(
     cwd: &std::path::Path,
     sandbox: &str,
     developer_instructions: Option<&str>,
+    mcp: Option<(&str, &str)>,
     ids: &mut crate::jsonrpc::Ids,
     on_line: &mut F,
 ) -> Result<ThreadOpened, crate::jsonrpc::RpcError>
@@ -168,7 +189,13 @@ where
     let id = ids.next();
     let answer = request(
         process,
-        &thread_start_frame(id, &cwd.to_string_lossy(), sandbox, developer_instructions),
+        &thread_start_frame(
+            id,
+            &cwd.to_string_lossy(),
+            sandbox,
+            developer_instructions,
+            mcp,
+        ),
         id,
         "thread/start",
         parse_line,
@@ -309,6 +336,12 @@ impl RateLimits {
                     is_using_overage: false,
                     used_percent: Some(window.used_percent),
                     window_duration_mins: window.window_duration_mins,
+                    // Left absent on purpose: the app-server names a window and
+                    // never a provider, and filling this in with `openai-codex`
+                    // would be farseer inferring what it was not told. The same
+                    // rule that leaves `account` empty two fields up.
+                    provider: None,
+                    label: None,
                 })
             })
             .collect()
@@ -432,6 +465,38 @@ mod tests {
 
     /// Every fixture is a literal line from the 2026-08-26 probe of
     /// `codex app-server` 0.149.1, trimmed only of ids and timestamps.
+    /// The nesting is the finding, so it is the assertion.
+    ///
+    /// Probed 2026-08-28: `mcpServers` at the top of `params` is **accepted and
+    /// silently ignored** - the thread starts and no server is launched. Under
+    /// `config`, in Codex's own snake_case, it starts. A test that only checked
+    /// "the field is somewhere in the frame" would have passed on the shape that
+    /// does nothing.
+    #[test]
+    fn the_mcp_server_is_nested_under_config_and_the_token_is_only_a_variable_name() {
+        let frame = thread_start_frame(
+            7,
+            "D:/w",
+            "read-only",
+            None,
+            Some(("http://127.0.0.1:8787/v1/mcp", "FARSEER_MANAGER_TOKEN")),
+        );
+        let v: Value = serde_json::from_str(&frame).unwrap();
+        let server = &v["params"]["config"]["mcp_servers"]["farseer"];
+        assert_eq!(server["url"], "http://127.0.0.1:8787/v1/mcp");
+        assert_eq!(server["bearer_token_env_var"], "FARSEER_MANAGER_TOKEN");
+        assert!(
+            v["params"]["mcpServers"].is_null(),
+            "the spelling that is silently ignored must not be the one farseer sends: {frame}"
+        );
+
+        // A manager with no reach sends no config at all, rather than an empty
+        // one that reads like a server farseer forgot to fill in.
+        let bare = thread_start_frame(7, "D:/w", "read-only", None, None);
+        let v: Value = serde_json::from_str(&bare).unwrap();
+        assert!(v["params"]["config"].is_null(), "{bare}");
+    }
+
     #[test]
     fn token_usage_carries_the_denominator_and_the_session_total() {
         let line = r#"{"method":"thread/tokenUsage/updated","params":{"threadId":"t","turnId":"u","tokenUsage":{"total":{"totalTokens":22287,"inputTokens":22281,"cachedInputTokens":0,"cacheWriteInputTokens":0,"outputTokens":6,"reasoningOutputTokens":0},"last":{"totalTokens":22287},"modelContextWindow":258400}}}"#;

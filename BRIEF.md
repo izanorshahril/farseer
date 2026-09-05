@@ -544,7 +544,7 @@ Answer whenever; none of these block M0.
 28. Who merges? Never farseer, farseer per project policy, or farseer after CI is green?
 29. Is `gh`/GitLab integration required, or is "branch pushed, you take it from here" enough for v1?
 30. What must never happen unattended? Draft the deny list now: force push, history rewrite, secret files, package publish, anything touching `.env`, migrations against a real database.
-31. Should farseer reuse the existing `no-mistakes` validation skill as the delivery gate, or define its own?
+31. Should farseer own a delivery gate, or rely on repository tests and GitHub CI?
 
 **Vocabulary**
 

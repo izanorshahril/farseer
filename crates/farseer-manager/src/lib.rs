@@ -222,6 +222,24 @@ pub struct RunOptions {
     /// a credential to an extension without putting it on the argv - visible to
     /// every process listing - or in the prompt, where the model would read it.
     pub runner_env: Vec<(String, String)>,
+    /// How this run's manager reaches farseer's MCP face, for a runner
+    /// configured in its handshake rather than from a file.
+    pub mcp: Option<McpReach>,
+    /// `26 routing policy`'s price table for this run's runner, in USD micros
+    /// per million tokens. `None` means farseer prices nothing and a run that
+    /// reported no currency stays blank - see [`estimated_cost`].
+    pub usd_micros_per_mtok: Option<i64>,
+    /// The project this run works in - the directory a `Worktree` run's
+    /// worktree was cut from, and the repository its skills were resolved
+    /// against.
+    ///
+    /// `39 what an installed farseer points at` made this per run: farseer
+    /// points at projects rather than living inside one, so "which repository"
+    /// stopped being a property of the process. `None` means the run used the
+    /// process's own working directory, which is what the CLI still does.
+    /// Recorded on the queued event because `02 record scope` cannot answer
+    /// "where did this happen" from a run row that never said.
+    pub project: Option<PathBuf>,
     /// Absolute paths to runner extensions farseer itself supplies.
     ///
     /// Separate from [`Self::skills`] because they are different grants: a
@@ -252,10 +270,13 @@ impl Default for RunOptions {
             append_system_prompt: None,
             account: None,
             model: None,
+            usd_micros_per_mtok: None,
+            mcp: None,
             effort: None,
             runner_env: Vec::new(),
             extensions: Vec::new(),
             skills: Vec::new(),
+            project: None,
         }
     }
 }
@@ -277,6 +298,22 @@ pub const ACP_UNATTENDED_MODE: &str = "auto";
 /// become the answer to all three questions and could only express two of them.
 /// `29 harness protocol` added the third case and the omission became a bug -
 /// twice, in the same shape.
+/// farseer's MCP endpoint, and how this protocol wants the bearer presented.
+///
+/// Two variants because the second field's *meaning* differs, and one tuple
+/// carrying either would be the ambiguity `14 vocabulary lock` exists to refuse:
+/// Codex is handed the **name of an environment variable** it resolves in its
+/// own process, ACP is handed the **secret itself**, because its `HttpHeader` is
+/// a literal value. One is strictly better and neither is farseer's choice.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum McpReach {
+    /// `codex-app-server`: the token travels in [`RunOptions::runner_env`] and
+    /// only its variable name is in the frame.
+    BearerFromEnv { url: String, var: String },
+    /// ACP: the token is in the frame, on a pipe to a child farseer spawned.
+    BearerInline { url: String, bearer: String },
+}
+
 #[derive(Debug, Clone, Copy)]
 pub enum Channel {
     /// Goal on argv, EOF at spawn, ends at end of stream.
@@ -382,6 +419,20 @@ pub struct StartedWorker {
     /// Manager identity and roster, for the protocols that carry it in a frame
     /// rather than on the argv. See [`RunOptions::append_system_prompt`].
     identity: Option<String>,
+    /// MCP servers the agent was handed and could not reach, `(name, error)`.
+    ///
+    /// `31 manager delegation reach`: a manager told it may delegate, over a
+    /// channel that did not open, is a manager that will fabricate one. Only the
+    /// agent knows, only at handshake time, so it is carried here to the layer
+    /// that owns the record rather than assumed either way.
+    failed_mcp: Vec<(String, String)>,
+    /// Every tool server the session loaded, **farseer's and the operator's
+    /// alike**. `37 inherited tool environment`: a run reaches whatever happened
+    /// to be installed, and until this the record could not say what.
+    loaded_mcp: Vec<(String, bool, String)>,
+    /// How this run's manager reaches farseer's MCP face, if its protocol takes
+    /// that in the handshake. `31 manager delegation reach`.
+    mcp: Option<McpReach>,
 }
 
 /// A cloneable handle that writes a steer message into a run's live process,
@@ -477,6 +528,9 @@ impl StartedWorker {
             pinned_model: None,
             pinned_effort: None,
             identity: None,
+            failed_mcp: Vec::new(),
+            loaded_mcp: Vec::new(),
+            mcp: None,
         })
     }
 
@@ -572,9 +626,24 @@ impl StartedWorker {
                     // decides autonomy before the run, and nobody is watching a
                     // prompt farseer did not expect.
                     Some(ACP_UNATTENDED_MODE),
+                    match self.mcp.as_ref() {
+                        Some(McpReach::BearerInline { url, bearer }) => {
+                            Some((url.as_str(), bearer.as_str()))
+                        }
+                        // ACP has no variable indirection to hand a name to, so
+                        // a reach spelled the other way is not one this protocol
+                        // can use. Nothing here invents the missing spelling.
+                        _ => None,
+                    },
                     &mut next_id,
                     &mut discard,
                 )?;
+                // `31 manager delegation reach`: a manager told it may delegate
+                // and given a channel that did not open is a manager that will
+                // fabricate one. The agent's own report is the only thing that
+                // knows, so it goes to the record rather than being assumed.
+                self.failed_mcp = opened.failed_mcp_servers.clone();
+                self.loaded_mcp = opened.loaded_mcp_servers.clone();
                 let goal_id = next_id;
                 // Bumped before the goal is sent, so a steer arriving the
                 // instant the handle becomes reachable cannot reuse this id.
@@ -614,6 +683,12 @@ impl StartedWorker {
                     // worktree is still the guarantee.
                     CODEX_SANDBOX,
                     identity.as_deref(),
+                    match self.mcp.as_ref() {
+                        Some(McpReach::BearerFromEnv { url, var }) => {
+                            Some((url.as_str(), var.as_str()))
+                        }
+                        _ => None,
+                    },
                     &mut ids,
                     &mut discard,
                 )?;
@@ -656,11 +731,43 @@ impl StartedWorker {
         // mid-run does not move it.
         started_ts: i64,
     ) -> Result<RunReport, ManagerError> {
+        // Recorded first, because it changes what every later event means: a
+        // manager whose delegation channel never opened did the work itself.
+        // `31 manager delegation reach` - the record says what actually ran.
+        if !self.loaded_mcp.is_empty() {
+            let servers: Vec<_> = std::mem::take(&mut self.loaded_mcp)
+                .into_iter()
+                .map(|(name, ok, error)| {
+                    serde_json::json!({ "name": name, "ok": ok, "error": error })
+                })
+                .collect();
+            let _ = sink.append(&NewEvent::new(
+                contract.cell_id.clone(),
+                contract.run_id,
+                EventKind::new(EventKind::STATUS_CHANGED),
+                Actor::System,
+                now_ms(),
+                serde_json::json!({ "tool_servers": servers }),
+            ));
+        }
+        for (name, error) in std::mem::take(&mut self.failed_mcp) {
+            let _ = sink.append(&NewEvent::new(
+                contract.cell_id.clone(),
+                contract.run_id,
+                EventKind::new(EventKind::STATUS_CHANGED),
+                Actor::System,
+                now_ms(),
+                serde_json::json!({ "mcp_server": name, "reachable": false, "error": error }),
+            ));
+        }
         let mut report = None;
         let mut output = None;
         // Fragments of an answer still being written. Emptied into one
         // `manager_answered` when the turn ends - see `RunnerSignal::OutputChunk`.
         let mut chunks = String::new();
+        // Spend from legs that ended without being the end. See `LegSpend`.
+        let mut carried_cost: Option<i64> = None;
+        let mut carried_tokens: Option<i64> = None;
         let mut window = None;
         let mut windows: Vec<farseer_core::WindowObservation> = Vec::new();
         let account = account.map(str::to_string);
@@ -683,22 +790,26 @@ impl StartedWorker {
                     // the turn, and the configured one is a hint rather than a
                     // report of what ran. Different fields for that reason.
                     model: None,
+                    session_id: Some(opened.thread_id),
+                    log_pointer: None,
                     provider: None,
                     configured: opened.configured,
-                    session_id: Some(opened.thread_id),
                 });
         let opened = self.acp_opened.take().map(|opened| {
+            // Not from `session/set_model`, which `29 harness protocol` found
+            // unstable upstream and broken in shipped clients - from the
+            // agent's own `configOptions`. `opencode acp` names a model there
+            // and no provider; `goose acp` does the reverse.
+            let model = opened.model().map(str::to_string);
+            let provider = opened.provider().map(str::to_string);
             farseer_runner::claude_code::SessionInfo {
-                // Not from `session/set_model`, which `29 harness protocol`
-                // found unstable upstream and broken in shipped clients - from
-                // the agent's own `configOptions`. `opencode acp` names a model
-                // there and no provider; `goose acp` does the reverse.
-                model: opened.model().map(str::to_string),
-                provider: opened.provider().map(str::to_string),
+                model,
+                session_id: Some(opened.session_id),
+                log_pointer: None,
+                provider,
                 // ACP exposes settings but no notion of a default farseer could
                 // separate from a current value, so there is no hint to give.
                 configured: None,
-                session_id: Some(opened.session_id),
             }
         });
         let ends_at_terminal = self.channel.ends_at_terminal();
@@ -761,6 +872,22 @@ impl StartedWorker {
                     }
                     // Activity, and nothing more, until the turn ends.
                     RunnerSignal::OutputChunk(text) => chunks.push_str(&text),
+                    // A leg that spent money and was not the end. Held here
+                    // and added at the terminal one, because a run report that
+                    // carries only the final leg under-counts every omp run
+                    // that used a background job - see `32 harness capability
+                    // floor` and `11 analytics questions`.
+                    RunnerSignal::LegSpend {
+                        cost_usd_micros,
+                        tokens,
+                    } => {
+                        if let Some(micros) = cost_usd_micros {
+                            carried_cost = Some(carried_cost.unwrap_or(0) + micros);
+                        }
+                        if let Some(count) = tokens {
+                            carried_tokens = Some(carried_tokens.unwrap_or(0) + count);
+                        }
+                    }
                     RunnerSignal::Finished(f) => {
                         if !chunks.trim().is_empty() {
                             let event = NewEvent::new(
@@ -778,10 +905,18 @@ impl StartedWorker {
                             }
                             output = Some(std::mem::take(&mut chunks));
                         }
+                        // `None + None` stays `None`: a runner that reports
+                        // no spend must not be made to look like it reported
+                        // zero, which is `10 runner inventory`'s observed-
+                        // never-advertised rule applied to money.
+                        let total = |leg: Option<i64>, carried: Option<i64>| match (leg, carried) {
+                            (None, None) => None,
+                            (a, b) => Some(a.unwrap_or(0) + b.unwrap_or(0)),
+                        };
                         report = Some(RunReport {
                             outcome: f.outcome,
-                            cost_usd_micros: f.cost_usd_micros,
-                            tokens: f.tokens,
+                            cost_usd_micros: total(f.cost_usd_micros, carried_cost),
+                            tokens: total(f.tokens, carried_tokens),
                             result: output.clone(),
                             // Attached after the stream ends: `10 runner
                             // inventory` observed `rate_limit_event` arriving
@@ -864,8 +999,14 @@ impl StartedWorker {
                             serde_json::json!({
                                 "model": info.model,
                                 "session_id": info.session_id,
+                                "log_pointer": info.log_pointer,
                                 "provider": info.provider,
                                 "runner": contract.runner,
+                                "session_kind": match contract.runner.as_str() {
+                                    "codex" | "codex-app-server" => "thread",
+                                    "agy" => "conversation",
+                                    _ => "session",
+                                },
                                 // Hints, named as hints on the wire so a reader
                                 // cannot mistake them for what the turn used.
                                 "configured_model": info.configured.as_ref().and_then(|c| c.model.clone()),
@@ -887,15 +1028,7 @@ impl StartedWorker {
                         // `28 operator surface` made for the context window and
                         // `27 quota accounting` made for the window itself.
                         if let Some(model) = info.model.clone() {
-                            let row = row(
-                                contract,
-                                None,
-                                0,
-                                0,
-                                started_ts,
-                                None,
-                                model,
-                            );
+                            let row = row(contract, None, 0, 0, started_ts, None, model);
                             if let Err(e) = sink.upsert_run(&row) {
                                 store_err = Some(e);
                                 cancel_on_store_failure.cancel();
@@ -1139,8 +1272,29 @@ pub const ACP_RUNNERS: [(&str, &str, &str); 2] = [
     ("opencode-acp", "opencode", "acp"),
 ];
 
-/// `contract.runner` selects one of the four verified native stream-json dialects: Claude Code, Codex, cursor-agent, or Goose.
-/// The ACP runner from `20 worker control channel` remains unimplemented, so anything else is `UnsupportedRunner`.
+/// Flags that stop a runner loading the operator's own plugins and extensions.
+///
+/// `37 inherited tool environment` found farseer was already doing this
+/// everywhere a flag existed and had simply never checked the newest runners:
+/// Claude Code gets `--strict-mcp-config`, pi and omp get `--no-extensions` and
+/// `--no-skills`. It was a rule the code followed and nothing stated.
+///
+/// So this is the rule stated, and `opencode --pure` joining it - not a new
+/// policy. **The two absences are the finding**: goose offers no such flag
+/// (`--with-builtin` only adds), and `codex app-server` merges what farseer
+/// sends with what the operator configured. Those two inherit, farseer records
+/// exactly what they loaded, and `37` owns what to do about it.
+fn deny_discovered_tools(runner: &str) -> &'static [&'static str] {
+    match runner {
+        "opencode-acp" => &["--pure"],
+        _ => &[],
+    }
+}
+
+/// `contract.runner` selects a native stream-json dialect - Claude Code, Codex,
+/// cursor-agent or Goose - or an ACP runner, which `29 harness protocol` wired
+/// and `20 worker control channel` asked for. Anything else is
+/// `UnsupportedRunner`.
 ///
 /// A Claude Code manager bootstraps the goal onto live stdin before exposing its steer handle.
 /// A Claude Code worker receives one positional goal and no live-input mode, so a synchronous delegation returns after one turn instead of waiting forever for steering.
@@ -1276,6 +1430,7 @@ pub fn start_worker(
                 &exe,
                 &farseer_runner::pi::build_args(
                     other,
+                    contract.tool_level,
                     options.model.as_deref(),
                     options.effort.as_deref(),
                     &options.skills,
@@ -1300,9 +1455,11 @@ pub fn start_worker(
             Some((_, exe_name, subcommand)) => {
                 let exe = resolve(exe_name)
                     .ok_or_else(|| ManagerError::ExecutableNotFound((*exe_name).into()))?;
+                let mut args = vec![(*subcommand).to_string()];
+                args.extend(deny_discovered_tools(other).iter().map(|f| f.to_string()));
                 StartedWorker::spawn(
                     &exe,
-                    &[(*subcommand).to_string()],
+                    &args,
                     cwd,
                     &options.runner_env,
                     thresholds,
@@ -1323,6 +1480,7 @@ pub fn start_worker(
     started.pinned_model = options.model.clone();
     started.pinned_effort = options.effort.clone();
     started.identity = options.append_system_prompt.clone();
+    started.mcp = options.mcp.clone();
     started.bootstrap(&contract.goal, cwd)?;
     Ok(started)
 }
@@ -1363,6 +1521,37 @@ pub fn run_worker(
             payload.insert(
                 MANAGER_CELL_FIELD.into(),
                 serde_json::to_value(cell).unwrap_or(serde_json::Value::Null),
+            );
+        }
+        // What this run was actually handed, by path, rather than what its cell
+        // asked for. `32 harness capability floor` listed this as the second of
+        // three skills consequences: **a run that loaded `skill:diagnosing-bugs`
+        // and one that did not looked identical in the record.**
+        //
+        // The contract carries no skills field - they are a launch input, not a
+        // term of the contract - so without this the record's own account of a
+        // run's inputs is incomplete, which is what `21 a2a conformance` cares
+        // about and what makes two runs of one contract comparable.
+        //
+        // Paths, because that is what reached the argv. A name is what the cell
+        // wrote down; a path is what the process opened, and `32` exists because
+        // the two came apart.
+        if let Some(project) = &options.project {
+            payload.insert(
+                "project".into(),
+                serde_json::Value::String(project.display().to_string()),
+            );
+        }
+        if !options.skills.is_empty() {
+            payload.insert(
+                "skills".into(),
+                serde_json::Value::Array(
+                    options
+                        .skills
+                        .iter()
+                        .map(|p| serde_json::Value::String(p.display().to_string()))
+                        .collect(),
+                ),
             );
         }
     }
@@ -1414,17 +1603,36 @@ pub fn run_worker(
             RunRole::Worker => Actor::Worker,
         },
         finished_ts,
-        finished_payload(&result),
+        finished_payload(&result, options.usd_micros_per_mtok),
     ));
 
     result
+}
+
+/// A cost farseer worked out, for a runner that reported tokens and no money.
+///
+/// `10 runner inventory` found only some runners report currency; `26 routing
+/// policy` decided farseer may price the rest **provided the estimate says so**,
+/// because a routing decision made on a farseer estimate has to be
+/// distinguishable from one made on a reported figure or a mispriced table
+/// becomes invisible.
+///
+/// Returns `None` unless there is both a token count and a price, so the record
+/// keeps `10`'s rule: absent stays absent, and nothing is made to look like a
+/// zero it never reported.
+fn estimated_cost(tokens: Option<i64>, usd_micros_per_mtok: Option<i64>) -> Option<i64> {
+    let (tokens, rate) = (tokens?, usd_micros_per_mtok?);
+    (tokens > 0 && rate > 0).then(|| tokens.saturating_mul(rate) / 1_000_000)
 }
 
 /// What a finished run has to say for itself.
 ///
 /// `02 record scope` scrubs on write, so the text is scrubbed like any other
 /// payload rather than being trusted because a manager wrote it.
-fn finished_payload(result: &Result<RunReport, ManagerError>) -> serde_json::Value {
+fn finished_payload(
+    result: &Result<RunReport, ManagerError>,
+    usd_micros_per_mtok: Option<i64>,
+) -> serde_json::Value {
     let (outcome, text, cost, tokens) = match result {
         Ok(report) => (
             outcome_str(report.outcome),
@@ -1448,10 +1656,13 @@ fn finished_payload(result: &Result<RunReport, ManagerError>) -> serde_json::Val
             None,
         ),
     };
+    // Reported money wins; farseer's own arithmetic fills a blank and says so.
+    let estimated = cost.is_none() && estimated_cost(tokens, usd_micros_per_mtok).is_some();
     serde_json::json!({
         "outcome": outcome,
         "text": text,
-        "cost_usd_micros": cost,
+        "cost_usd_micros": cost.or_else(|| estimated_cost(tokens, usd_micros_per_mtok)),
+        "cost_estimated": estimated,
         "tokens": tokens,
     })
 }
@@ -1550,6 +1761,7 @@ mod tests {
             workspace: WorkspaceStrategy::Worktree,
             runner: "claude-code".into(),
             tool_grants: vec![],
+            tool_level: Default::default(),
             autonomy_ceiling: Irreversibility::Reversible,
             budget: Budget::default(),
             definition_of_done: "".into(),
@@ -1642,6 +1854,7 @@ mod tests {
             workspace: WorkspaceStrategy::Worktree,
             runner: "not-a-real-runner".into(),
             tool_grants: vec![],
+            tool_level: Default::default(),
             autonomy_ceiling: Irreversibility::Reversible,
             budget: Budget::default(),
             definition_of_done: "".into(),
@@ -1675,15 +1888,18 @@ mod tests {
         // `16 local api surface` promised the answer arrives on the stream, and
         // for an operator-instructed manager nothing put it there: the terminal
         // text only travelled back to a delegating manager over MCP.
-        let payload = finished_payload(&Ok(RunReport {
-            outcome: Outcome::Ok,
-            cost_usd_micros: Some(12_000),
-            tokens: Some(340),
-            result: Some("the changelog is posted".into()),
-            window: None,
-            windows: Vec::new(),
-            session: None,
-        }));
+        let payload = finished_payload(
+            &Ok(RunReport {
+                outcome: Outcome::Ok,
+                cost_usd_micros: Some(12_000),
+                tokens: Some(340),
+                result: Some("the changelog is posted".into()),
+                window: None,
+                windows: Vec::new(),
+                session: None,
+            }),
+            None,
+        );
 
         assert_eq!(payload["outcome"], "ok");
         assert_eq!(payload["text"], "the changelog is posted");
@@ -1692,23 +1908,60 @@ mod tests {
 
     #[test]
     fn a_cancelled_run_still_reports_what_it_managed_to_say() {
-        let payload = finished_payload(&Err(ManagerError::Cancelled(RunReport {
-            outcome: Outcome::Cancelled,
-            cost_usd_micros: None,
-            tokens: None,
-            result: Some("halfway through".into()),
-            window: None,
-            windows: Vec::new(),
-            session: None,
-        })));
+        let payload = finished_payload(
+            &Err(ManagerError::Cancelled(RunReport {
+                outcome: Outcome::Cancelled,
+                cost_usd_micros: None,
+                tokens: None,
+                result: Some("halfway through".into()),
+                window: None,
+                windows: Vec::new(),
+                session: None,
+            })),
+            None,
+        );
 
         assert_eq!(payload["outcome"], "cancelled");
         assert_eq!(payload["text"], "halfway through");
     }
 
+    /// `26 routing policy`: farseer may price a runner that reports tokens and
+    /// no money, **provided the estimate says it is one**. A mispriced table
+    /// that looks like a reported figure is invisible; one that says
+    /// `cost_estimated` is arguable.
+    #[test]
+    fn a_priced_run_says_its_money_was_worked_out_and_a_reported_one_does_not() {
+        let report = |cost| {
+            Ok(RunReport {
+                outcome: Outcome::Ok,
+                cost_usd_micros: cost,
+                tokens: Some(2_000_000),
+                result: None,
+                window: None,
+                windows: Vec::new(),
+                session: None,
+            })
+        };
+
+        let priced = finished_payload(&report(None), Some(3_000));
+        assert_eq!(priced["cost_usd_micros"], 6_000);
+        assert_eq!(priced["cost_estimated"], true);
+
+        // A runner that stated its own figure is never overwritten by a table.
+        let reported = finished_payload(&report(Some(11)), Some(3_000));
+        assert_eq!(reported["cost_usd_micros"], 11);
+        assert_eq!(reported["cost_estimated"], false);
+
+        // And `10 runner inventory`'s rule outranks the table: with no price,
+        // absent stays absent rather than becoming a zero.
+        let unpriced = finished_payload(&report(None), None);
+        assert!(unpriced["cost_usd_micros"].is_null(), "{unpriced}");
+        assert_eq!(unpriced["cost_estimated"], false);
+    }
+
     #[test]
     fn a_run_with_no_report_quotes_the_error_rather_than_inventing_a_voice() {
-        let payload = finished_payload(&Err(ManagerError::NoResult));
+        let payload = finished_payload(&Err(ManagerError::NoResult), None);
         assert_eq!(payload["outcome"], "failed");
         assert!(payload["text"].as_str().is_some_and(|t| !t.is_empty()));
     }
@@ -1753,6 +2006,60 @@ mod tests {
         assert_eq!(row.tokens, 0);
     }
 
+    /// `32 harness capability floor`'s second skills consequence: the record
+    /// could not say a run had loaded one, so two runs of one contract were
+    /// indistinguishable when only their skills differed.
+    #[test]
+    fn a_run_records_the_skills_it_was_handed_and_stays_silent_when_it_had_none() {
+        let store = Store::open_in_memory().unwrap();
+        let sealed = contract();
+        let run_id = sealed.run_id;
+        let skill = std::env::temp_dir().join("farseer-echo");
+
+        let _ = run_worker(
+            &store,
+            &sealed,
+            &std::env::temp_dir(),
+            LivenessThresholds::default(),
+            &RunOptions {
+                skills: vec![skill.clone()],
+                ..RunOptions::default()
+            },
+            || 1,
+            |_, _, _| {},
+        );
+        let queued = |store: &Store, run_id| {
+            store
+                .scan(0, 10, &farseer_store::ScanFilter::run(run_id))
+                .unwrap()
+                .into_iter()
+                .find(|e| e.kind.as_str() == EventKind::RUN_QUEUED)
+                .expect("a queued event")
+                .payload
+        };
+        assert_eq!(
+            queued(&store, run_id)["skills"][0],
+            serde_json::Value::String(skill.display().to_string()),
+            "the path that reached the argv, not the name the cell wrote down"
+        );
+
+        // Absent rather than an empty array: `10 runner inventory`'s rule that
+        // nothing observed is not the same as something observed to be empty.
+        let bare = Store::open_in_memory().unwrap();
+        let other = contract();
+        let other_id = other.run_id;
+        let _ = run_worker(
+            &bare,
+            &other,
+            &std::env::temp_dir(),
+            LivenessThresholds::default(),
+            &RunOptions::default(),
+            || 1,
+            |_, _, _| {},
+        );
+        assert!(queued(&bare, other_id).get("skills").is_none());
+    }
+
     #[test]
     fn run_worker_records_the_sealed_contract_as_a_run_queued_event_even_on_failure() {
         // `05 run state model`: immutability is what makes "what was this worker allowed to
@@ -1769,6 +2076,7 @@ mod tests {
             workspace: WorkspaceStrategy::PlainDirectory,
             runner: "not-a-real-runner".into(),
             tool_grants: vec!["shell".into()],
+            tool_level: Default::default(),
             autonomy_ceiling: Irreversibility::Reversible,
             budget: Budget::default(),
             definition_of_done: "done".into(),
@@ -1800,10 +2108,20 @@ mod tests {
         assert_eq!(rebuilt.definition_of_done, contract.definition_of_done);
     }
 
+    /// Set when [`completed_turn_fixture`] has produced its terminal signal.
+    ///
+    /// The test below used to cancel after a fixed 200ms and hope the reader had
+    /// got there first. It passed alone and failed in a full `--workspace` run,
+    /// which is the shape of every sleep-based test: it encodes a machine's
+    /// speed rather than the thing it means to wait for. Only this test uses
+    /// this fixture, so one flag is enough.
+    static TURN_SEEN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
     fn completed_turn_fixture(line: &str) -> Result<Vec<RunnerSignal>, ParseError> {
         if line != "done" {
             return Ok(Vec::new());
         }
+        TURN_SEEN.store(true, Ordering::Release);
         Ok(vec![
             RunnerSignal::Output("ok".into()),
             RunnerSignal::Finished(farseer_runner::claude_code::FinishedSignal {
@@ -1814,8 +2132,62 @@ mod tests {
         ])
     }
 
+    /// omp's shape, as signals: a background-job leg that spends and does not
+    /// end, then a terminal leg carrying only its own.
+    fn two_leg_fixture(line: &str) -> Result<Vec<RunnerSignal>, ParseError> {
+        Ok(match line {
+            "leg" => vec![RunnerSignal::LegSpend {
+                cost_usd_micros: Some(4000),
+                tokens: Some(900),
+            }],
+            "done" => vec![RunnerSignal::Finished(
+                farseer_runner::claude_code::FinishedSignal {
+                    outcome: Outcome::Ok,
+                    cost_usd_micros: Some(1000),
+                    tokens: Some(100),
+                },
+            )],
+            _ => Vec::new(),
+        })
+    }
+
+    /// The run report used to carry the **final leg only**, so an omp run that
+    /// delegated to a background job reported a fraction of what it spent -
+    /// which `11 analytics questions` reads, and a budget draws down against.
+    #[test]
+    fn a_run_report_carries_every_leg_that_spent_not_only_the_last() {
+        let store = Store::open_in_memory().unwrap();
+        let contract = contract();
+        let dir = tempfile::tempdir().unwrap();
+        let lines = dir.path().join("legs.txt");
+        std::fs::write(&lines, "leg\r\ndone\r\n").unwrap();
+
+        let started = StartedWorker::spawn(
+            Path::new(r"C:\Windows\System32\cmd.exe"),
+            &[
+                "/d".into(),
+                "/c".into(),
+                "type".into(),
+                lines.to_string_lossy().into_owned(),
+            ],
+            &std::env::current_dir().unwrap(),
+            &[],
+            LivenessThresholds::default(),
+            two_leg_fixture,
+            Channel::OneShot,
+        )
+        .unwrap();
+
+        let report = started
+            .run_to_completion(&store, &contract, Actor::Worker, || 1, None, 1)
+            .expect("the run completes");
+        assert_eq!(report.cost_usd_micros, Some(5000));
+        assert_eq!(report.tokens, Some(1000));
+    }
+
     #[test]
     fn cancelling_after_a_completed_turn_returns_cancelled_with_the_turn_report() {
+        TURN_SEEN.store(false, Ordering::Release);
         let store = Store::open_in_memory().unwrap();
         let contract = contract();
         let dir = tempfile::tempdir().unwrap();
@@ -1846,7 +2218,12 @@ mod tests {
         .unwrap();
         let token = started.cancel_token();
         std::thread::spawn(move || {
-            std::thread::sleep(std::time::Duration::from_millis(200));
+            // Wait for the turn, not for a duration. The bound is a backstop so
+            // a genuine hang fails the test rather than hanging the suite.
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+            while !TURN_SEEN.load(Ordering::Acquire) && std::time::Instant::now() < deadline {
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
             token.cancel();
         });
 
@@ -1916,6 +2293,7 @@ mod tests {
             workspace: WorkspaceStrategy::PlainDirectory,
             runner: "codex".into(),
             tool_grants: vec![],
+            tool_level: Default::default(),
             autonomy_ceiling: Irreversibility::Reversible,
             budget: Budget::default(),
             definition_of_done: "".into(),
@@ -1944,6 +2322,19 @@ mod tests {
         );
     }
 
+    /// `37 inherited tool environment`. The rule farseer was already following
+    /// without saying so, now said - and the two runners it cannot follow it on.
+    #[test]
+    fn a_runner_that_can_deny_the_operators_own_plugins_is_told_to() {
+        assert_eq!(deny_discovered_tools("opencode-acp"), ["--pure"]);
+        // Neither has a flag for it. goose's `--with-builtin` only adds, and
+        // `codex app-server` merges farseer's `config.mcp_servers` with the
+        // operator's rather than replacing them - both probed 2026-08-29. An
+        // empty list here is a measured absence, not a runner nobody looked at.
+        assert!(deny_discovered_tools("goose-acp").is_empty());
+        assert!(deny_discovered_tools("codex-app-server").is_empty());
+    }
+
     #[test]
     fn start_worker_dispatches_goose_rather_than_refusing_it_as_unsupported() {
         let store = Store::open_in_memory().unwrap();
@@ -1955,6 +2346,7 @@ mod tests {
             workspace: WorkspaceStrategy::PlainDirectory,
             runner: "goose".into(),
             tool_grants: vec![],
+            tool_level: Default::default(),
             autonomy_ceiling: Irreversibility::Reversible,
             budget: Budget::default(),
             definition_of_done: "".into(),
@@ -2100,6 +2492,7 @@ mod tests {
             workspace: WorkspaceStrategy::Worktree,
             runner: "goose-acp-typo".into(),
             tool_grants: vec![],
+            tool_level: Default::default(),
             autonomy_ceiling: Irreversibility::Reversible,
             budget: Budget::default(),
             definition_of_done: String::new(),
@@ -2188,6 +2581,7 @@ mod tests {
             workspace: WorkspaceStrategy::Worktree,
             runner: "pi".into(),
             tool_grants: vec![],
+            tool_level: Default::default(),
             autonomy_ceiling: Irreversibility::Reversible,
             budget: Budget::default(),
             definition_of_done: String::new(),
@@ -2244,7 +2638,10 @@ mod tests {
             .expect("pi answers `get_state` before the goal goes in");
         eprintln!("session_started: {}", session.payload);
         assert_eq!(
-            session.payload.get("configured_effort").and_then(|v| v.as_str()),
+            session
+                .payload
+                .get("configured_effort")
+                .and_then(|v| v.as_str()),
             Some("low"),
             "the effort the operator pinned, as pi reports it back"
         );
@@ -2319,6 +2716,7 @@ mod tests {
                 workspace: WorkspaceStrategy::Worktree,
                 runner: runner.into(),
                 tool_grants: vec![],
+                tool_level: Default::default(),
                 autonomy_ceiling: Irreversibility::Reversible,
                 budget: Budget::default(),
                 definition_of_done: String::new(),
@@ -2358,9 +2756,18 @@ mod tests {
             eprintln!("{runner}: {:?}", answer.as_bytes());
             // The first character of the cp1252 misreading of any UTF-8
             // punctuation. Cheap, and specific enough not to fire on prose.
+            //
+            // This assertion outlived the ticket that prompted it, on purpose.
+            // A manager's typographic apostrophe *appeared* to reach the record
+            // double-encoded; the record was correct and the corruption was in
+            // the `curl | python` one-liner checking it, because Python decodes
+            // stdin as cp1252 on Windows. The ticket was deleted - **the
+            // verification tool was part of the system under test** - and this
+            // was kept, because the failure it chases is real elsewhere and
+            // invisible when it happens.
             assert!(
                 !answer.contains('\u{e2}'),
-                "{runner} reached the record double-encoded - see `34 record mojibake`: {answer:?}"
+                "{runner} reached the record double-encoded: {answer:?}"
             );
         }
     }
@@ -2375,6 +2782,7 @@ mod tests {
             workspace: WorkspaceStrategy::Worktree,
             runner: runner.into(),
             tool_grants: vec![],
+            tool_level: Default::default(),
             autonomy_ceiling: Irreversibility::Reversible,
             budget: Budget::default(),
             definition_of_done: String::new(),
@@ -2434,6 +2842,7 @@ mod tests {
             workspace: WorkspaceStrategy::Worktree,
             runner: runner.into(),
             tool_grants: vec![],
+            tool_level: Default::default(),
             autonomy_ceiling: Irreversibility::Reversible,
             budget: Budget::default(),
             definition_of_done: String::new(),
@@ -2512,6 +2921,7 @@ mod tests {
             workspace: WorkspaceStrategy::Worktree,
             runner: "goose-acp".into(),
             tool_grants: vec![],
+            tool_level: Default::default(),
             autonomy_ceiling: Irreversibility::Reversible,
             budget: Budget::default(),
             definition_of_done: String::new(),

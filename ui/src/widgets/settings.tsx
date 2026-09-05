@@ -29,11 +29,16 @@ type Runner = {
 
 type TopManager = { cell_id: string; runner: string; file: string };
 
-export function SettingsWidget({ bridge: _bridge }: { bridge: Bridge }) {
+type Skill = { name: string; declared_by: string[] };
+
+export function SettingsWidget({ bridge }: { bridge: Bridge }) {
   const [runners, setRunners] = useState<Runner[] | null>(null);
+  const [skills, setSkills] = useState<Skill[]>([]);
   const [current, setCurrent] = useState<TopManager | null>(null);
   const [note, setNote] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  /** Which runner is expanded. `null` means "whichever is in use". */
+  const [open, setOpen] = useState<string | null>(null);
   const [available, setAvailable] = useState(true);
 
   const load = useCallback(async () => {
@@ -47,7 +52,15 @@ export function SettingsWidget({ bridge: _bridge }: { bridge: Bridge }) {
     } catch {
       setAvailable(false);
     }
-  }, []);
+    // Separate from the two above: a settings surface that vanishes because the
+    // skills read failed would be `13 harness build kit`'s bad direction again.
+    try {
+      const body = await bridge.read<{ skills: Skill[] }>("/skills");
+      setSkills(body.skills);
+    } catch {
+      setSkills([]);
+    }
+  }, [bridge]);
 
   useEffect(() => {
     void load();
@@ -99,19 +112,51 @@ export function SettingsWidget({ bridge: _bridge }: { bridge: Bridge }) {
       <ul className="runners">
         {runners.map((runner) => {
           const chosen = runner.name === current.runner;
+          // Expanded for the one in use, folded for the rest. Nine runners each
+          // showing a note plus up to four caveats made this the tallest widget
+          // on the canvas by a wide margin, and a grid row is as tall as its
+          // tallest card - so one menu the operator reads once was setting the
+          // height of every card beside it.
+          //
+          // **Not moved off the canvas**, which was the other option: `28
+          // operator surface` settled that the canvas is the home screen and if
+          // it is not the canvas it is a widget on it. A settings modal is a
+          // second layout, and the height was a layout problem rather than a
+          // reason to reopen that.
+          const expanded = open === null ? chosen : open === runner.name;
           return (
             <li key={runner.name} className={chosen ? "chosen" : ""}>
               <span className={`dot ${runner.installed ? "live" : ""}`} />
               <span className="grow">
-                <b className="mono">{runner.name}</b>
-                <div className="dim small">{runner.note}</div>
-                {/* Everyone is offered. A runner farseer holds loosely says so
-                    rather than being dropped from the list. */}
-                {runner.cannot.map((warning) => (
-                  <div key={warning} className="dim small caveat">
-                    {warning}
-                  </div>
-                ))}
+                <button
+                  type="button"
+                  className="disclose"
+                  aria-expanded={expanded}
+                  onClick={() => setOpen(expanded ? "" : runner.name)}
+                  title={expanded ? "fold this runner" : `what farseer knows about ${runner.name}`}
+                >
+                  <span className="caret" aria-hidden>
+                    {expanded ? "▾" : "▸"}
+                  </span>
+                  <b className="mono">{runner.name}</b>
+                  {!expanded && runner.cannot.length > 0 && (
+                    <span className="dim small">
+                      {runner.cannot.length} caveat{runner.cannot.length === 1 ? "" : "s"}
+                    </span>
+                  )}
+                </button>
+                {expanded && (
+                  <>
+                    <div className="dim small">{runner.note}</div>
+                    {/* Everyone is offered. A runner farseer holds loosely says
+                        so rather than being dropped from the list. */}
+                    {runner.cannot.map((warning) => (
+                      <div key={warning} className="dim small caveat">
+                        {warning}
+                      </div>
+                    ))}
+                  </>
+                )}
                 {!runner.installed && (
                   <div className="faint small">not on PATH here - farseer would fail at spawn</div>
                 )}
@@ -131,6 +176,30 @@ export function SettingsWidget({ bridge: _bridge }: { bridge: Bridge }) {
           );
         })}
       </ul>
+      {/* `32 harness capability floor`'s third consequence, and its own fix
+          narrowed what belongs here: discovery is denied, so a cell may name
+          only a directory under this repository's `skills/`. Listing the twenty
+          a harness found on this machine would be a menu of things no cell can
+          order. */}
+      {skills.length > 0 && (
+        <>
+          <p className="dim small" style={{ margin: "12px 0 6px" }}>
+            Skills a cell may declare. Directories in <span className="mono">skills/</span>, passed
+            by path - never discovered from your home directory.
+          </p>
+          <ul className="skills">
+            {skills.map((skill) => (
+              <li key={skill.name}>
+                <span className="mono">{skill.name}</span>
+                <span className="grow" />
+                <span className="dim small">
+                  {skill.declared_by.length > 0 ? skill.declared_by.join(", ") : "declared by none"}
+                </span>
+              </li>
+            ))}
+          </ul>
+        </>
+      )}
       <p className="dim small" style={{ marginBottom: 0 }}>
         {note ?? (
           <>

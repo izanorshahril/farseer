@@ -42,8 +42,14 @@ use farseer_manager::{
 use farseer_runner::spawn::CancelToken;
 use farseer_store::{RunRow, ScanFilter, Store, StoreError, UI_STATE_CAP_BYTES};
 
+mod a2a;
+mod attach;
+mod lifecycle;
 mod mcp;
+mod notify;
+mod projects;
 pub mod security;
+mod work;
 
 pub use security::{RuntimeToken, runtime_file_path, write_runtime_file};
 
@@ -69,6 +75,8 @@ pub struct AppState {
     /// `WorkspaceStrategy::PlainDirectory`, a `git worktree` under here for
     /// `Worktree`.
     runs_dir: PathBuf,
+    /// Content-addressed transcript bytes, outside SQLite and the event log.
+    transcript_dir: PathBuf,
     /// The git repository a `Worktree`-strategy cell's runs are worktrees
     /// *of*. `13 harness build kit` deliberately keeps no git flag on `CellDefinition`, so this
     /// has to come from somewhere else - the runtime's own working directory
@@ -89,6 +97,10 @@ pub struct AppState {
     runs: Mutex<HashMap<RunId, RunHandle>>,
     /// Active manager identities accepted by `delegate_to_worker`.
     managers: Mutex<HashMap<RunId, ManagerContext>>,
+    /// Who is attached to which run, per `07 attach semantics`. In memory
+    /// rather than in the store, because an attachment is a live person on the
+    /// other end of a connection and a farseer that restarted has none.
+    attachments: Mutex<HashMap<RunId, attach::Attachment>>,
     /// Cancellation requested after a run id is returned but before its
     /// process exposes a live [`CancelToken`].
     pending_cancellations: Mutex<HashMap<RunId, Arc<AtomicBool>>>,
@@ -96,6 +108,14 @@ pub struct AppState {
     worker_counts: Mutex<HashMap<CellId, u32>>,
     /// Set exactly once after `serve` binds, including an OS-selected port.
     base_url: OnceLock<String>,
+    /// The last snapshot [`poll_windows`] took, or empty if nothing has polled.
+    ///
+    /// Cached rather than fetched per request for two reasons, and the second is
+    /// the load-bearing one: a live `omp usage` takes seconds, and a handler
+    /// that shells out per request makes an operator's quota view cost a process
+    /// launch. Empty is the honest resting state - farseer reports what it
+    /// observed, and before the first poll it has observed nothing.
+    polled_windows: Mutex<Vec<farseer_core::WindowObservation>>,
 }
 
 /// What `farseer_manager::run_worker`'s `on_started` callback hands back for
@@ -112,6 +132,10 @@ struct RunHandle {
 struct ManagerContext {
     contract: WorkerContract,
     cell: CellDefinition,
+    /// The project this manager is working in, inherited by every worker and
+    /// cell it delegates to. A delegation that landed in a different repository
+    /// from its manager would be a second answer to "where did this happen".
+    project: Option<PathBuf>,
     /// A per-manager capability used both as the MCP bearer and as the identity bound to every manager-scoped tool call.
     manager_token: RuntimeToken,
     /// Serialized across tool calls so two concurrent delegations cannot both
@@ -168,6 +192,10 @@ impl AppState {
         self.cells.lock().unwrap_or_else(|e| e.into_inner())
     }
 
+    fn attachments(&self) -> std::sync::MutexGuard<'_, HashMap<RunId, attach::Attachment>> {
+        self.attachments.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
     fn runs(&self) -> std::sync::MutexGuard<'_, HashMap<RunId, RunHandle>> {
         self.runs.lock().unwrap_or_else(|e| e.into_inner())
     }
@@ -178,6 +206,18 @@ impl AppState {
 
     fn manager(&self, run_id: RunId) -> Option<ManagerContext> {
         self.managers().get(&run_id).cloned()
+    }
+
+    /// The manager this bearer belongs to, if it belongs to one.
+    ///
+    /// The guard already scans for exactly this to let a manager-scoped request
+    /// through; `31 manager delegation reach` found the identity was resolved
+    /// here and thrown away, leaving the model to re-state it from its prompt.
+    fn manager_by_token(&self, presented: &str) -> Option<ManagerContext> {
+        self.managers()
+            .values()
+            .find(|manager| manager.manager_token.matches(presented))
+            .cloned()
     }
 
     fn manager_token_matches(&self, presented: &str) -> bool {
@@ -223,17 +263,22 @@ impl AppState {
         runs_dir: impl Into<PathBuf>,
         repo_root: impl Into<PathBuf>,
     ) -> Self {
+        let runs_dir = runs_dir.into();
+        let transcript_dir = runs_dir.parent().unwrap_or(&runs_dir).join("transcripts");
         Self {
             store: Mutex::new(store),
             cells: Mutex::new(BTreeMap::new()),
             cells_dir: cells_dir.into(),
             token,
             thresholds: LivenessThresholds::default(),
-            runs_dir: runs_dir.into(),
+            polled_windows: Mutex::new(Vec::new()),
+            runs_dir,
+            transcript_dir,
             repo_root: repo_root.into(),
             runner_config: RunnerConfig::default(),
             runs: Mutex::new(HashMap::new()),
             managers: Mutex::new(HashMap::new()),
+            attachments: Mutex::new(HashMap::new()),
             pending_cancellations: Mutex::new(HashMap::new()),
             worker_counts: Mutex::new(HashMap::new()),
             base_url: OnceLock::new(),
@@ -333,7 +378,31 @@ impl AppState {
             }
         }
 
-        *self.cells() = loaded;
+        // A deleted cell stays deleted across a reload. `17 cell lifecycle`
+        // makes delete reversible *through git* - the file is still there, and
+        // re-reading the directory would otherwise resurrect a cell the
+        // operator removed, every time anything else was edited. `restore`
+        // is the way back, and it is one call.
+        //
+        // A failed read leaves the registry alone rather than emptying it: a
+        // store that cannot answer is not evidence that nothing is deleted.
+        match self.store().cell_states() {
+            Ok(states) => {
+                for (cell_id, state) in states {
+                    if state == farseer_store::Lifecycle::Deleted {
+                        loaded.remove(&cell_id);
+                        report.loaded.retain(|id| id != cell_id.as_str());
+                    }
+                }
+                *self.cells() = loaded;
+            }
+            Err(error) => report.errors.push(ReloadError {
+                file: self.cells_dir.display().to_string(),
+                message: format!(
+                    "cell states are unreadable, so the registry was left alone: {error}"
+                ),
+            }),
+        }
         report
     }
 }
@@ -344,11 +413,41 @@ impl AppState {
 /// long-lived borrow.
 impl RunSink for AppState {
     fn append(&self, event: &NewEvent) -> Result<Seq, StoreError> {
-        self.store().append(event)
+        let store = self.store();
+        let seq = store.append(event)?;
+        if event.kind.as_str() == farseer_core::EventKind::SESSION_STARTED
+            && let Some(identifier) = event
+                .payload
+                .get("session_id")
+                .and_then(serde_json::Value::as_str)
+        {
+            let identifier_kind = event
+                .payload
+                .get("session_kind")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("session");
+            store.observe_harness_session(&farseer_core::HarnessSession {
+                run_id: event.run_id,
+                identifier_kind: identifier_kind.to_string(),
+                identifier: identifier.to_string(),
+                log_pointer: event
+                    .payload
+                    .get("log_pointer")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_string),
+                observed_ts: event.ts,
+            })?;
+        }
+        Ok(seq)
     }
 
     fn upsert_run(&self, row: &RunRow) -> Result<(), StoreError> {
-        self.store().upsert_run(row)
+        let store = self.store();
+        store.upsert_run(row)?;
+        // Task-state projection happens after the run returns in `spawn_run`,
+        // where the runtime still knows whether this manager is the task driver
+        // or a delegated cell manager.
+        Ok(())
     }
 
     fn observe_window(
@@ -384,6 +483,16 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/v1/cells/{cell_id}", get(get_cell))
         .route("/v1/cells/reload", post(reload_cells))
         .route("/v1/cells/{cell_id}/instruct", post(instruct_cell))
+        // `17 cell lifecycle`'s verbs, increasing in violence. `purge` is the
+        // only irreversible one farseer owns, so it says what it destroyed
+        // rather than answering `204`.
+        .route("/v1/cells/states", get(lifecycle::list_states))
+        .route("/v1/cells/{cell_id}/pause", post(lifecycle::pause))
+        .route("/v1/cells/{cell_id}/resume", post(lifecycle::resume))
+        .route("/v1/cells/{cell_id}/archive", post(lifecycle::archive))
+        .route("/v1/cells/{cell_id}/restore", post(lifecycle::restore))
+        .route("/v1/cells/{cell_id}/purge", post(lifecycle::purge))
+        .route("/v1/cells/{cell_id}/delete", post(lifecycle::delete))
         .route("/v1/manager/delegate/worker", post(delegate_to_worker))
         .route("/v1/manager/delegate/cell", post(delegate_to_cell))
         .route("/v1/events", get(read_events))
@@ -394,12 +503,53 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/v1/runs/{run_id}/steer", post(steer_run))
         .route("/v1/runs/{run_id}/rerun", post(rerun_run))
         .route("/v1/runs/{run_id}/rescope", post(rescope_run))
+        .route(
+            "/v1/conversations",
+            get(work::list_conversations).post(work::create_conversation),
+        )
+        .route("/v1/tasks", get(work::list_tasks))
+        .route("/v1/tasks/{task_id}", get(work::get_task))
+        .route(
+            "/v1/tasks/{task_id}/transition",
+            post(work::transition_task),
+        )
+        .route("/v1/work/graph", get(work::graph))
+        .route("/v1/work/search", get(work::search_transcripts))
+        .route(
+            "/v1/runs/{run_id}/transcripts",
+            get(work::list_transcripts).post(work::add_transcript),
+        )
+        // `07 attach semantics`'s three control states. Attach is read-only by
+        // default and `intervene` refuses without a takeover, because silent
+        // injection makes a manager confidently wrong about its own worker.
+        .route("/v1/runs/{run_id}/control", get(attach::read_control))
+        .route("/v1/runs/{run_id}/observe", post(attach::observe))
+        .route("/v1/runs/{run_id}/take-over", post(attach::take_over))
+        .route("/v1/runs/{run_id}/release", post(attach::release))
+        .route("/v1/runs/{run_id}/heartbeat", post(attach::heartbeat))
+        .route("/v1/runs/{run_id}/intervene", post(attach::intervene))
         .route("/v1/ui-state/{key}", get(get_ui_state).put(put_ui_state))
+        .route(
+            "/v1/projects",
+            get(projects::list_projects).post(projects::create_project),
+        )
+        .route(
+            "/v1/projects/roots",
+            post(projects::add_root).delete(projects::remove_root),
+        )
+        .route("/v1/skills", get(skills))
         .route("/v1/quota", get(quota))
+        .route("/v1/quota/refresh", post(refresh_quota))
         .route("/v1/analytics/cost", get(analytics_cost))
         .route("/v1/analytics/intervention", get(analytics_intervention))
         .route("/v1/analytics/rework", get(analytics_rework))
         .route("/v1/analytics/lessons", get(analytics_lessons))
+        // `06 cell transport`'s inbound path for foreign orchestrators, off
+        // until `runners.toml` names a peer. Outside `/v1` because the card's
+        // location is the protocol's, not farseer's, and the RPC endpoint is
+        // what the card points at.
+        .route("/.well-known/agent-card.json", get(a2a::agent_card))
+        .route("/a2a", post(a2a::rpc))
         .nest_service("/v1/mcp", mcp::service(state.clone()))
         .layer(middleware::from_fn_with_state(state.clone(), guard))
         .with_state(state)
@@ -413,6 +563,10 @@ pub async fn serve(state: Arc<AppState>, port: u16) -> std::io::Result<()> {
     let bound = listener.local_addr()?.port();
     state.set_mcp_endpoint(bound);
     write_runtime_file(&runtime_file_path(), bound, &state.token)?;
+    // `35 notification plane`: off unless the operator set a URL, and never in
+    // the path of anything - a failed notification must not fail a run.
+    notify::spawn(Arc::clone(&state));
+    spawn_window_poll(Arc::clone(&state));
     axum::serve(listener, router(state)).await
 }
 
@@ -431,6 +585,14 @@ async fn guard(
     if !security::is_origin_allowed(host, origin) {
         return ApiError::Forbidden("request did not come from loopback").into_response();
     }
+    // The A2A face carries its own credential and checks it itself: `06 cell
+    // transport` binds a token **per peer** to a cell, which this guard has no
+    // way to express, and the Agent Card is read before any token exists at
+    // all. The loopback and origin checks above still apply, and the endpoint
+    // answers nothing until `runners.toml` names a peer.
+    if is_a2a(request.uri().path()) {
+        return next.run(request).await;
+    }
     let is_manager_request = is_manager_scoped(request.uri().path());
     if !presented_token(headers).is_some_and(|token| {
         state.token.matches(token) || (is_manager_request && state.manager_token_matches(token))
@@ -448,6 +610,11 @@ async fn guard(
 /// the runners that have no MCP client at all. Everything else on the router
 /// stays the operator's, which is what
 /// `a_manager_bearer_cannot_call_operator_routes` pins.
+/// The two paths a foreign orchestrator reaches, which authenticate themselves.
+fn is_a2a(path: &str) -> bool {
+    path == "/a2a" || path == "/.well-known/agent-card.json"
+}
+
 fn is_manager_scoped(path: &str) -> bool {
     path.starts_with("/v1/mcp") || path.starts_with("/v1/manager/")
 }
@@ -480,6 +647,8 @@ enum ApiError {
     Corrupt(&'static str),
     #[error("writing the steer message failed: {0}")]
     Steer(String),
+    #[error("transcript storage failed: {0}")]
+    Transcript(String),
 }
 
 impl IntoResponse for ApiError {
@@ -489,15 +658,20 @@ impl IntoResponse for ApiError {
             Self::Unauthorized => StatusCode::UNAUTHORIZED,
             Self::NotFound(_) => StatusCode::NOT_FOUND,
             Self::BadRequest(_) | Self::Policy(_) => StatusCode::BAD_REQUEST,
+            Self::Store(StoreError::InvalidTaskTransition { .. }) => StatusCode::BAD_REQUEST,
+            Self::Store(StoreError::NoSuchConversation(_) | StoreError::NoSuchTask(_)) => {
+                StatusCode::NOT_FOUND
+            }
             // `24 ui state persistence`: over 1 MiB per key, the answer is `413`.
             Self::Store(StoreError::UiStateTooLarge { .. }) => StatusCode::PAYLOAD_TOO_LARGE,
             // `24 ui state persistence`: the key is capped too, and an overlong
             // one arrives in the URL, so `414` names what was actually too long.
             Self::Store(StoreError::UiStateKeyTooLong { .. }) => StatusCode::URI_TOO_LONG,
-            Self::Store(_) => StatusCode::INTERNAL_SERVER_ERROR,
-            Self::Workspace(_) => StatusCode::INTERNAL_SERVER_ERROR,
-            Self::Corrupt(_) => StatusCode::INTERNAL_SERVER_ERROR,
-            Self::Steer(_) => StatusCode::INTERNAL_SERVER_ERROR,
+            Self::Store(_)
+            | Self::Workspace(_)
+            | Self::Corrupt(_)
+            | Self::Steer(_)
+            | Self::Transcript(_) => StatusCode::INTERNAL_SERVER_ERROR,
         };
         (
             status,
@@ -560,11 +734,22 @@ async fn reload_cells(State(state): State<Arc<AppState>>) -> Json<ReloadReport> 
 #[derive(Debug, Deserialize)]
 pub struct InstructBody {
     pub goal: String,
+    /// Which project to work in, per `39 what an installed farseer points at`.
+    #[serde(default)]
+    pub project: Option<String>,
+    /// Existing durable operator conversation, or absent to create one.
+    #[serde(default)]
+    pub conversation_id: Option<String>,
+    /// One candidate declared by this cell's manager definition.
+    #[serde(default)]
+    pub manager_runner: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
 pub struct InstructResponse {
     pub run_id: String,
+    pub task_id: String,
+    pub conversation_id: String,
 }
 
 /// Delegation for a runner that cannot speak MCP, on exactly the terms one that can gets.
@@ -576,26 +761,33 @@ pub struct InstructResponse {
 /// so the roster resolution, the worker cap, the budget draw-down and the
 /// cancellation link are one implementation rather than two that drift.
 ///
-/// Authorization is the manager's own token, presented as the bearer *and* in
-/// the body: the bearer is what [`is_manager_scoped`] lets past the guard, and
-/// the body is what binds the call to a specific live manager run. A manager
-/// bearer opens this route and no operator route.
+/// Authorization is the manager's own token, presented as the bearer. The body
+/// may repeat it and does not have to: `31 manager delegation reach` moved
+/// identity onto the credential the transport already proved, after a model
+/// mistyped the one it was asked to copy. A manager bearer opens this route and
+/// no operator route.
 async fn delegate_to_worker(
     State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
     Json(body): Json<mcp::DelegateToWorkerArgs>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    tokio::task::block_in_place(|| mcp::FarseerMcp::new(state).delegate_to_worker_json(body))
-        .map(Json)
-        .map_err(mcp_error)
+    let bearer = presented_token(&headers).map(str::to_string);
+    tokio::task::block_in_place(|| {
+        mcp::FarseerMcp::new(state).delegate_to_worker_json(body, bearer.as_deref())
+    })
+    .map(Json)
+    .map_err(mcp_error)
 }
 
 /// The fire-and-forget half. See [`delegate_to_worker`].
 async fn delegate_to_cell(
     State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
     Json(body): Json<mcp::DelegateToCellArgs>,
 ) -> ApiResult<Json<serde_json::Value>> {
+    let bearer = presented_token(&headers).map(str::to_string);
     mcp::FarseerMcp::new(state)
-        .delegate_to_cell_json(body)
+        .delegate_to_cell_json(body, bearer.as_deref())
         .map(Json)
         .map_err(mcp_error)
 }
@@ -620,7 +812,8 @@ async fn instruct_cell(
     UrlPath(cell_id): UrlPath<String>,
     Json(body): Json<InstructBody>,
 ) -> ApiResult<(StatusCode, Json<InstructResponse>)> {
-    if body.goal.trim().is_empty() {
+    let goal = body.goal.trim();
+    if goal.is_empty() {
         return Err(ApiError::BadRequest("goal must not be empty"));
     }
     let cell = state
@@ -628,26 +821,130 @@ async fn instruct_cell(
         .get(&CellId::new(cell_id))
         .cloned()
         .ok_or(ApiError::NotFound("cell"))?;
+    lifecycle::ensure_accepts_work(&state, &cell.cell_id)?;
+
+    let requested_conversation = body
+        .conversation_id
+        .as_deref()
+        .map(|id| {
+            id.parse::<farseer_core::ConversationId>()
+                .map_err(|_| ApiError::NotFound("conversation"))
+        })
+        .transpose()?;
+    let existing = requested_conversation
+        .map(|id| state.store().conversation(id))
+        .transpose()?
+        .flatten();
+    if requested_conversation.is_some() && existing.is_none() {
+        return Err(ApiError::NotFound("conversation"));
+    }
+
+    let runner = body
+        .manager_runner
+        .as_deref()
+        .or_else(|| {
+            existing
+                .as_ref()
+                .and_then(|conversation| conversation.manager_runner.as_deref())
+        })
+        .unwrap_or_else(|| cell.manager.runner())
+        .to_owned();
+    if !cell.manager.has_runner(&runner) {
+        return Err(ApiError::BadRequest(
+            "manager runner is not a candidate for this cell",
+        ));
+    }
+    check_tool_level(&runner, cell.manager.tools)?;
+
+    let project = match body.project.as_deref().or_else(|| {
+        existing
+            .as_ref()
+            .and_then(|conversation| conversation.project_path.as_deref())
+    }) {
+        Some(path) => Some(projects::resolve(&state, path)?),
+        None => None,
+    };
+    let project_path = project.as_deref().map(projects::display);
+    let now = now_ms();
+    let title = title_of(goal).unwrap_or_else(|| "Untitled task".into());
+    let conversation_id = if let Some(conversation) = existing {
+        conversation.conversation_id
+    } else {
+        let conversation = farseer_core::Conversation {
+            conversation_id: farseer_core::ConversationId::new(),
+            title: title.clone(),
+            project_path: project_path.clone(),
+            manager_runner: Some(runner.clone()),
+            created_ts: now,
+            updated_ts: now,
+            archived_ts: None,
+        };
+        state.store().create_conversation(&conversation)?;
+        conversation.conversation_id
+    };
+    let previous_run = state.store().latest_run_for_conversation(conversation_id)?;
+    state
+        .store()
+        .set_conversation_runner(conversation_id, &runner, now)?;
+
+    let task_id = TaskId::new();
+    state.store().create_task(&farseer_core::Task {
+        task_id,
+        conversation_id,
+        goal: goal.to_owned(),
+        title,
+        project_path,
+        state: farseer_core::TaskState::Inbox,
+        priority: 0,
+        created_ts: now,
+        updated_ts: now,
+    })?;
+    state.store().transition_task(
+        task_id,
+        farseer_core::TaskState::InProgress,
+        farseer_core::Actor::Operator,
+        "operator instruction accepted",
+        now,
+    )?;
+
     let contract = WorkerContract::seal(WorkerContractSpec {
         run_id: RunId::new(),
-        task_id: TaskId::new(),
+        task_id,
         cell_id: cell.cell_id.clone(),
-        goal: body.goal,
+        goal: goal.to_owned(),
         workspace: cell.workspace_strategy,
-        runner: cell.manager.runner.clone(),
+        runner,
         tool_grants: cell.tool_grants(),
+        tool_level: cell.manager.tools,
         autonomy_ceiling: cell.policy.autonomy_ceiling,
-        // `23 prototype loose ends`: the task starts with the owning cell's
-        // pool; every delegated worker narrows and draws down from this root.
         budget: cell.budget,
         definition_of_done: String::new(),
     });
-    let run_id = spawn_run(&state, contract, RunRole::Manager, cell)?;
+    let run_id = match spawn_run(&state, contract, RunRole::Manager, cell, project, None) {
+        Ok(run_id) => run_id,
+        Err(error) => {
+            state.store().transition_task(
+                task_id,
+                farseer_core::TaskState::Cancelled,
+                farseer_core::Actor::System,
+                "manager run could not start",
+                now_ms(),
+            )?;
+            return Err(error);
+        }
+    };
+    if let Some(parent) = previous_run {
+        state
+            .store()
+            .record_run_parent(run_id, parent, "continuation")?;
+    }
 
     Ok((
         StatusCode::ACCEPTED,
         Json(InstructResponse {
             run_id: run_id.to_string(),
+            task_id: task_id.to_string(),
+            conversation_id: conversation_id.to_string(),
         }),
     ))
 }
@@ -691,17 +988,19 @@ pub(crate) fn create_workspace(
     state: &AppState,
     strategy: WorkspaceStrategy,
     run_id: RunId,
+    project: Option<&Path>,
 ) -> ApiResult<(PathBuf, Option<PathBuf>)> {
     let name = run_id.to_string();
+    // `39 what an installed farseer points at`: the repository is the run's
+    // project when the launch named one, and the process's own working
+    // directory when it did not - which is farseer run from inside a checkout,
+    // and is what the CLI still does.
+    let repo = project.unwrap_or(state.repo_root.as_path());
     match strategy {
         WorkspaceStrategy::Worktree => {
-            let cwd = farseer_runner::workspace::create_worktree(
-                &state.repo_root,
-                &state.runs_dir,
-                &name,
-            )
-            .map_err(|e| ApiError::Workspace(e.to_string()))?;
-            Ok((cwd, Some(state.repo_root.clone())))
+            let cwd = farseer_runner::workspace::create_worktree(repo, &state.runs_dir, &name)
+                .map_err(|e| ApiError::Workspace(e.to_string()))?;
+            Ok((cwd, Some(repo.to_path_buf())))
         }
         WorkspaceStrategy::PlainDirectory => {
             let cwd = state.runs_dir.join(&name);
@@ -749,27 +1048,39 @@ fn manager_run_options(
     contract: &WorkerContract,
     cell: &CellDefinition,
     manager_token: &RuntimeToken,
+    project: Option<PathBuf>,
 ) -> ApiResult<RunOptions> {
     let mut options = RunOptions {
         actor: farseer_core::Actor::Operator,
         role: RunRole::Manager,
         manager_cell: Some(cell.clone()),
+        project,
         claude_mcp_config: None,
         append_system_prompt: None,
         runner_env: Vec::new(),
+        mcp: None,
         extensions: Vec::new(),
         // Declared by the operator in runner config, per `27 quota accounting`,
         // and passed down rather than derived: the manager crate reads no
         // config, and an undeclared runner is its own account.
         account: Some(state.runner_config().account_for(&contract.runner)),
-                // The manager's own declared skills, resolved to directories.
-                skills: skill_paths(state, &contract.runner, &cell.manager.skills)?,
-                // What the operator pinned, or nothing at all. `30 codex app
-                // server`: farseer passes a model or an effort only when a
-                // person wrote one down, so an unpinned runner keeps whatever
-                // its own config says.
-                model: state.runner_config().launch_of(&contract.runner).0.map(str::to_string),
-                effort: state.runner_config().launch_of(&contract.runner).1.map(str::to_string),
+        usd_micros_per_mtok: state.runner_config().price_for(&contract.runner),
+        // The manager's own declared skills, resolved to directories.
+        skills: skill_paths(state, &contract.runner, &cell.manager.skills)?,
+        // What the operator pinned, or nothing at all. `30 codex app
+        // server`: farseer passes a model or an effort only when a
+        // person wrote one down, so an unpinned runner keeps whatever
+        // its own config says.
+        model: state
+            .runner_config()
+            .launch_of(&contract.runner)
+            .0
+            .map(str::to_string),
+        effort: state
+            .runner_config()
+            .launch_of(&contract.runner)
+            .1
+            .map(str::to_string),
     };
     // `22 cell addressing` section 3: the roster is the grant, so the prompt
     // names exactly what is callable. A manager that has to guess will guess.
@@ -818,26 +1129,36 @@ fn manager_run_options(
         && delegate_extension(state).is_some()
     {
         Reach::PiExtension
+    } else if contract.runner == "codex-app-server" {
+        Reach::CodexAppServer
+    } else if farseer_manager::ACP_RUNNERS
+        .iter()
+        .any(|(name, _, _)| *name == contract.runner)
+    {
+        Reach::Acp
     } else {
         Reach::None
     };
 
     let mut prompt = match reach {
-        Reach::Mcp => format!(
-            "You are the manager for farseer cell `{}`. Your manager_run_id is `{}` and your \
-             manager_token is `{}`. The roster workers available to delegate to are: {}. \
-             The cells you may call are: {}. \
-             Pass both credentials to every farseer MCP tool call. When you delegate, name a \
-             roster worker and give it a precise sub-goal, then relay the returned result. \
-             Calling a cell is different: delegate_to_cell is fire-and-forget, it returns a \
-             call_id rather than an answer, and the callee owns its own workspace, runner and \
-             tools. Anything not named above is not callable, and asking again will not make \
-             it callable. The task remains yours to own.",
-            cell.cell_id,
-            contract.run_id,
-            manager_token.as_str(),
-            workers,
-            callable_cells,
+        // Codex shares Claude Code's wording because it shares the transport,
+        // and that is the point rather than an accident: **an MCP client calls
+        // the tool itself**, so it has to pass the two credentials the tool
+        // authorizes on. The extension route does not, which is why pi's prompt
+        // carries none - see the note on `Reach::PiExtension`.
+        //
+        // Found by running it. The first version of this reused pi's wording and
+        // the manager answered `Unable to delegate: manager authorization token
+        // unavailable.` - it could see the tools and had nothing to present.
+        // No credentials, on any transport. `31 manager delegation reach` moved
+        // identity onto the bearer the request already carries, after a
+        // `goose-acp` manager reached the tool and **mistyped** the
+        // 64-character token it had been asked to copy - failing as an
+        // authorization error when it was a transcription error. A model never
+        // given a secret cannot quote it, leak it, or get it wrong.
+        Reach::Mcp | Reach::CodexAppServer | Reach::Acp => format!(
+            "You are the manager for farseer cell `{}`. The roster workers available to              delegate to are: {}. The cells you may call are: {}.              Use the `delegate_to_worker` tool: name a roster worker, give it a precise              sub-goal, and relay the returned result. The worker sees nothing of              this conversation, so the sub-goal must stand alone.              Calling a cell is different: delegate_to_cell is fire-and-forget, it returns a              call_id rather than an answer, and the callee owns its own workspace, runner              and tools. Anything not named above is not callable, and asking again will not              make it callable. The task remains yours to own.",
+            cell.cell_id, workers, callable_cells,
         ),
         // No credentials in this one. The extension holds them and injects them
         // itself, so the model states a worker and a goal and never sees the
@@ -881,7 +1202,28 @@ fn manager_run_options(
         prompt.push_str("\n\nCell manager instructions:\n");
         prompt.push_str(&cell.manager.prompt);
     }
-    options.append_system_prompt = Some(prompt);
+    // **Handed over as a file where the runner reads one.** The prompt is
+    // multi-line by construction - farseer's own identity paragraph, then the
+    // cell's manager instructions - and a multi-line argument cannot be passed
+    // to a Windows `.CMD` shim at all: Rust refuses, with `batch file arguments
+    // are invalid` and no indication of which argument. pi shipped an update on
+    // 2026-08-30 that replaced its `.exe` with exactly such a shim, and every
+    // manager run on this machine stopped working between one morning and the
+    // next without a line of farseer changing.
+    //
+    // Keeping it off the argv is worth doing anyway: a command line is readable
+    // by every process listing on the machine, which is the same argument `31
+    // manager delegation reach` used to keep a credential out of one.
+    options.append_system_prompt = Some(
+        if farseer_runner::pi::reads_prompt_from_file(&contract.runner) {
+            let path = security::manager_prompt_path(&contract.run_id.to_string());
+            security::write_user_only_file(&path, prompt.as_bytes())
+                .map_err(|_| ApiError::Corrupt("could not write the manager prompt"))?;
+            path.display().to_string()
+        } else {
+            prompt
+        },
+    );
 
     match reach {
         Reach::Mcp => {
@@ -924,6 +1266,39 @@ fn manager_run_options(
                 ),
             ];
         }
+        // The same two verbs as `Reach::Mcp`, over the same MCP face, with the
+        // credential moved off the model's page and into the environment - the
+        // improvement `31 manager delegation reach` made for pi, arriving here
+        // for free because Codex resolves the variable in its own process.
+        //
+        // No config file: `Reach::Mcp` writes one because Claude Code reads MCP
+        // servers from disk, and a file is a secret with a lifetime to manage.
+        // This route has neither.
+        // ACP takes a literal header rather than the name of a variable, so
+        // the bearer is in the frame - a step down from the other two, recorded
+        // in `31 manager delegation reach` rather than smoothed over. The frame
+        // goes down a pipe to a child farseer spawned, and `02 record scope`
+        // scrubs what reaches the log.
+        Reach::Acp => {
+            options.mcp = Some(farseer_manager::McpReach::BearerInline {
+                url: state
+                    .mcp_endpoint()
+                    .expect("reach implies a bound listener"),
+                bearer: manager_token.as_str().to_string(),
+            });
+        }
+        Reach::CodexAppServer => {
+            options.mcp = Some(farseer_manager::McpReach::BearerFromEnv {
+                url: state
+                    .mcp_endpoint()
+                    .expect("reach implies a bound listener"),
+                var: "FARSEER_MANAGER_TOKEN".to_string(),
+            });
+            options.runner_env = vec![(
+                "FARSEER_MANAGER_TOKEN".to_string(),
+                manager_token.as_str().to_string(),
+            )];
+        }
         Reach::None => {}
     }
     Ok(options)
@@ -937,6 +1312,21 @@ enum Reach {
     /// farseer's plain-JSON manager face, through an extension registering the
     /// two verbs as ordinary tools. pi and omp.
     PiExtension,
+    /// farseer's MCP face over ACP's own `session/new` `mcpServers`.
+    ///
+    /// `29 harness protocol` found ACP's `fs/*` and `terminal/*` are served **by
+    /// the client** and incompatible with a runner-owned worktree, so farseer
+    /// declines both - which made it easy to conclude ACP had nothing to offer a
+    /// manager. `mcpServers` is a different mechanism: farseer serves no tools,
+    /// it names an address the agent dials itself. goose 1.47.0 advertises
+    /// `mcpCapabilities.http` and reports what it reached.
+    Acp,
+    /// farseer's MCP face again, but configured **in the handshake** rather than
+    /// in a file on disk: `codex-app-server` takes `config.mcp_servers` on
+    /// `thread/start`, and takes the bearer as the *name of an environment
+    /// variable* it resolves in its own process. `31 manager delegation reach`
+    /// predicted this route; `30 codex app server` named the field.
+    CodexAppServer,
     /// Nothing. The manager is told so rather than left to improvise.
     None,
 }
@@ -962,6 +1352,8 @@ pub(crate) fn spawn_run(
     contract: WorkerContract,
     role: RunRole,
     pinned_cell: CellDefinition,
+    project: Option<PathBuf>,
+    caller_children: Option<Arc<Mutex<HashSet<RunId>>>>,
 ) -> ApiResult<RunId> {
     ensure_runner_authority(&pinned_cell, &contract.runner)?;
     if let Some(dimension) = unenforceable_budget_dimension(&contract.runner, contract.budget) {
@@ -986,7 +1378,8 @@ pub(crate) fn spawn_run(
         None
     };
     let run_id = contract.run_id;
-    let (cwd, repo_for_teardown) = create_workspace(state, contract.workspace, run_id)?;
+    let (cwd, repo_for_teardown) =
+        create_workspace(state, contract.workspace, run_id, project.as_deref())?;
     let cancel_requested = Arc::new(AtomicBool::new(false));
     let manager_context = (role == RunRole::Manager).then(|| ManagerContext {
         manager_token: RuntimeToken::generate(),
@@ -995,9 +1388,16 @@ pub(crate) fn spawn_run(
         cancel_requested: Arc::clone(&cancel_requested),
         contract: contract.clone(),
         cell: pinned_cell.clone(),
+        project: project.clone(),
     });
     let options = if let Some(context) = &manager_context {
-        manager_run_options(state, &contract, &context.cell, &context.manager_token)
+        manager_run_options(
+            state,
+            &contract,
+            &context.cell,
+            &context.manager_token,
+            project.clone(),
+        )
     } else {
         Ok(RunOptions {
             actor: farseer_core::Actor::Operator,
@@ -1005,25 +1405,37 @@ pub(crate) fn spawn_run(
             manager_cell: Some(pinned_cell),
             claude_mcp_config: None,
             append_system_prompt: None,
-        runner_env: Vec::new(),
-        extensions: Vec::new(),
+            runner_env: Vec::new(),
+            mcp: None,
+            extensions: Vec::new(),
+            project: project.clone(),
             account: Some(state.runner_config().account_for(&contract.runner)),
-                // A run reached without a manager context - a rerun, or a
-                // direct worker - carries no declared skills rather than
-                // inheriting the cell manager's.
-                skills: Vec::new(),
-                // What the operator pinned, or nothing at all. `30 codex app
-                // server`: farseer passes a model or an effort only when a
-                // person wrote one down, so an unpinned runner keeps whatever
-                // its own config says.
-                model: state.runner_config().launch_of(&contract.runner).0.map(str::to_string),
-                effort: state.runner_config().launch_of(&contract.runner).1.map(str::to_string),
+            usd_micros_per_mtok: state.runner_config().price_for(&contract.runner),
+            // A run reached without a manager context - a rerun, or a
+            // direct worker - carries no declared skills rather than
+            // inheriting the cell manager's.
+            skills: Vec::new(),
+            // What the operator pinned, or nothing at all. `30 codex app
+            // server`: farseer passes a model or an effort only when a
+            // person wrote one down, so an unpinned runner keeps whatever
+            // its own config says.
+            model: state
+                .runner_config()
+                .launch_of(&contract.runner)
+                .0
+                .map(str::to_string),
+            effort: state
+                .runner_config()
+                .launch_of(&contract.runner)
+                .1
+                .map(str::to_string),
         })
     };
     let options = match options {
         Ok(options) => options,
         Err(error) => {
             let _ = std::fs::remove_file(security::manager_config_path(&run_id.to_string()));
+            let _ = std::fs::remove_file(security::manager_prompt_path(&run_id.to_string()));
             let _ =
                 farseer_runner::workspace::teardown_workspace(&cwd, repo_for_teardown.as_deref());
             return Err(error);
@@ -1040,6 +1452,23 @@ pub(crate) fn spawn_run(
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .insert(run_id, Arc::clone(&cancel_requested));
+    // A run somebody else's manager owns joins that manager's children, so
+    // cancelling the caller reaches it. `06 cell transport` section 6: a cell is
+    // a worker whose implementation happens to be another manager, and the
+    // calling manager owns it exactly as it owns a worker.
+    //
+    // Registered here rather than through `ChildRunRegistration`, whose `Drop`
+    // fires when the *call* returns. A cell call is fire-and-forget, so that
+    // would have unregistered the callee before it had done anything; this
+    // membership lasts as long as the run does, and is dropped by the same
+    // background task that drops the manager context.
+    if let Some(children) = &caller_children {
+        children
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(run_id);
+    }
+    let drives_task = matches!(role, RunRole::Manager) && caller_children.is_none();
     let background_state = Arc::clone(state);
     tokio::task::spawn_blocking(move || {
         let _config_guard = SecretFileGuard(config_path);
@@ -1052,7 +1481,16 @@ pub(crate) fn spawn_run(
             Some(cancel_requested.as_ref()),
         );
         observe_window(&background_state, &contract, &result);
+        if drives_task {
+            finish_task_driver_run(&background_state, contract.task_id, run_id);
+        }
         background_state.managers().remove(&run_id);
+        if let Some(children) = &caller_children {
+            children
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .remove(&run_id);
+        }
         background_state
             .pending_cancellations
             .lock()
@@ -1068,6 +1506,47 @@ pub(crate) fn spawn_run(
     });
 
     Ok(run_id)
+}
+
+/// Project a task-driving manager's terminal result onto the durable board.
+///
+/// A delegated cell also runs a manager but owns no task transition in its
+/// caller's board, which is why `spawn_run` decides this before the manager
+/// context is removed.
+fn finish_task_driver_run(state: &AppState, task_id: TaskId, run_id: RunId) {
+    let store = state.store();
+    let Ok(Some(row)) = store.run(run_id) else {
+        return;
+    };
+    let Ok(Some(task)) = store.task(task_id) else {
+        return;
+    };
+    if task.state != farseer_core::TaskState::InProgress {
+        return;
+    }
+    let (to, reason) = match row.outcome.as_deref() {
+        Some("ok") => (
+            farseer_core::TaskState::Review,
+            "task-driving manager run finished",
+        ),
+        Some("cancelled") => (
+            farseer_core::TaskState::Cancelled,
+            "task-driving manager run was cancelled",
+        ),
+        _ => (
+            farseer_core::TaskState::Blocked,
+            "task-driving manager run did not complete",
+        ),
+    };
+    if let Err(error) = store.transition_task(
+        task_id,
+        to,
+        farseer_core::Actor::System,
+        reason,
+        row.finished_ts.unwrap_or(row.started_ts),
+    ) {
+        eprintln!("task {task_id} did not follow terminal run {run_id}: {error}");
+    }
 }
 
 /// Record a window transition the run happened to observe, per `27 quota accounting`.
@@ -1108,6 +1587,10 @@ fn observe_window(
             // measured that - and farseer never computes one.
             used_percent: None,
             window_duration_mins: None,
+            // A run's own window names a runner, not a provider. Same rule as
+            // the adapters: transcribe what was said, leave the rest absent.
+            provider: None,
+            label: None,
         });
     }
     observations.extend(report.into_iter().flat_map(|report| {
@@ -1144,6 +1627,16 @@ async fn cancel_run(
     UrlPath(run_id): UrlPath<String>,
 ) -> ApiResult<StatusCode> {
     let run_id: RunId = run_id.parse().map_err(|_| ApiError::NotFound("run"))?;
+    cancel_run_inner(&state, run_id).await?;
+    Ok(StatusCode::ACCEPTED)
+}
+
+/// The cancellation itself, reachable from more than one face.
+///
+/// `06 cell transport` puts a foreign orchestrator on the A2A endpoint with a
+/// `tasks/cancel`, and a second implementation of this would be a second
+/// opinion about what cancelling a manager does to its children.
+pub(crate) async fn cancel_run_inner(state: &Arc<AppState>, run_id: RunId) -> ApiResult<()> {
     let pending = state
         .pending_cancellations
         .lock()
@@ -1180,7 +1673,7 @@ async fn cancel_run(
     for token in tokens.drain(..) {
         token.cancel();
     }
-    Ok(StatusCode::ACCEPTED)
+    Ok(())
 }
 
 #[derive(Debug, Deserialize)]
@@ -1193,6 +1686,31 @@ pub struct SteerBody {
 /// `400` when the run's runner has no steering path (Codex today) rather
 /// than writing a line nothing reads; `404` when the run is unknown or
 /// already finished, same as `cancel`.
+/// Mark a run as one a human stepped into, permanently.
+///
+/// `07 attach semantics` section 6: the run's result carries the flag for good,
+/// so neither the manager nor the record mistakes the outcome for autonomous.
+/// Best-effort, like the event beside it - an intervention that reached the
+/// agent happened whether or not the row could be updated, and failing the call
+/// afterwards would tell the operator their words did not land when they did.
+pub(crate) fn mark_touched(state: &AppState, run_id: RunId) {
+    let store = state.store();
+    let row = match store.run(run_id) {
+        Ok(Some(mut row)) => {
+            row.operator_touched = true;
+            row
+        }
+        Ok(None) => return,
+        Err(error) => {
+            eprintln!("run {run_id} could not be read to mark it touched: {error}");
+            return;
+        }
+    };
+    if let Err(error) = store.upsert_run(&row) {
+        eprintln!("run {run_id} could not be marked as touched: {error}");
+    }
+}
+
 async fn steer_run(
     State(state): State<Arc<AppState>>,
     UrlPath(run_id): UrlPath<String>,
@@ -1213,6 +1731,27 @@ async fn steer_run(
             steer
                 .steer(&body.message)
                 .map_err(|e| ApiError::Steer(e.to_string()))?;
+            // The operator's words entered the run, so `07 attach semantics`
+            // section 6 applies here as much as it does to `intervene`: the
+            // manager is told, and the run carries the flag for good.
+            //
+            // Steer does **not** require a takeover, where `intervene` does.
+            // The difference is what is on the other end: a manager is a
+            // conversation the operator is having, and `05 run state model` put
+            // steer on it as the way to talk; a worker is executing a contract
+            // somebody else wrote, and typing into one unannounced is what
+            // `07` section 3 refused.
+            mark_touched(&state, run_id);
+            if let Ok(Some(row)) = state.store().run(run_id) {
+                let _ = state.store().append(&farseer_core::NewEvent::new(
+                    row.cell_id,
+                    run_id,
+                    farseer_core::EventKind::new(farseer_core::EventKind::OPERATOR_INTERVENED),
+                    farseer_core::Actor::Operator,
+                    now_ms(),
+                    serde_json::json!({ "control": "autonomous", "message": body.message }),
+                ));
+            }
             Ok(StatusCode::ACCEPTED)
         }
         None => Err(ApiError::BadRequest(
@@ -1242,6 +1781,10 @@ struct OriginalRun {
     spec: WorkerContractSpec,
     role: RunRole,
     manager_cell: Option<CellDefinition>,
+    /// Where the original ran. A re-run in a different project is a different
+    /// run, so this comes out of the record rather than out of whatever the
+    /// process happens to be pointed at now.
+    project: Option<PathBuf>,
 }
 
 fn original_run(state: &AppState, run_id: RunId) -> ApiResult<OriginalRun> {
@@ -1273,17 +1816,27 @@ fn original_run(state: &AppState, run_id: RunId) -> ApiResult<OriginalRun> {
         .map(serde_json::from_value)
         .transpose()
         .map_err(|_| ApiError::Corrupt("manager cell snapshot"))?;
+    let project = queued
+        .payload
+        .get("project")
+        .and_then(serde_json::Value::as_str)
+        .map(PathBuf::from);
     Ok(OriginalRun {
         spec,
         role,
         manager_cell,
+        project,
     })
 }
 
-/// `05 run state model`'s **re-run**: same contract, fresh run, fresh workspace. `16 local api surface`:
-/// operator-initiated re-run leaves an event behind - here, the
-/// `rescoped_from` edge `11 analytics questions`'s rework-depth query already walks, so a chain
-/// of re-runs reads exactly like a chain of re-scopes to that analytics query.
+/// `05 run state model`'s **re-run**: same contract, fresh run, fresh workspace.
+///
+/// Leaves two marks, which are for two different readers. The `rescoped_from`
+/// edge is for `11 analytics questions`'s rework-depth query, so a chain of
+/// re-runs reads exactly like a chain of re-scopes to it. The `run_respawned`
+/// event on the parent is for the **manager**, per `16 local api surface`
+/// section 8 - nothing reads an edge on a wake, and a manager that discovers
+/// its plan changed underneath it silently will re-plan badly.
 async fn rerun_run(
     State(state): State<Arc<AppState>>,
     UrlPath(run_id): UrlPath<String>,
@@ -1291,7 +1844,7 @@ async fn rerun_run(
     let parent_run_id: RunId = run_id.parse().map_err(|_| ApiError::NotFound("run"))?;
     let mut original = original_run(&state, parent_run_id)?;
     original.spec.run_id = RunId::new();
-    respawn(&state, original, parent_run_id).await
+    respawn(&state, original, parent_run_id, false).await
 }
 
 /// `05 run state model`'s **re-scope**: a new run against the same task, with a changed
@@ -1320,25 +1873,89 @@ async fn rescope_run(
     }
     original.spec.run_id = RunId::new();
     original.spec.goal = goal;
-    respawn(&state, original, parent_run_id).await
+    respawn(&state, original, parent_run_id, true).await
 }
 
 async fn respawn(
     state: &Arc<AppState>,
     original: OriginalRun,
     parent_run_id: RunId,
+    // Whether the caller changed the goal. `05 run state model` separates the
+    // two verbs by exactly this, and the record should not have to diff two
+    // contracts to recover which one the operator used.
+    changed_goal: bool,
 ) -> ApiResult<(StatusCode, Json<RespawnResponse>)> {
     let pinned_cell = original.manager_cell.ok_or(ApiError::BadRequest(
         "this legacy run has no pinned cell definition and cannot be rerun safely",
     ))?;
     let run_id = original.spec.run_id;
+    let cell_id = original.spec.cell_id.clone();
+    let goal = original.spec.goal.clone();
+    let task_id = original.spec.task_id;
+    let drives_task = matches!(original.role, RunRole::Manager);
+    if drives_task {
+        let store = state.store();
+        let task = store.task(task_id)?.ok_or(ApiError::NotFound("task"))?;
+        if task.state != farseer_core::TaskState::InProgress {
+            store.transition_task(
+                task_id,
+                farseer_core::TaskState::InProgress,
+                farseer_core::Actor::Operator,
+                if changed_goal {
+                    "operator rescoped the task"
+                } else {
+                    "operator reran the task"
+                },
+                now_ms(),
+            )?;
+        }
+    }
+    // The edge stays: `11 analytics questions`'s rework-depth query walks it,
+    // and a chain of re-runs has to read like a chain of re-scopes to that
+    // query. What it cannot do is tell the manager, because nothing reads the
+    // edge on a wake - so the event is appended beside it rather than instead.
     state.store().record_rescope(run_id, parent_run_id)?;
-    let run_id = spawn_run(
+    let run_id = match spawn_run(
         state,
         WorkerContract::seal(original.spec),
         original.role,
         pinned_cell,
-    )?;
+        original.project,
+        // An operator re-run belongs to the operator, not to whatever manager
+        // owned the run it repeats.
+        None,
+    ) {
+        Ok(run_id) => run_id,
+        Err(error) => {
+            if drives_task {
+                let _ = state.store().transition_task(
+                    task_id,
+                    farseer_core::TaskState::Blocked,
+                    farseer_core::Actor::System,
+                    "task-driving manager could not start",
+                    now_ms(),
+                );
+            }
+            return Err(error);
+        }
+    };
+    // Appended to the parent, per `16 local api surface` section 8: the manager
+    // whose plan was overridden is the one watching that run, and it decides
+    // for itself what to do about it - the same shape as `07`'s intervention.
+    let verb = if changed_goal { "rescope" } else { "rerun" };
+    state
+        .store()
+        .record_run_parent(run_id, parent_run_id, verb)?;
+    if let Err(error) = state.store().append(&farseer_core::NewEvent::new(
+        cell_id,
+        parent_run_id,
+        farseer_core::EventKind::new(farseer_core::EventKind::RUN_RESPAWNED),
+        farseer_core::Actor::Operator,
+        now_ms(),
+        serde_json::json!({ "verb": verb, "run_id": run_id.to_string(), "goal": goal }),
+    )) {
+        eprintln!("the operator's {verb} of run {parent_run_id} was not recorded: {error}");
+    }
     Ok((
         StatusCode::ACCEPTED,
         Json(RespawnResponse {
@@ -1356,6 +1973,11 @@ pub struct StreamQuery {
     /// The cursor. Omit for live only.
     pub since: Option<Seq>,
     pub limit: Option<usize>,
+    /// Read the **last** this-many events instead of the first, for a surface
+    /// opening cold with no cursor to resume from. Ignored when `since` is
+    /// given, because a caller holding a cursor is resuming and a tail would
+    /// skip the gap it is resuming across. See `Store::scan_tail`.
+    pub tail: Option<usize>,
 }
 
 impl StreamQuery {
@@ -1382,11 +2004,15 @@ async fn read_events(
     Query(query): Query<StreamQuery>,
 ) -> ApiResult<Json<Vec<farseer_core::Event>>> {
     let store = state.store();
-    let events = store.scan(
-        query.since.unwrap_or(0),
-        query.limit.unwrap_or(500).min(5_000),
-        &query.filter()?,
-    )?;
+    let filter = query.filter()?;
+    let events = match query.tail {
+        Some(tail) if query.since.is_none() => store.scan_tail(tail.min(5_000), &filter)?,
+        _ => store.scan(
+            query.since.unwrap_or(0),
+            query.limit.unwrap_or(500).min(5_000),
+            &filter,
+        )?,
+    };
     Ok(Json(events))
 }
 
@@ -1493,6 +2119,28 @@ pub struct RunView {
     /// conversation they can still steer, a worker is a job - and it was in the
     /// record all along while no surface showed it.
     pub role: Option<String>,
+    /// Why a finished run finished the way it did, when the record says so.
+    ///
+    /// `17 cell lifecycle` chose no orphan survival, so a run whose farseer
+    /// process is gone is reaped and marked `failed` - correct, because the run
+    /// *had started* and its outcome is genuinely unknown. On a fleet view it
+    /// is also indistinguishable from a run that tried and could not do the
+    /// work, and a screen of `failed` after a restart reads as breakage.
+    ///
+    /// **Derived, not a new outcome.** Adding a fifth outcome word would change
+    /// what `11 analytics questions` counts, to fix a presentation problem;
+    /// `26 routing policy` refused a new outcome on the same grounds. The reason
+    /// is already in `run_finished`, and this is the same move `title` makes
+    /// with `run_queued` - read the record rather than add a column.
+    pub finished_reason: Option<String>,
+    /// `07 attach semantics`'s third axis: `autonomous`, `observed` or
+    /// `taken_over`.
+    ///
+    /// Derived on read like `liveness`, and for the same reason - a lease
+    /// nobody renewed has lapsed whether or not anything swept it - so a
+    /// surface showing this never has to ask whether the person holding the run
+    /// is still there.
+    pub control: String,
 }
 
 /// The fleet, newest first.
@@ -1636,6 +2284,78 @@ fn skill_paths(state: &AppState, runner: &str, names: &[String]) -> ApiResult<Ve
         .collect()
 }
 
+/// The first runner in the author's order whose subscription window is not spent.
+///
+/// `26 routing policy` put the ordered list on the roster entry because **the
+/// author asserts equivalence and farseer never infers it**. This is the other
+/// half: farseer picks, and it picks by the one signal it gets for free.
+///
+/// Three states, per `26` section 2, and the third is the common one - a runner
+/// farseer has never seen a window for is `unknown`, which behaves as
+/// **available until proven otherwise**. The router tries, and a failure is what
+/// teaches it. Most runners will never report a window, so `unknown` is
+/// permanent rather than a gap to close.
+///
+/// `None` means every candidate is spent, which the caller turns into `26`
+/// section 3's `runner_exhausted` rather than a fifth outcome.
+fn first_available_runner(state: &AppState, candidates: &[String]) -> Option<String> {
+    const EXHAUSTED: &str = "exhausted_until";
+
+    let config = state.runner_config();
+    let mut exhausted: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut on_overage: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for row in state
+        .store()
+        .windows(|account| config.runners_on(account))
+        .unwrap_or_default()
+    {
+        let runners = config.runners_on(&row.account);
+        if row.status == EXHAUSTED {
+            exhausted.extend(runners.iter().cloned());
+        }
+        if row.is_using_overage {
+            on_overage.extend(runners);
+        }
+    }
+    let eligible = || candidates.iter().filter(|r| !exhausted.contains(*r));
+    // `26 routing policy` section 4, and the shape is the whole point: a
+    // subscription run costs **nothing marginal** until its window turns over,
+    // and the only way to continue past that is a pay-per-token key that costs
+    // real money. So the cost curve is not a slope a router shaves margins off.
+    // It is **a cliff at the moment of exhaustion**, and `is_using_overage` is
+    // the provider saying which side of it a runner is on.
+    //
+    // Observed, not estimated: farseer does not price a run in advance to decide
+    // this, because the one number it would need is the one nobody has yet.
+    // Preference only - a runner in overage still runs when it is all there is,
+    // since `26` is explicit that budget pressure may **reorder within the
+    // author's list** and never introduce or remove a runner the author named.
+    eligible()
+        .find(|runner| !on_overage.contains(*runner))
+        .or_else(|| eligible().next())
+        .cloned()
+}
+
+/// Refuse a tool level farseer cannot actually impose on this runner.
+///
+/// The third application of one rule, and the one `36 tool grant enforcement`
+/// exists because of: a cell that opts down to `read` and gets a shell anyway
+/// has been told nothing, and the record would say it was allowed less than it
+/// was. `31` refuses a delegation a manager cannot make and `32` refuses a
+/// skill a runner cannot load; this refuses a grant a runner cannot honour.
+///
+/// `ToolLevel::Shell` never refuses, because it asks for nothing to be imposed.
+fn check_tool_level(runner: &str, level: farseer_core::ToolLevel) -> ApiResult<()> {
+    if level != farseer_core::ToolLevel::Shell && !farseer_runner::pi::takes_tool_allowlist(runner)
+    {
+        return Err(ApiError::Policy(format!(
+            "runner `{runner}` cannot be held to a tool allowlist, and this cell asks for `{}`",
+            level.as_str()
+        )));
+    }
+    Ok(())
+}
+
 /// Whether farseer has a way to hand this runner a named skill.
 ///
 /// One arm today, and stated as a list rather than a negation so a new runner
@@ -1646,6 +2366,23 @@ fn skill_paths(state: &AppState, runner: &str, names: &[String]) -> ApiResult<Ve
 /// no argv at all that gives it a directory.
 fn runner_loads_skills(runner: &str) -> bool {
     farseer_runner::pi::loads_skills_by_path(runner)
+}
+
+/// Why the run ended, from its own last event.
+///
+/// The mirror of [`queued_facts`], which reads a run's first event - and it is
+/// the same one query, pointed at the other end of the run.
+fn finished_reason(state: &Arc<AppState>, run_id: RunId) -> Option<String> {
+    let store = state.store();
+    let events = store.scan_tail(1, &ScanFilter::run(run_id)).ok()?;
+    let last = events.first()?;
+    if last.kind.as_str() != farseer_core::EventKind::RUN_FINISHED {
+        return None;
+    }
+    last.payload
+        .get("reason")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_string)
 }
 
 fn run_view(state: &Arc<AppState>, row: RunRow) -> RunView {
@@ -1677,6 +2414,13 @@ fn run_view(state: &Arc<AppState>, row: RunRow) -> RunView {
             .map(|h| liveness_str(h.liveness.liveness()).to_string()),
         title,
         role,
+        finished_reason: finished_reason(state, run_id),
+        control: match attach::control_of(state, run_id, now_ms()) {
+            farseer_core::Control::Autonomous => "autonomous",
+            farseer_core::Control::Observed => "observed",
+            farseer_core::Control::TakenOver => "taken_over",
+        }
+        .to_string(),
     };
     view
 }
@@ -1698,11 +2442,14 @@ mod title_tests {
     #[test]
     fn a_multi_line_goal_is_named_by_its_first_real_line() {
         assert_eq!(
-            title_of("
+            title_of(
+                "
 
   Add a quota widget  
 and make it live.
-").as_deref(),
+"
+            )
+            .as_deref(),
             Some("Add a quota widget")
         );
     }
@@ -1722,9 +2469,14 @@ and make it live.
     /// inventory`'s rule, that an absent answer stays absent.
     #[test]
     fn a_goal_with_nothing_in_it_has_no_title() {
-        assert_eq!(title_of("   
+        assert_eq!(
+            title_of(
+                "   
   
-"), None);
+"
+            ),
+            None
+        );
     }
 }
 
@@ -1782,24 +2534,257 @@ async fn put_ui_state(
 /// spending it", rather than the one nobody can answer honestly.
 ///
 /// Accounting is keyed by **account** and display by **runner**, deliberately.
+/// The skills a cell may declare, and who declares each.
+///
+/// `32 harness capability floor`'s third consequence asked for the **menu** to
+/// show skills, on the grounds that they are the part of a harness an operator
+/// has actually customised and the part farseer was most blind to.
+///
+/// **`32`'s own fix made that menu the wrong one.** Since discovery was denied,
+/// a run reaches only what its cell names, and a cell may name only a directory
+/// under the repository's `skills/`. Listing the twenty-odd skills pi discovers
+/// on this machine would be a menu of things no cell can order - the failure
+/// `13 harness build kit` names as the worst direction, an author committing to
+/// something and finding out afterwards.
+///
+/// So the menu is the repository, and `also_declared_by` is the part an author
+/// actually asks: is anything using this, and what does it do there.
+async fn skills(State(state): State<Arc<AppState>>) -> ApiResult<Json<serde_json::Value>> {
+    let cells = state.cells();
+    let mut rows: Vec<serde_json::Value> = Vec::new();
+    let dir = state.repo_root().join("skills");
+    let mut names: Vec<String> = std::fs::read_dir(&dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter(|entry| entry.path().is_dir())
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .collect();
+    names.sort();
+    for name in names {
+        let declared_by: Vec<String> = cells
+            .values()
+            .filter(|cell| {
+                cell.manager.skills.contains(&name)
+                    || cell.roster.iter().any(|entry| match entry {
+                        farseer_core::RosterEntry::Worker { skills, .. } => skills.contains(&name),
+                        _ => false,
+                    })
+            })
+            .map(|cell| cell.cell_id.as_str().to_string())
+            .collect();
+        rows.push(serde_json::json!({ "name": name, "declared_by": declared_by }));
+    }
+    Ok(Json(serde_json::json!({ "skills": rows })))
+}
+
 async fn quota(State(state): State<Arc<AppState>>) -> ApiResult<Json<serde_json::Value>> {
     let config = state.runner_config();
     let windows = {
         let store = state.store();
         store.windows(|account| config.runners_on(account))?
     };
-    let rows: Vec<serde_json::Value> = windows
+    let rows: Vec<(farseer_store::WindowRow, serde_json::Value)> = windows
         .into_iter()
+        // A window keyed by a runner's own name, when that runner now declares
+        // an account, is a **superseded reading and not a second subscription**.
+        //
+        // `27 quota accounting` keys a window by account and says the account is
+        // declared by the operator, never inferred - so an undeclared runner is
+        // keyed by its own name. The moment `runners.toml` gains
+        // `[codex-app-server] account = "chatgpt"`, every observation already in
+        // the record keeps the old key, and the widget showed one Codex
+        // subscription twice, with two percentages a day apart.
+        //
+        // Filtered rather than deleted: `02 record scope` makes the record
+        // append-only, and what those rows said was true when they were written.
+        .filter(|window| config.account_for(&window.account) == window.account)
         .map(|window| {
             let runners = config.runners_on(&window.account);
+            let provider = config.provider_for_account(&window.account);
             let mut value = serde_json::to_value(&window).unwrap_or_default();
             if let Some(object) = value.as_object_mut() {
                 object.insert("runners".into(), serde_json::json!(runners));
+                object.insert("source".into(), serde_json::json!("record"));
+                if let Some(provider) = provider {
+                    object.insert("provider".into(), serde_json::json!(provider));
+                }
             }
-            value
+            (window, value)
         })
         .collect();
-    Ok(Json(serde_json::json!({ "windows": rows })))
+    let polled = state
+        .polled_windows
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone();
+
+    // **The live reading supersedes farseer's own record of the same window.**
+    //
+    // Both are true and they are the same subscription: the record holds what a
+    // run was told when it ran, and the poll holds what the provider says now.
+    // Shown side by side they read as two subscriptions with two different
+    // percentages, which is what the widget did until the operator pointed at
+    // it - `chatgpt 5 hour 1%` above `openai codex 5 hours 1%`.
+    //
+    // Matched on the provider the operator **declared** plus the window's own
+    // duration, so nothing is dropped on a guess: an account with no declared
+    // provider keeps both rows, which is the same failure `27 quota accounting`
+    // already chose - two windows shown where there is one, visible and fixable
+    // with one line of config.
+    let live: Vec<(&str, Option<i64>)> = polled
+        .iter()
+        .filter_map(|w| Some((w.provider.as_deref()?, w.window_duration_mins)))
+        .collect();
+    let mut rows: Vec<serde_json::Value> = rows
+        .into_iter()
+        .filter(|(window, value)| {
+            let Some(provider) = value.get("provider").and_then(serde_json::Value::as_str) else {
+                return true;
+            };
+            !live
+                .iter()
+                .any(|(p, mins)| *p == provider && *mins == window.window_duration_mins)
+        })
+        .map(|(_, value)| value)
+        .collect();
+    rows.extend(polled.into_iter().map(|window| {
+        let mut value = serde_json::to_value(&window).unwrap_or_default();
+        if let Some(object) = value.as_object_mut() {
+            object.insert("runners".into(), serde_json::json!([window.runner]));
+            object.insert("source".into(), serde_json::json!("omp usage"));
+        }
+        value
+    }));
+    // The surface must never offer a source the runtime cannot read, which is
+    // `13 harness build kit`'s menu rule applied to a toggle: the widget lists
+    // what is here and marks which one is on, rather than hard-coding a list
+    // that goes stale the day a second source lands.
+    Ok(Json(serde_json::json!({
+        "windows": rows,
+        "sources": farseer_core::runners::USAGE_SOURCES,
+        "source": config.usage_source(),
+    })))
+}
+
+/// Read every window omp can see **now**, then answer like [`quota`].
+///
+/// The background poll runs every five minutes because windows move on the
+/// scale of hours, and that is the right default for something farseer does on
+/// its own. It is the wrong answer for an operator who has just switched
+/// accounts and is looking at the widget: the number they want is one process
+/// launch away and they have to wait up to five minutes for it.
+///
+/// **A POST, and not a query parameter on the read.** This launches somebody
+/// else's binary, which is not a read however it is spelled - and `16 local api
+/// surface` would then have a GET with a side effect, which is the kind of
+/// thing that gets retried by a proxy.
+///
+/// **Refuses when the poll is off** rather than quietly answering the cached
+/// numbers. `13 harness build kit` made the poll a menu item an operator picks
+/// (`usage_poll = true` in `runners.toml`), and a button that appears to do
+/// something farseer was never given permission to do is the failure mode this
+/// repository keeps naming: silence around a missing capability.
+async fn refresh_quota(State(state): State<Arc<AppState>>) -> ApiResult<Json<serde_json::Value>> {
+    if state.runner_config().usage_source().is_none() {
+        return Err(ApiError::BadRequest(
+            "no usage source is configured; set `source = \"omp\"` under [usage] in runners.toml",
+        ));
+    }
+    let windows = tokio::task::spawn_blocking(poll_windows)
+        .await
+        .unwrap_or_default();
+    // Only overwrite with something, for the same reason the loop does: a failed
+    // poll must leave the last good snapshot rather than blank the view.
+    if !windows.is_empty() {
+        *state
+            .polled_windows
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = windows;
+    }
+    quota(State(state)).await
+}
+
+/// Refresh [`AppState::polled_windows`] on a slow loop, for as long as farseer runs.
+///
+/// Started from `serve`, so nothing polls in a test: a unit test that shells out
+/// to a binary on the developer's machine is not testing farseer.
+///
+/// **Opt-in, and off by default.** Starting farseer used to launch `omp` whether
+/// or not the operator had asked for a cross-provider quota reading, which is
+/// farseer running somebody else's binary on its own initiative. `13 harness
+/// build kit` made the inventory a menu an author picks from, and a poll nobody
+/// chose is the opposite of that. Turn it on per runner in `runners.toml`:
+///
+/// ```toml
+/// [omp]
+/// usage_poll = true
+/// ```
+fn spawn_window_poll(state: Arc<AppState>) {
+    if !state.runner_config().polls_usage("omp") {
+        return;
+    }
+    tokio::spawn(async move {
+        // Windows move on the scale of hours. Anything faster would be a
+        // process launch nobody asked for.
+        let mut ticker = tokio::time::interval(std::time::Duration::from_secs(300));
+        loop {
+            ticker.tick().await;
+            let windows = tokio::task::block_in_place(poll_windows);
+            // Only overwrite with something. A failed poll leaves the last good
+            // snapshot in place rather than blanking the operator's view.
+            if !windows.is_empty() {
+                *state
+                    .polled_windows
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner()) = windows;
+            }
+        }
+    });
+}
+
+/// Every window omp is logged into, asked for now rather than remembered.
+///
+/// **A read, never an append.** `27 quota accounting` made the record's windows
+/// a log of *transitions observed by a run*; this is a snapshot belonging to no
+/// run and no cell, so writing it would need a cell id the record has no honest
+/// value for. `27` also made current state **derived**, and a live poll is the
+/// most derived thing there is.
+///
+/// This is farseer's only view of a window while nothing is running - every
+/// other one arrives on a run's own stream, so an idle farseer learned nothing.
+/// It is also the only reading of a Google quota at all, which `33 google quota`
+/// closed as impossible against `agy`; see [`farseer_runner::omp_usage`].
+///
+/// Best-effort: omp absent, not logged in, or slow yields nothing, because a
+/// missing side-channel must not fail the operator's quota view.
+fn poll_windows() -> Vec<farseer_core::WindowObservation> {
+    let Some(exe) = farseer_runner::resolve::resolve("omp") else {
+        return Vec::new();
+    };
+    let mut command = std::process::Command::new(exe);
+    command.args(farseer_runner::omp_usage::build_args());
+    // **`CREATE_NO_WINDOW`, for the reason `03 spike job objects` named it a
+    // root cause.** Without it this opened a console the operator could see and
+    // close - and closing it delivered `CTRL_CLOSE` to farseer's own process
+    // group, taking the daemon and the desktop shell down with it. A side
+    // channel that improves a view was killing the product.
+    //
+    // Every child farseer spawns goes through `SupervisedProcess`, which has
+    // always set this. This one did not, because it was written as "just run a
+    // command" rather than as spawning a process, and that distinction does not
+    // exist on Windows.
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(windows::Win32::System::Threading::CREATE_NO_WINDOW.0);
+    }
+    command
+        .output()
+        .ok()
+        .filter(|output| output.status.success())
+        .map(|output| farseer_runner::omp_usage::parse(&String::from_utf8_lossy(&output.stdout)))
+        .unwrap_or_default()
 }
 
 macro_rules! analytics_route {
@@ -2010,6 +2995,49 @@ grants_shell = true
         harness_with_cell(CELL)
     }
 
+    /// `39 what an installed farseer points at`: the roots list is the fence,
+    /// and it is checked after canonicalization so a path that walks out of a
+    /// root with `..` is refused by where it **lands**, not by how it is
+    /// spelled.
+    #[test]
+    fn a_project_outside_every_authorized_root_is_refused() {
+        let h = harness();
+        let root = tempfile::tempdir().unwrap();
+        let inside = root.path().join("a-project");
+        std::fs::create_dir(&inside).unwrap();
+        let outside = tempfile::tempdir().unwrap();
+
+        let refused = projects::resolve(&h.state, &inside.display().to_string());
+        assert!(
+            refused.is_err(),
+            "a directory is not authorized until a root containing it is"
+        );
+
+        h.state
+            .store()
+            .authorize_root(
+                &projects::display(&std::fs::canonicalize(root.path()).unwrap()),
+                0,
+            )
+            .unwrap();
+
+        projects::resolve(&h.state, &inside.display().to_string())
+            .expect("a directory inside an authorized root resolves");
+
+        assert!(
+            projects::resolve(&h.state, &outside.path().display().to_string()).is_err(),
+            "a sibling of the root is not inside it"
+        );
+        assert!(
+            projects::resolve(
+                &h.state,
+                &inside.join("..").join("..").display().to_string()
+            )
+            .is_err(),
+            "`..` out of the root must be refused by where it lands"
+        );
+    }
+
     fn register_manager(h: &Harness) -> (RunId, TaskId, String) {
         let cell = h.state.cells().get(&CellId::new("zero")).cloned().unwrap();
         let run_id = RunId::new();
@@ -2020,8 +3048,9 @@ grants_shell = true
             cell_id: cell.cell_id.clone(),
             goal: "manage the task".into(),
             workspace: cell.workspace_strategy,
-            runner: cell.manager.runner.clone(),
+            runner: cell.manager.runner().to_string(),
             tool_grants: cell.tool_grants(),
+            tool_level: Default::default(),
             autonomy_ceiling: cell.policy.autonomy_ceiling,
             budget: cell.budget,
             definition_of_done: String::new(),
@@ -2037,6 +3066,7 @@ grants_shell = true
                 cancel_requested: Arc::new(AtomicBool::new(false)),
                 contract,
                 cell,
+                project: None,
             },
         );
         (run_id, task_id, token_text)
@@ -2253,13 +3283,175 @@ grants_shell = true
 
         let (status, cell) = h.get("/v1/cells/zero").await;
         assert_eq!(status, StatusCode::OK);
-        assert_eq!(cell["manager"]["runner"], "claude-code");
+        assert_eq!(cell["manager"]["runners"], json!(["claude-code"]));
 
         assert_eq!(h.get("/v1/cells/missing").await.0, StatusCode::NOT_FOUND);
 
         // There is no edit path, per `16 local api surface` section 6.
         let put = h.request("PUT", "/v1/cells/zero");
         assert_eq!(h.send(put).await.0, StatusCode::METHOD_NOT_ALLOWED);
+    }
+
+    /// `17 cell lifecycle` section 1: pause is a policy flag on the manager,
+    /// and the flag is only real where runs begin.
+    #[tokio::test]
+    async fn a_paused_cell_starts_no_new_run_and_resuming_lets_it_again() {
+        let h = harness();
+        let (status, view) = h.post("/v1/cells/zero/pause", json!({})).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(view["lifecycle"], "paused");
+        assert_eq!(view["accepts_work"], false);
+
+        // `Policy` is a `400` throughout this API - the request is well formed
+        // and the runtime refuses it.
+        let (status, refused) = h
+            .post("/v1/cells/zero/instruct", json!({"goal": "do a thing"}))
+            .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(
+            refused["error"].as_str().unwrap().contains("paused"),
+            "the refusal must say which state stopped it, got {refused}"
+        );
+
+        // Pausing twice is refused rather than recorded, so the record does not
+        // gain a transition that did not happen.
+        assert_eq!(
+            h.post("/v1/cells/zero/pause", json!({})).await.0,
+            StatusCode::BAD_REQUEST
+        );
+
+        assert_eq!(
+            h.post("/v1/cells/zero/resume", json!({})).await.1["accepts_work"],
+            true
+        );
+    }
+
+    /// `17` section 4: cell zero can be archived and never deleted, because
+    /// `01 cell primitive` made it the address the operator talks to.
+    #[tokio::test]
+    async fn cell_zero_can_be_archived_and_never_deleted() {
+        let h = harness();
+        let (status, refused) = h.post("/v1/cells/zero/delete", json!({})).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(
+            refused["error"]
+                .as_str()
+                .unwrap()
+                .contains("archive it instead")
+        );
+
+        assert_eq!(
+            h.post("/v1/cells/zero/archive", json!({})).await.1["lifecycle"],
+            "archived"
+        );
+        // Archived keeps the definition and the record: the cell is still there
+        // to read, it just takes no work.
+        assert_eq!(h.get("/v1/cells/zero").await.0, StatusCode::OK);
+        assert_eq!(
+            h.post("/v1/cells/zero/instruct", json!({"goal": "x"}))
+                .await
+                .0,
+            StatusCode::BAD_REQUEST
+        );
+        assert_eq!(
+            h.post("/v1/cells/zero/restore", json!({})).await.1["accepts_work"],
+            true
+        );
+    }
+
+    /// A deletion that a reload undoes is not a deletion. The file is still on
+    /// disk - `16 local api surface` gave the API no path that writes one - so
+    /// the state has to outlive re-reading the directory.
+    #[tokio::test]
+    async fn a_deleted_cell_stays_deleted_across_a_reload_and_restore_brings_it_back() {
+        let h = harness();
+        std::fs::write(
+            h._dir.path().join("second.toml"),
+            CELL.replace(r#"cell_id = "zero""#, r#"cell_id = "second""#),
+        )
+        .unwrap();
+        h.send(h.request("POST", "/v1/cells/reload")).await;
+        assert_eq!(h.get("/v1/cells/second").await.0, StatusCode::OK);
+
+        assert_eq!(
+            h.post("/v1/cells/second/delete", json!({})).await.1["lifecycle"],
+            "deleted"
+        );
+        assert_eq!(h.get("/v1/cells/second").await.0, StatusCode::NOT_FOUND);
+
+        let (_, report) = h.send(h.request("POST", "/v1/cells/reload")).await;
+        assert_eq!(
+            report["loaded"],
+            json!(["zero"]),
+            "a reload must not resurrect a cell the operator deleted"
+        );
+        assert_eq!(h.get("/v1/cells/second").await.0, StatusCode::NOT_FOUND);
+
+        h.post("/v1/cells/second/restore", json!({})).await;
+        assert_eq!(
+            h.get("/v1/cells/second").await.0,
+            StatusCode::OK,
+            "restore brings back a cell whose file never left"
+        );
+    }
+
+    /// `17` section 5: purge takes a scope and leaves a tombstone naming what it
+    /// destroyed, because `02 record scope` made the record evidence and an
+    /// unexplained hole and a deliberate deletion must not look identical.
+    #[tokio::test]
+    async fn a_purge_is_scoped_and_leaves_a_tombstone_naming_what_it_destroyed() {
+        let h = harness();
+        let run = RunId::new();
+        for ts in [10, 20, 30] {
+            h.state
+                .store()
+                .append(&farseer_core::NewEvent::new(
+                    CellId::new("zero"),
+                    run,
+                    farseer_core::EventKind::new("status_changed"),
+                    farseer_core::Actor::Worker,
+                    ts,
+                    json!({"at": ts}),
+                ))
+                .unwrap();
+        }
+
+        let (status, purged) = h
+            .post("/v1/cells/zero/purge", json!({"from": 10, "to": 20}))
+            .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(purged["events"], 2);
+
+        let (_, left) = h.get("/v1/events?cell=zero&limit=50").await;
+        let kinds: Vec<&str> = left
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|e| e["kind"].as_str().unwrap())
+            .collect();
+        assert!(
+            kinds.contains(&"cell_purged"),
+            "the hole must be explained rather than merely present, got {kinds:?}"
+        );
+        let tombstone = left
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|e| e["kind"] == "cell_purged")
+            .unwrap();
+        assert_eq!(tombstone["payload"]["from"], 10);
+        assert_eq!(tombstone["payload"]["to"], 20);
+        assert_eq!(
+            tombstone["payload"]["hole"], "void",
+            "a reader is told the hole is permanent rather than refetchable"
+        );
+
+        assert_eq!(
+            h.post("/v1/cells/zero/purge", json!({"from": 40, "to": 20}))
+                .await
+                .0,
+            StatusCode::BAD_REQUEST
+        );
     }
 
     #[tokio::test]
@@ -2516,6 +3708,7 @@ grants_shell = true
             &manager.contract,
             &manager.cell,
             &manager.manager_token,
+            None,
         )
         .unwrap();
         let config_path = options.claude_mcp_config.unwrap();
@@ -2608,6 +3801,450 @@ grants_shell = true
         );
         assert!(manager_token.was_cancelled());
         assert!(child_token.was_cancelled());
+    }
+
+    /// A cell whose runner is not installed on this machine.
+    ///
+    /// The point is a run that reaches `spawn_run`, registers, and then ends on
+    /// its own at `ExecutableNotFound` - **without launching an agent**. A test
+    /// that spawns a real runner is a test that bills somebody.
+    const CELL_WITH_AN_ABSENT_RUNNER: &str = r#"
+cell_id = "zero"
+name = "Cell Zero"
+workspace_strategy = "plain_directory"
+
+[manager]
+runner = "cursor-agent"
+
+# `12 autonomy and deny list`: a runner with shell-equivalent reach needs the
+# cell to have granted one, or the run is refused before it is spawned.
+[[roster]]
+kind = "tool"
+name = "shell"
+irreversibility = "reversible"
+grants_shell = true
+"#;
+
+    /// A cell call's callee is the caller's child for as long as it runs.
+    ///
+    /// `06 cell transport` section 6 says a cell is a worker whose
+    /// implementation happens to be another manager, and that the calling
+    /// manager owns it the same way. It did not: worker delegation registered
+    /// its child and cell delegation did not, so cancelling the caller left an
+    /// entire second manager running with nothing pointing at it.
+    ///
+    /// Asserted on `spawn_run`, which is where ownership is established.
+    /// `cancelling_a_manager_also_cancels_its_active_delegated_worker` covers
+    /// what cancellation then does with that membership.
+    #[tokio::test]
+    async fn a_cell_call_joins_the_callers_children_for_the_life_of_the_run() {
+        let h = harness_with_cell(CELL_WITH_AN_ABSENT_RUNNER);
+        let cell = h.state.cells().get(&CellId::new("zero")).cloned().unwrap();
+        let children: Arc<Mutex<HashSet<RunId>>> = Arc::new(Mutex::new(HashSet::new()));
+        let contract = WorkerContract::seal(WorkerContractSpec {
+            run_id: RunId::new(),
+            task_id: TaskId::new(),
+            cell_id: cell.cell_id.clone(),
+            goal: "the callee's own goal".into(),
+            workspace: WorkspaceStrategy::PlainDirectory,
+            runner: cell.manager.runner().to_string(),
+            tool_grants: cell.tool_grants(),
+            tool_level: Default::default(),
+            autonomy_ceiling: cell.policy.autonomy_ceiling,
+            budget: cell.budget,
+            definition_of_done: String::new(),
+        });
+
+        let run_id = spawn_run(
+            &h.state,
+            contract,
+            RunRole::Manager,
+            cell,
+            None,
+            Some(Arc::clone(&children)),
+        )
+        .expect("the callee spawns");
+
+        assert!(
+            children.lock().unwrap().contains(&run_id),
+            "an immediate cancel would race process startup and miss the callee              unless it is reachable before spawn_run returns"
+        );
+
+        // Membership ends with the run, in the same background task that drops
+        // the manager context - not waited for here. An unresolvable runner
+        // still takes tens of seconds to fail, and a unit test that sat through
+        // that would be paying a minute to re-observe one `remove` two lines
+        // below the `insert` this test already proved.
+    }
+
+    /// A run row with no process behind it. `07 attach semantics` section 1:
+    /// attach targets a run, and a run may or may not currently have a live
+    /// worker - so every control verb has to work on one that does not.
+    fn a_finished_run(h: &Harness) -> RunId {
+        let run_id = RunId::new();
+        h.state
+            .store()
+            .upsert_run(&RunRow {
+                run_id,
+                task_id: TaskId::new(),
+                cell_id: CellId::new("zero"),
+                runner: "goose".into(),
+                model: String::new(),
+                outcome: Some("ok".into()),
+                usd_micros: 0,
+                tokens: 0,
+                operator_touched: false,
+                started_ts: 1,
+                finished_ts: Some(2),
+            })
+            .unwrap();
+        run_id
+    }
+
+    /// `07` section 3: attach is a read-only tail by default, and interactive
+    /// control is an explicit step. Stray keystrokes into a live agent are
+    /// destructive, and silent injection makes a manager confidently wrong
+    /// about its own worker.
+    #[tokio::test]
+    async fn observing_a_run_does_not_let_the_operator_type_into_it() {
+        let h = harness();
+        let run_id = a_finished_run(&h);
+
+        let (status, view) = h
+            .post(&format!("/v1/runs/{run_id}/observe"), json!({}))
+            .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(view["control"], "observed");
+        assert!(view["expires_in_ms"].as_i64().unwrap() > 0);
+
+        let (status, refused) = h
+            .post(
+                &format!("/v1/runs/{run_id}/intervene"),
+                json!({"message": "stop"}),
+            )
+            .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(
+            refused["error"].as_str().unwrap().contains("take over"),
+            "the refusal must name the step that is missing, got {refused}"
+        );
+
+        // The axis is on the run itself, so a fleet view never has to ask twice.
+        let (_, run) = h.get(&format!("/v1/runs/{run_id}")).await;
+        assert_eq!(run["control"], "observed");
+    }
+
+    /// `07` section 7: taking over is a released mode, and the release hands the
+    /// run back with the worker carrying on.
+    #[tokio::test]
+    async fn a_takeover_is_recorded_and_released_back_to_autonomous() {
+        let h = harness();
+        let run_id = a_finished_run(&h);
+
+        assert_eq!(
+            h.post(&format!("/v1/runs/{run_id}/take-over"), json!({}))
+                .await
+                .1["control"],
+            "taken_over"
+        );
+        assert_eq!(
+            h.get(&format!("/v1/runs/{run_id}/control")).await.1["control"],
+            "taken_over"
+        );
+
+        let (status, released) = h
+            .post(&format!("/v1/runs/{run_id}/release"), json!({}))
+            .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(released["control"], "autonomous");
+        assert_eq!(released["expires_in_ms"], serde_json::Value::Null);
+
+        // Releasing twice is refused rather than recorded twice.
+        assert_eq!(
+            h.post(&format!("/v1/runs/{run_id}/release"), json!({}))
+                .await
+                .0,
+            StatusCode::BAD_REQUEST
+        );
+
+        let (_, events) = h.get(&format!("/v1/events?run={run_id}&limit=50")).await;
+        let controls: Vec<&str> = events
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|e| e["kind"] == "operator_intervened")
+            .map(|e| e["payload"]["control"].as_str().unwrap())
+            .collect();
+        assert_eq!(
+            controls,
+            vec!["taken_over", "autonomous"],
+            "who took the wheel and when is exactly what `07` asks the record to carry"
+        );
+    }
+
+    /// `07` section 7: detaching without releasing must auto-release, because a
+    /// closed terminal that freezes a worker waiting on a human forever is the
+    /// class of hang the brief catalogues.
+    #[tokio::test]
+    async fn an_attachment_nobody_renewed_lapses_and_hands_the_run_back() {
+        let h = harness();
+        let run_id = a_finished_run(&h);
+        h.post(&format!("/v1/runs/{run_id}/take-over"), json!({}))
+            .await;
+
+        // The lease is checked on read rather than swept by a timer, so this is
+        // the same code path a real lapse takes - no clock is stubbed.
+        h.state.attachments().insert(
+            run_id,
+            attach::Attachment {
+                control: farseer_core::Control::TakenOver,
+                seen_ms: now_ms() - attach::LEASE_MS - 1,
+            },
+        );
+
+        assert_eq!(
+            h.get(&format!("/v1/runs/{run_id}/control")).await.1["control"],
+            "autonomous"
+        );
+        // And a heartbeat afterwards is a `400` rather than a silent re-grab of
+        // a wheel nobody is holding.
+        assert_eq!(
+            h.post(&format!("/v1/runs/{run_id}/heartbeat"), json!({}))
+                .await
+                .0,
+            StatusCode::BAD_REQUEST
+        );
+    }
+
+    /// A harness whose runner config names one A2A peer bound to cell zero.
+    fn harness_with_a_peer() -> Harness {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("zero.toml"), CELL_WITH_AN_ABSENT_RUNNER).unwrap();
+        let runs_dir = tempfile::tempdir().unwrap();
+        let repo = git_repo_with_a_commit();
+        let token = RuntimeToken::generate();
+        let config = farseer_core::RunnerConfig {
+            a2a: farseer_core::A2aConfig {
+                name: Some("farseer under test".into()),
+                expose: vec!["zero".into()],
+                peer: vec![farseer_core::A2aPeer {
+                    name: "a friendly orchestrator".into(),
+                    token: "peer-secret".into(),
+                    cell: "zero".into(),
+                }],
+            },
+            ..Default::default()
+        };
+        let state = Arc::new(
+            AppState::new(
+                Store::open_in_memory().unwrap(),
+                dir.path(),
+                token.clone(),
+                runs_dir.path(),
+                repo.path(),
+            )
+            .with_runner_config(config),
+        );
+        state.reload();
+        Harness {
+            router: router(state.clone()),
+            token,
+            state,
+            _dir: dir,
+            _runs_dir: runs_dir,
+            _repo: repo,
+        }
+    }
+
+    fn a2a_call(bearer: &str, body: serde_json::Value) -> Request<Body> {
+        Request::builder()
+            .method("POST")
+            .uri("/a2a")
+            .header(header::HOST, "127.0.0.1:9000")
+            .header(header::AUTHORIZATION, format!("Bearer {bearer}"))
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(body.to_string()))
+            .unwrap()
+    }
+
+    fn a_finished_run_in(h: &Harness, cell: &str) -> RunId {
+        let run_id = RunId::new();
+        h.state
+            .store()
+            .upsert_run(&RunRow {
+                run_id,
+                task_id: TaskId::new(),
+                cell_id: CellId::new(cell),
+                runner: "goose".into(),
+                model: String::new(),
+                outcome: Some("ok".into()),
+                usd_micros: 0,
+                tokens: 0,
+                operator_touched: false,
+                started_ts: 1,
+                finished_ts: Some(2),
+            })
+            .unwrap();
+        run_id
+    }
+
+    /// `06 cell transport` section 2: the endpoint is off until an operator
+    /// writes a peer, because turning it on is the moment the card becomes a
+    /// public commitment that is hard to walk back.
+    #[tokio::test]
+    async fn a_farseer_with_no_peers_publishes_no_card_and_answers_no_rpc() {
+        let h = harness();
+        assert_eq!(
+            h.send(h.request("GET", "/.well-known/agent-card.json"))
+                .await
+                .0,
+            StatusCode::NOT_FOUND
+        );
+        let (status, body) = h
+            .send(a2a_call(
+                "anything",
+                json!({"id": 1, "method": "tasks/get"}),
+            ))
+            .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert!(
+            body["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("runners.toml"),
+            "{body}"
+        );
+    }
+
+    /// `21 A2A conformance` section 4: generate the card from the cell
+    /// definition, so the card and the definition cannot drift. And `06`
+    /// section 3: farseer says what it is, because a caller that believes it is
+    /// driving a single agent has quietly wrong assumptions.
+    #[tokio::test]
+    async fn the_card_is_generated_from_the_cells_and_says_it_is_an_orchestrator() {
+        let h = harness_with_a_peer();
+        let (status, card) = h
+            .send(h.request("GET", "/.well-known/agent-card.json"))
+            .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(card["name"], "farseer under test");
+        assert!(
+            card["description"]
+                .as_str()
+                .unwrap()
+                .contains("orchestrator, not a single agent"),
+            "{card}"
+        );
+        assert_eq!(card["skills"][0]["id"], "zero");
+        assert_eq!(
+            card["capabilities"]["streaming"], false,
+            "A2A's subscription cannot express `16`'s cursored replay, so it is not advertised"
+        );
+        assert_eq!(card["securitySchemes"]["peerToken"]["scheme"], "bearer");
+    }
+
+    /// `06` section 7: a token per peer, bound to a cell. The identity is which
+    /// token authenticated the request, never what the caller asserts.
+    #[tokio::test]
+    async fn an_unknown_peer_token_is_refused_before_anything_is_started() {
+        let h = harness_with_a_peer();
+        let (status, _) = h
+            .send(a2a_call(
+                "not-the-secret",
+                json!({"id": 1, "method": "message/send",
+                       "params": {"message": {"parts": [{"text": "do a thing"}]}}}),
+            ))
+            .await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert!(
+            h.state.store().recent_runs(10).unwrap().is_empty(),
+            "the fence is before the work, not after it"
+        );
+    }
+
+    /// The mapping `21` section 1 found, end to end: a message starts a run and
+    /// the reply is the task, not the answer - `06` made a cell call
+    /// fire-and-forget for reasons the transport does not change.
+    #[tokio::test]
+    async fn a_peer_starts_a_task_and_reads_it_back_but_cannot_see_another_cells() {
+        let h = harness_with_a_peer();
+        let (status, sent) = h
+            .send(a2a_call(
+                "peer-secret",
+                json!({"id": 7, "method": "message/send", "params": {
+                    "message": {
+                        "parts": [{"text": "summarise the release"}],
+                        "metadata": {"autonomy_ceiling": "irreversible",
+                                     "definition_of_done": "a paragraph"}
+                    }
+                }}),
+            ))
+            .await;
+        assert_eq!(status, StatusCode::OK, "{sent}");
+        assert_eq!(sent["id"], 7, "the JSON-RPC id is echoed");
+        let task_id = sent["result"]["id"].as_str().unwrap().to_string();
+
+        // `run_queued` is appended by the run's own task, so this waits for it
+        // rather than assuming it has landed - the read below is the one that
+        // must answer immediately, and it does.
+        let mut queued = serde_json::Value::Null;
+        for _ in 0..100 {
+            let (_, events) = h.get(&format!("/v1/events?run={task_id}&limit=5")).await;
+            if events.get(0).is_some() {
+                queued = events;
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        assert_eq!(queued[0]["cell_id"], "zero", "{queued}");
+        assert!(
+            queued[0]["payload"]["goal"]
+                .as_str()
+                .unwrap()
+                .contains("a friendly orchestrator"),
+            "the manager is told who asked, which nothing else on the wire says"
+        );
+
+        let (_, read) = h
+            .send(a2a_call(
+                "peer-secret",
+                json!({"id": 8, "method": "tasks/get", "params": {"id": task_id}}),
+            ))
+            .await;
+        assert!(
+            read["result"]["status"]["state"]
+                .as_str()
+                .unwrap()
+                .starts_with("TASK_STATE_"),
+            "{read}"
+        );
+
+        // A run in a cell this peer is not bound to answers the same as one that
+        // does not exist: telling them apart would disclose the rest of the fleet.
+        let elsewhere = a_finished_run_in(&h, "social");
+        let (status, hidden) = h
+            .send(a2a_call(
+                "peer-secret",
+                json!({"id": 9, "method": "tasks/get", "params": {"id": elsewhere.to_string()}}),
+            ))
+            .await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{hidden}");
+
+        // And the stream farseer will not fake says so rather than 404ing.
+        let (status, refused) = h
+            .send(a2a_call(
+                "peer-secret",
+                json!({"id": 10, "method": "tasks/resubscribe", "params": {"id": task_id}}),
+            ))
+            .await;
+        assert_eq!(status, StatusCode::NOT_IMPLEMENTED);
+        assert!(
+            refused["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("cursored"),
+            "{refused}"
+        );
     }
 
     #[tokio::test]
@@ -2829,6 +4466,7 @@ grants_shell = true
             workspace: WorkspaceStrategy::Worktree,
             runner: "claude-code".into(),
             tool_grants: Vec::new(),
+            tool_level: Default::default(),
             autonomy_ceiling: farseer_core::policy::Irreversibility::Reversible,
             budget: Budget::default(),
             definition_of_done: String::new(),
@@ -2864,6 +4502,7 @@ grants_shell = true
             workspace: WorkspaceStrategy::Worktree,
             runner: "not-a-real-runner".into(),
             tool_grants: vec!["shell".into()],
+            tool_level: Default::default(),
             autonomy_ceiling: farseer_core::policy::Irreversibility::Reversible,
             budget: Budget::default(),
             definition_of_done: String::new(),
@@ -2905,6 +4544,77 @@ grants_shell = true
         );
     }
 
+    /// `16 local api surface` section 8: an operator's re-run and re-scope leave
+    /// an event, so a manager does not silently discover its plan changed.
+    ///
+    /// The `rescoped_from` edge was carrying this on its own, which serves
+    /// `11 analytics questions` and nothing else - nothing reads an edge on a
+    /// wake.
+    #[tokio::test]
+    async fn an_operators_respawn_tells_the_manager_which_verb_it_was() {
+        let h = harness_with_cell(CELL_WITH_A_WORKER);
+        let cell = h.state.cells().get(&CellId::new("zero")).cloned().unwrap();
+
+        for (endpoint, body, verb) in [
+            ("rerun", json!({}), "rerun"),
+            ("rescope", json!({ "goal": "a different goal" }), "rescope"),
+        ] {
+            let run_id = RunId::new();
+            let spec = WorkerContractSpec {
+                run_id,
+                task_id: TaskId::new(),
+                cell_id: CellId::new("zero"),
+                goal: "the original goal".into(),
+                workspace: WorkspaceStrategy::Worktree,
+                // Never resolved on this machine, so the respawned run fails
+                // without launching an agent.
+                runner: "not-a-real-runner".into(),
+                tool_grants: vec!["shell".into()],
+                tool_level: Default::default(),
+                autonomy_ceiling: farseer_core::policy::Irreversibility::Reversible,
+                budget: Budget::default(),
+                definition_of_done: String::new(),
+            };
+            let mut payload = serde_json::to_value(&spec).unwrap();
+            payload.as_object_mut().unwrap().insert(
+                RUN_ROLE_FIELD.into(),
+                serde_json::Value::String(RunRole::Worker.as_record_str().into()),
+            );
+            payload.as_object_mut().unwrap().insert(
+                MANAGER_CELL_FIELD.into(),
+                serde_json::to_value(&cell).unwrap(),
+            );
+            h.state
+                .store()
+                .append(&NewEvent::new(
+                    CellId::new("zero"),
+                    run_id,
+                    farseer_core::EventKind::RUN_QUEUED,
+                    Actor::Manager,
+                    1,
+                    payload,
+                ))
+                .unwrap();
+
+            let (status, answer) = h.post(&format!("/v1/runs/{run_id}/{endpoint}"), body).await;
+            assert_eq!(status, StatusCode::ACCEPTED, "{answer}");
+
+            let (_, events) = h.get(&format!("/v1/events?run={run_id}&limit=50")).await;
+            let respawned = events
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|e| e["kind"] == "run_respawned")
+                .unwrap_or_else(|| panic!("no run_respawned on the parent after {endpoint}"));
+            assert_eq!(respawned["payload"]["verb"], verb);
+            assert_eq!(respawned["payload"]["run_id"], answer["run_id"]);
+            assert_eq!(
+                respawned["actor"], "operator",
+                "the point of the event is that it was the human"
+            );
+        }
+    }
+
     #[tokio::test]
     async fn legacy_runs_without_a_pinned_definition_fail_closed_on_respawn() {
         let h = harness();
@@ -2921,6 +4631,7 @@ grants_shell = true
                 workspace: WorkspaceStrategy::Worktree,
                 runner: "not-a-real-runner".into(),
                 tool_grants: Vec::new(),
+                tool_level: Default::default(),
                 autonomy_ceiling: farseer_core::policy::Irreversibility::Reversible,
                 budget: Budget::default(),
                 definition_of_done: String::new(),
@@ -2971,6 +4682,7 @@ grants_shell = true
             workspace: WorkspaceStrategy::Worktree,
             runner: "not-a-real-runner".into(),
             tool_grants: vec!["shell".into()],
+            tool_level: Default::default(),
             autonomy_ceiling: farseer_core::policy::Irreversibility::Reversible,
             budget: Budget::default(),
             definition_of_done: String::new(),
@@ -3319,7 +5031,15 @@ grants_shell = true
         .await
         .unwrap();
 
-        let unauthorized = client
+        // `31 manager delegation reach`, after a model mistyped its own token:
+        // **the bearer is the credential, and a wrong argument beside it is
+        // ignored rather than fatal.** This client presents the manager's real
+        // bearer, so the call gets as far as the roster - which is the refusal
+        // this test is actually about. A caller with no bearer is refused by the
+        // guard before any tool body runs, which
+        // `a_rebound_host_is_refused_before_the_token_is_even_checked` and
+        // `an_operator_token_is_refused_on_a_manager_route` already cover.
+        let mistyped = client
             .call_tool(
                 CallToolRequestParams::new("delegate_to_worker").with_arguments(
                     json!({ "manager_run_id": manager_run_id.to_string(), "manager_token": "wrong", "worker": "nope", "goal": "anything" })
@@ -3330,8 +5050,8 @@ grants_shell = true
             )
             .await;
         assert!(
-            format!("{unauthorized:?}").contains("manager_token"),
-            "an active manager UUID is not sufficient without its capability: {unauthorized:?}"
+            format!("{mistyped:?}").contains("pinned roster"),
+            "the transport proved this manager; a mistyped argument must not undo that: {mistyped:?}"
         );
 
         let attempt = client
@@ -3816,6 +5536,58 @@ grants_shell = true
             "`22 cell addressing` section 2: one task, one owner"
         );
     }
+    /// A refresh button on a poll nobody enabled must say so, not do nothing.
+    ///
+    /// `13 harness build kit` made the usage poll a menu item an operator picks
+    /// (`usage_poll = true`), so the button is offered on every machine and
+    /// works on the ones where it was asked for. The failure this pins is the
+    /// one this repository keeps finding: **silence around a missing
+    /// capability** - a control that appears to work, changes nothing, and
+    /// leaves the operator with no way to learn why.
+    #[tokio::test]
+    async fn forcing_a_quota_read_refuses_by_name_when_no_source_is_configured() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("zero.toml"), CELL).unwrap();
+        let runs_dir = tempfile::tempdir().unwrap();
+        let repo = git_repo_with_a_commit();
+        let token = RuntimeToken::generate();
+        let state = Arc::new(
+            AppState::new(
+                Store::open_in_memory().unwrap(),
+                dir.path(),
+                token.clone(),
+                runs_dir.path(),
+                repo.path(),
+            )
+            // No `usage_poll` anywhere, which is the default and the common case.
+            .with_runner_config(
+                RunnerConfig::load(
+                    "[omp]
+account = \"chatgpt\"
+",
+                )
+                .unwrap(),
+            ),
+        );
+        state.reload();
+        let h = Harness {
+            router: router(state.clone()),
+            token,
+            state,
+            _dir: dir,
+            _runs_dir: runs_dir,
+            _repo: repo,
+        };
+
+        let (status, body) = h.post("/v1/quota/refresh", serde_json::json!({})).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        let said = body["error"].as_str().unwrap_or_default();
+        assert!(
+            said.contains("[usage]") && said.contains("runners.toml"),
+            "the refusal must name the line to add, not just refuse: {said}"
+        );
+    }
+
     /// `27 quota accounting`'s utilisation surface, end to end through the API.
     ///
     /// The assertion that matters most is the negative one: no percentage, ever.
@@ -3871,6 +5643,8 @@ account = "anthropic-max"
             is_using_overage: false,
             used_percent: None,
             window_duration_mins: None,
+            provider: None,
+            label: None,
         };
         let observe = |observation: &WindowObservation, ts| {
             h.state
@@ -3944,7 +5718,14 @@ account = "anthropic-max"
         assert_eq!(body["windows"][0]["status"], "exhausted_until");
         assert_eq!(body["windows"][0]["resets_at"], 1_787_000_000i64);
 
-        let wire = body.to_string();
+        // Scoped to the **recorded** window, not the whole payload, and the
+        // distinction is `27 quota accounting`'s own: what farseer refuses is a
+        // percentage **it computed**, because its spend is a lower bound on the
+        // window and would be most wrong exactly at exhaustion. A number the
+        // provider states is an observation and is admitted - `30 codex app
+        // server` settled that, and `33 google quota`'s reversal now brings
+        // omp's through the same door with `source: "omp usage"` on it.
+        let wire = body["windows"][0].to_string();
         for absent in ["percent", "used_", "remaining", "quota_left"] {
             assert!(
                 !wire.contains(absent),
@@ -4001,7 +5782,6 @@ account = "anthropic-max"
         assert_eq!(capped.as_array().unwrap().len(), 1);
     }
 
-
     fn cell_with(runner: &str) -> CellDefinition {
         farseer_core::CellDefinition::load(&format!(
             r#"
@@ -4034,6 +5814,7 @@ runner = "{runner}"
             workspace: farseer_core::WorkspaceStrategy::Worktree,
             runner: runner.into(),
             tool_grants: vec![],
+            tool_level: Default::default(),
             autonomy_ceiling: farseer_core::Irreversibility::Reversible,
             budget: farseer_core::Budget::default(),
             definition_of_done: String::new(),
@@ -4044,9 +5825,29 @@ runner = "{runner}"
             &contract,
             &cell_with(runner),
             &RuntimeToken::generate(),
+            None,
         )
         .expect("options build");
-        options.append_system_prompt.expect("every manager is told who it is")
+        // What the manager is actually told, wherever farseer put it. For a
+        // runner that reads a file - pi, omp - the option carries a **path**,
+        // because a multi-line argument cannot be passed to a Windows `.CMD`
+        // shim at all. The test asks the same question either way rather than
+        // asserting the delivery mechanism twice.
+        told(
+            runner,
+            &options
+                .append_system_prompt
+                .expect("every manager is told who it is"),
+        )
+    }
+
+    /// Read what a manager was told, following a path when that is what it is.
+    fn told(runner: &str, prompt: &str) -> String {
+        if farseer_runner::pi::reads_prompt_from_file(runner) {
+            return std::fs::read_to_string(prompt)
+                .unwrap_or_else(|e| panic!("{runner} was given `{prompt}`, unreadable: {e}"));
+        }
+        prompt.to_string()
     }
 
     /// `31 manager delegation reach`: this used to return early for every
@@ -4075,7 +5876,11 @@ runner = "{runner}"
         // not load.
         let extension = h.state.repo_root().join("extensions").join("pi");
         std::fs::create_dir_all(&extension).unwrap();
-        std::fs::write(extension.join("farseer-delegate.ts"), "export default () => {};").unwrap();
+        std::fs::write(
+            extension.join("farseer-delegate.ts"),
+            "export default () => {};",
+        )
+        .unwrap();
         let cell = cell_with("pi");
         let contract = WorkerContract::seal(WorkerContractSpec {
             run_id: RunId::new(),
@@ -4085,15 +5890,21 @@ runner = "{runner}"
             workspace: farseer_core::WorkspaceStrategy::Worktree,
             runner: "pi".into(),
             tool_grants: vec![],
+            tool_level: Default::default(),
             autonomy_ceiling: farseer_core::Irreversibility::Reversible,
             budget: farseer_core::Budget::default(),
             definition_of_done: String::new(),
         });
         let token = RuntimeToken::generate();
         let options =
-            manager_run_options(&h.state, &contract, &cell, &token).expect("options build");
+            manager_run_options(&h.state, &contract, &cell, &token, None).expect("options build");
 
-        let prompt = options.append_system_prompt.expect("a manager is told who it is");
+        let prompt = told(
+            "pi",
+            &options
+                .append_system_prompt
+                .expect("a manager is told who it is"),
+        );
         assert!(prompt.contains("delegate_to_worker"), "{prompt}");
         assert!(!prompt.contains("CANNOT reach"), "{prompt}");
         assert!(!prompt.contains(token.as_str()), "{prompt}");
@@ -4113,6 +5924,149 @@ runner = "{runner}"
         );
     }
 
+    /// `32 harness capability floor`'s third consequence, answered with the menu
+    /// a cell can actually order from rather than the one the harness discovered.
+    #[tokio::test]
+    async fn the_skills_menu_lists_the_repository_and_says_who_declares_each() {
+        let h = harness();
+        let dir = h.state.repo_root().join("skills");
+        std::fs::create_dir_all(dir.join("farseer-record")).unwrap();
+        std::fs::create_dir_all(dir.join("unused-one")).unwrap();
+        // A loose file beside them is not a skill, and must not read as one.
+        std::fs::write(dir.join("README.md"), b"not a skill").unwrap();
+
+        let (status, body) = h.get("/v1/skills").await;
+        assert_eq!(status, StatusCode::OK);
+        let names: Vec<&str> = body["skills"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|s| s["name"].as_str().unwrap())
+            .collect();
+        assert_eq!(names, ["farseer-record", "unused-one"], "{body}");
+
+        // The question an author actually asks: is anything using this?
+        assert!(
+            body["skills"][1]["declared_by"]
+                .as_array()
+                .unwrap()
+                .is_empty(),
+            "{body}"
+        );
+    }
+
+    /// `26 routing policy` in three states. The author's order is honoured, an
+    /// account with a spent window takes every runner on it out of the running,
+    /// and a runner farseer has never seen a window for stays eligible.
+    #[test]
+    fn routing_skips_a_spent_window_and_never_a_merely_unseen_one() {
+        let h = harness();
+        let pinned = vec!["pi".to_string()];
+        let pair = vec!["pi".to_string(), "omp".to_string()];
+
+        // Nothing observed yet. `unknown` behaves as available until proven
+        // otherwise, which `26` calls permanent rather than a gap to close.
+        assert_eq!(
+            first_available_runner(&h.state, &pair).as_deref(),
+            Some("pi")
+        );
+
+        let spent = farseer_core::WindowObservation {
+            account: "pi".to_string(),
+            runner: "pi".to_string(),
+            availability: farseer_core::Availability::ExhaustedUntil {
+                resets_at: 1_787_000_000,
+            },
+            rate_limit_type: "five_hour".to_string(),
+            is_using_overage: false,
+            used_percent: None,
+            window_duration_mins: None,
+            provider: None,
+            label: None,
+        };
+        assert!(
+            h.state
+                .store()
+                .observe_window(&CellId::new("zero"), RunId::new(), &spent, 1_000)
+                .expect("the observation lands"),
+            "a first sighting is a transition"
+        );
+
+        // The author's second choice, because the first has nowhere to spend.
+        assert_eq!(
+            first_available_runner(&h.state, &pair).as_deref(),
+            Some("omp")
+        );
+        // And a pin with nowhere to go is `None`, which the delegation path
+        // turns into `runner_exhausted` - `26` section 3, not a fifth outcome.
+        assert_eq!(first_available_runner(&h.state, &pinned), None);
+    }
+
+    /// `runner = "pi"` and `runners = ["pi", "omp"]` are the same field, because
+    /// `26` found a one-item list is the normal case and making every cell write
+    /// brackets would tax the common path for the rare one.
+    #[test]
+    fn a_worker_may_name_one_runner_or_several() {
+        let one: farseer_core::RosterEntry = serde_json::from_value(serde_json::json!({
+            "kind": "worker", "name": "coder", "runner": "pi"
+        }))
+        .expect("singular");
+        let many: farseer_core::RosterEntry = serde_json::from_value(serde_json::json!({
+            "kind": "worker", "name": "coder", "runners": ["pi", "omp"]
+        }))
+        .expect("plural");
+        let names = |entry: &farseer_core::RosterEntry| match entry {
+            farseer_core::RosterEntry::Worker { runners, .. } => runners.clone(),
+            _ => panic!("a worker"),
+        };
+        assert_eq!(names(&one), ["pi"]);
+        assert_eq!(names(&many), ["pi", "omp"]);
+    }
+
+    /// The credential is gone from every prompt, not just pi's.
+    ///
+    /// `31 manager delegation reach` moved identity onto the bearer after a
+    /// `goose-acp` manager mistyped the 64-character token it had been told to
+    /// copy. The failure looked like authorization and was transcription, and
+    /// the only durable fix is not asking a model to carry a secret at all.
+    #[test]
+    fn no_manager_is_ever_told_its_own_token() {
+        let h = harness();
+        h.state.set_mcp_endpoint(8787);
+        // The three MCP transports. pi has its own test above, and its
+        // extension only exists on disk in that fixture.
+        for runner in ["claude-code", "codex-app-server", "goose-acp"] {
+            let cell = cell_with(runner);
+            let contract = WorkerContract::seal(WorkerContractSpec {
+                run_id: RunId::new(),
+                task_id: farseer_core::TaskId::new(),
+                cell_id: CellId::new("zero"),
+                goal: "g".into(),
+                workspace: farseer_core::WorkspaceStrategy::Worktree,
+                runner: runner.into(),
+                tool_grants: vec![],
+                tool_level: Default::default(),
+                autonomy_ceiling: farseer_core::Irreversibility::Reversible,
+                budget: farseer_core::Budget::default(),
+                definition_of_done: String::new(),
+            });
+            let token = RuntimeToken::generate();
+            let options = manager_run_options(&h.state, &contract, &cell, &token, None)
+                .expect("options build");
+            let prompt = options
+                .append_system_prompt
+                .expect("a manager is told who it is");
+            assert!(
+                !prompt.contains(token.as_str()),
+                "{runner} was handed its own token: {prompt}"
+            );
+            assert!(
+                prompt.contains("delegate_to_worker"),
+                "{runner} should be able to delegate: {prompt}"
+            );
+        }
+    }
+
     /// The sentence that exists because a manager fabricated a delegation.
     /// A roster it cannot reach must be named **and** disclaimed, or the model
     /// does the nearest available thing and calls it compliance.
@@ -4123,8 +6077,100 @@ runner = "{runner}"
         // nothing. ACP is the last runner with no channel for the verbs.
         let prompt = prompt_for("goose-acp");
         assert!(prompt.contains("CANNOT reach"), "{prompt}");
-        assert!(prompt.contains("Never state or imply that you delegated"), "{prompt}");
+        assert!(
+            prompt.contains("Never state or imply that you delegated"),
+            "{prompt}"
+        );
         // And it is not handed credentials for a face it cannot call.
         assert!(!prompt.contains("manager_token"), "{prompt}");
+    }
+    #[tokio::test]
+    async fn work_endpoints_preserve_task_transition_provenance() {
+        let h = harness();
+        let (status, conversation) = h
+            .post("/v1/conversations", json!({"title": "Ship durable work"}))
+            .await;
+        assert_eq!(status, StatusCode::CREATED);
+        let conversation_id = conversation["conversation_id"]
+            .as_str()
+            .unwrap()
+            .parse::<farseer_core::ConversationId>()
+            .unwrap();
+        let task_id = TaskId::new();
+        let now = now_ms();
+        h.state
+            .store()
+            .create_task(&farseer_core::Task {
+                task_id,
+                conversation_id,
+                goal: "Finish the work model".into(),
+                title: "Finish the work model".into(),
+                project_path: None,
+                state: farseer_core::TaskState::Inbox,
+                priority: 0,
+                created_ts: now,
+                updated_ts: now,
+            })
+            .unwrap();
+
+        let (status, transition) = h
+            .post(
+                &format!("/v1/tasks/{task_id}/transition"),
+                json!({"state": "in_progress", "reason": "operator started it"}),
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(transition["actor"], "operator");
+        assert_eq!(transition["reason"], "operator started it");
+
+        let (status, detail) = h.get(&format!("/v1/tasks/{task_id}")).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(detail["task"]["state"], "in_progress");
+        assert_eq!(detail["transitions"].as_array().unwrap().len(), 1);
+        assert_eq!(
+            detail["allowed_transitions"],
+            json!(["blocked", "review", "cancelled"])
+        );
+    }
+
+    #[tokio::test]
+    async fn work_endpoints_refuse_an_invalid_task_transition() {
+        let h = harness();
+        let now = now_ms();
+        let conversation = farseer_core::Conversation {
+            conversation_id: farseer_core::ConversationId::new(),
+            title: "Done work".into(),
+            project_path: None,
+            manager_runner: Some("claude-code".into()),
+            created_ts: now,
+            updated_ts: now,
+            archived_ts: None,
+        };
+        let task_id = TaskId::new();
+        {
+            let store = h.state.store();
+            store.create_conversation(&conversation).unwrap();
+            store
+                .create_task(&farseer_core::Task {
+                    task_id,
+                    conversation_id: conversation.conversation_id,
+                    goal: "Stay done".into(),
+                    title: "Stay done".into(),
+                    project_path: None,
+                    state: farseer_core::TaskState::Done,
+                    priority: 0,
+                    created_ts: now,
+                    updated_ts: now,
+                })
+                .unwrap();
+        }
+
+        let (status, _) = h
+            .post(
+                &format!("/v1/tasks/{task_id}/transition"),
+                json!({"state": "in_progress", "reason": "try to reopen"}),
+            )
+            .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
     }
 }

@@ -51,6 +51,7 @@ pub fn parse_line(line: &str) -> Result<Vec<RunnerSignal>, ParseError> {
             RunnerSignal::Session(crate::claude_code::SessionInfo {
                 model: None,
                 session_id: Some(thread.to_string()),
+                log_pointer: None,
                 provider: None,
                 configured: None,
             })
@@ -110,6 +111,7 @@ mod tests {
             workspace: WorkspaceStrategy::Worktree,
             runner: "codex".into(),
             tool_grants: vec![],
+            tool_level: Default::default(),
             autonomy_ceiling: Irreversibility::Reversible,
             budget: Budget::default(),
             definition_of_done: "".into(),

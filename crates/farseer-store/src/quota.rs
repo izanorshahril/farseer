@@ -52,6 +52,12 @@ pub struct WindowRow {
     pub used_percent: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub window_duration_mins: Option<i64>,
+    /// The provider this window belongs to, and the provider's own name for it.
+    /// Both absent for a window a run reported - see [`WindowObservation`].
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
     /// When farseer **first saw** this window, which is what its own spend is
     /// counted from.
     ///
@@ -158,6 +164,8 @@ impl Store {
                     is_using_overage: observation.is_using_overage,
                     used_percent: observation.used_percent,
                     window_duration_mins: observation.window_duration_mins,
+                    provider: observation.provider,
+                    label: observation.label,
                     since_ts,
                     farseer_usd_micros: usd,
                     farseer_tokens: tokens,
@@ -208,6 +216,8 @@ mod tests {
             is_using_overage: false,
             used_percent: None,
             window_duration_mins: None,
+            provider: None,
+            label: None,
         }
     }
 

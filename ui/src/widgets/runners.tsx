@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import type { Bridge } from "../bridge";
 import { follow, type RecordEvent } from "../stream";
+import { confirmVerb } from "../confirm";
 
 /**
  * Every runner process farseer has alive right now.
@@ -303,7 +304,11 @@ export function RunnersWidget({ bridge }: { bridge: Bridge }) {
                       <button
                         className="chip danger"
                         disabled={busy !== null}
-                        onClick={() => void cancel(run)}
+                        onClick={() => {
+                          if (confirmVerb("cancel", run.title ?? run.run_id.slice(0, 8))) {
+                            void cancel(run);
+                          }
+                        }}
                       >
                         {busy === run.run_id ? "..." : "cancel"}
                       </button>

@@ -415,3 +415,101 @@ The meta strip should therefore grow **`used` / `size`**, and `size` is the fiel
 
 **And "thinking level" was unrequested, not unavailable.**
 This ticket recorded that neither runner reports one. Codex's `app-server` accepts a per-turn reasoning `effort` of `none | minimal | low | medium | high | xhigh`; `codex exec --json`, which farseer drives, does not.
+
+## Usage metrics and step breakdowns, 2026-08-29
+
+Two references the operator named - Kilo Code's usage panel and DeepSeek Harness's trajectory view - read for what farseer could actually adopt, and one of them mostly could not be.
+
+### What was taken
+
+**A meter, from DeepSeek's duration capsules.** Its trajectory view renders every step as a bar spanning start to end, so "a 3-minute bash and a 0.2s read are no longer the same dot". farseer's feed had exactly that defect: every row the same height, so nothing stood out. The record already knew - `tool_call_started` and `tool_result` both carry a `ts` - and nothing was subtracting them. Log-scaled, because the interesting range runs from milliseconds to minutes and a linear bar renders everything under ten seconds as a dot.
+
+**A meter for a provider-stated percentage**, from Kilo's context bar. Rendered as three named bands rather than a gradient, because an operator reads position and three states they can name beat a hue they have to interpret.
+
+### What was refused, and why the refusal is the design
+
+Kilo breaks tokens into **input, output, cache reads and cache writes**. farseer cannot: `10 runner inventory` and `32 harness capability floor` both measured that the runners here report a **total** and no split. Rendering four segments would mean inventing three of them.
+
+Kilo's context bar also has a **reserved** segment. farseer has `used` and `size` from `usage_updated` and nothing that says what is reserved.
+
+And the one that matters most: **`27 quota accounting` refuses a bar built from farseer's own spend**, because that spend is a lower bound on a window drained by sessions farseer cannot see - most wrong exactly near exhaustion, when an operator would trust it most. A bar reads as a measurement whatever the caption says, so the rule is now enforced by the component: `Meter` takes a percentage and nothing else, and a window whose runner states none renders **no bar at all**.
+
+### A bug found by measuring rather than looking
+
+The first capsule put the bar and its label in one flex row. Flexbox then shrank the bar to make room for the label, and the wider label belongs to the longer duration - so a **142.7s step drew a shorter bar than an 8.4s one**, exactly inverting what the capsule is for.
+
+It was invisible in a screenshot and obvious in `getBoundingClientRect`: 46% rendered at 42.3px, 76% at 57.9px, 93% at 43.8px. Fixed with a fixed-width track, and now monotonic: 25.8px, 42.5px, 52.1px.
+
+**A visual element whose whole job is proportion has to be checked as a number.**
+
+## Tray mode, 2026-08-29
+
+A third surface, and the first that answers a question without being opened.
+
+`28` made the canvas the home screen, and a canvas has to be looked at. `35 notification plane` covered the far end - something happened, wake somebody. The middle was unserved: **is there quota left right now**, asked at a glance while doing something else.
+
+### Why quota is the right thing to put there
+
+Because it is the only thing farseer knows when nothing is running.
+
+Every other surface describes runs, and a tray that says "no runs" all day is a tray nobody looks at. `33 google quota`'s reversal changed that: `/v1/quota` now polls `omp usage --json` on a timer and reports every account it is logged into, live, with no run in flight.
+
+### What it shows
+
+The tooltip carries **one window - the most constrained** - because that is the only one that changes what an operator does next: an account with three windows at 2% and one exhausted is, practically, exhausted. The menu lists all of them, worst first, as **disabled** items: they are readings, not commands, and a tray that can act would be a second control surface to keep in step with the first.
+
+### The two rules that survive the move
+
+`27 quota accounting`'s refusal of a farseer-derived percentage matters more here than anywhere else in the product. **A tray line is read in half a second and remembered as fact**, so a number the operator cannot check is worse there than in a panel they are studying.
+
+And absent stays absent: a runner that states no percentage renders `- no percentage reported`, never `0%`. A window with no stated percentage also sorts **below** a known zero, because farseer knows less about it and the tooltip should carry the more informative row.
+
+`no window reported yet` is its own state, distinct from a healthy fleet at 0%.
+
+### Cost
+
+One feature flag on a crate already in the tree - `tauri = { features = ["tray-icon"] }` - and no new dependency. The tray reads the same `/v1/quota` the canvas does, through the token the shell already holds, so it is a second **reader** of one surface rather than a second source of truth.
+
+## The windows widget, rebuilt on operator feedback, 2026-08-29
+
+Four complaints, and the first was not a layout problem at all.
+
+### "0% to 3% used is confusing"
+
+It was showing **one subscription twice**. `chatgpt primary 1%` and `codex-app-server primary 3%` are the same Codex five-hour window, read a day apart under two account keys.
+
+`27 quota accounting` keys a window by account and declares the account in `runners.toml`, never inferring it. The moment that file gained `[codex-app-server] account = "chatgpt"`, every observation already in the record kept the **old** key - a runner's own name, which is what an undeclared runner is keyed by. Nothing was wrong with either row; they were readings of the same thing filed under a name that had been superseded.
+
+`/v1/quota` now drops a window whose account is a runner name that runner config maps somewhere else. **Filtered, never deleted**: `02 record scope` makes the record append-only, and what those rows said was true when they were written.
+
+### "should just report 5h and weekly from the same provider as summary"
+
+Grouped by account, one tile per window. An account is the thing an operator thinks in and its windows are its shape - four rows for two subscriptions read as four subscriptions.
+
+Window names now prefer the **duration** the provider reported (`5 hour`, `7 day`) over its rank (`primary`, `secondary`), because when two sit side by side the duration is what distinguishes them.
+
+### "too vertical, wasting space"
+
+Tiles on a `repeat(auto-fit, minmax(160px, 1fr))` grid: one column in a narrow widget, four across a wide one, without a breakpoint to maintain.
+
+### "widget can't be dragged"
+
+The grip has been rendering since the first canvas and never moved anything. `24 ui state persistence` was already storing the mounted order through `PUT /v1/ui-state/canvas`, so this was a handler and a CSS cursor rather than a feature.
+
+Drag starts on the grip and drops on the whole widget - a 12px drop target is one nobody hits - and it **moves** rather than swaps, because an operator dragging a card past another expects the rest to close up behind it.
+
+### Spend stays per window
+
+Farseer's spend is counted from when it **first saw that window**, and two windows on one account began at different moments. Adding them would produce a total nothing measured, so each tile carries its own.
+
+## Amended by 40
+
+`40 Work model and session explorer` fixes the fresh-install surface and shared navigation.
+
+The default canvas contains four first-party operational widgets: **Conversation**, **Work**, **Fleet**, and **Capacity**.
+Clock remains optional and Settings moves to shell chrome.
+The Work widget owns Board, Conversations, Graph, task detail, and completed-work faces.
+The Graph face expands to the full canvas when needed and visually separates observed topology from derived similarity.
+Conversation, project path, task, and run selections are shared subject context across first-party widgets.
+Every request still goes to the top manager while direct run verbs still target the selected run.
+Agent-authored widgets remain sandboxed presentation and never own work truth, runtime control, transcript custody, resource sampling, or semantic indexing.

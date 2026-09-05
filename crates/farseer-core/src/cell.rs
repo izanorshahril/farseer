@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 
 use crate::ids::CellId;
-use crate::policy::{Budget, Irreversibility, Policy};
+use crate::policy::{Budget, Irreversibility, Policy, ToolLevel};
 use crate::run::WorkspaceStrategy;
 
 /// The mandatory manager. `01 cell primitive`: every cell has one, and only a manager may
@@ -21,9 +21,12 @@ use crate::run::WorkspaceStrategy;
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Manager {
-    /// A name from the runner inventory. `10 runner inventory` made the inventory a menu an
-    /// author picks from, not a survey.
-    pub runner: String,
+    /// Ordered candidates from the runner inventory.
+    ///
+    /// `40 work model and session explorer` pins one candidate per conversation.
+    /// A one-item list remains the ordinary case from `26 routing policy`.
+    #[serde(alias = "runner", deserialize_with = "one_or_many")]
+    pub runners: Vec<String>,
     #[serde(default)]
     pub prompt: String,
     /// Skills this manager runs with, by directory name under the cell file's
@@ -38,6 +41,47 @@ pub struct Manager {
     /// inheriting those silently is the opposite of deciding autonomy up front.
     #[serde(default)]
     pub skills: Vec<String>,
+    /// How much of the runner's own tool set this manager gets.
+    ///
+    /// Absent is [`ToolLevel::Shell`], which is what farseer has always done -
+    /// see `36 tool grant enforcement`. Opting down is a decision an author
+    /// makes here, and a runner that cannot take an allowlist refuses the run
+    /// rather than ignoring the field.
+    #[serde(default)]
+    pub tools: ToolLevel,
+}
+
+impl Manager {
+    /// The default candidate for a new conversation.
+    pub fn runner(&self) -> &str {
+        self.runners.first().map(String::as_str).unwrap_or_default()
+    }
+
+    pub fn has_runner(&self, runner: &str) -> bool {
+        self.runners.iter().any(|candidate| candidate == runner)
+    }
+}
+
+/// Accept either `runner = "pi"` or `runners = ["pi", "omp"]`.
+///
+/// The singular spelling is not a legacy alias to be removed: `26 routing
+/// policy` found a one-item list is the normal case, and making every cell
+/// write brackets to say the ordinary thing would be a tax on the common path
+/// for the benefit of the rare one.
+fn one_or_many<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum OneOrMany {
+        One(String),
+        Many(Vec<String>),
+    }
+    Ok(match OneOrMany::deserialize(deserializer)? {
+        OneOrMany::One(one) => vec![one],
+        OneOrMany::Many(many) => many,
+    })
 }
 
 /// What a cell may use.
@@ -51,7 +95,20 @@ pub enum RosterEntry {
     /// not by whether an LLM is involved.
     Worker {
         name: String,
-        runner: String,
+        /// The runners this worker may run on, best first.
+        ///
+        /// `26 routing policy`: **the author asserts equivalence and farseer
+        /// never infers it.** `10 runner inventory` measured that a full-shell
+        /// coding agent and an `ffmpeg` adapter that renders one file are both
+        /// runners with nothing in common, so a runtime cannot know two are
+        /// substitutes. Within a worker kind an author can know, and saying so
+        /// here is that claim.
+        ///
+        /// **A one-item list is a pin**, which is the normal case, and
+        /// `runner = "pi"` still parses as one - so nothing changes for a cell
+        /// that never wanted this and `08 generalization test` stays shut.
+        #[serde(alias = "runner", deserialize_with = "one_or_many")]
+        runners: Vec<String>,
         /// `23 prototype loose ends` makes this the per-callee cap, narrowed again by the caller's remaining task budget.
         #[serde(default)]
         max_budget: Budget,
@@ -60,6 +117,10 @@ pub enum RosterEntry {
         /// coder should not get the same instructions by accident.
         #[serde(default)]
         skills: Vec<String>,
+        /// Same rule as [`Manager::tools`], per worker: a reviewer has no
+        /// business holding a shell that a coder needs.
+        #[serde(default)]
+        tools: ToolLevel,
     },
     /// A call that returns or errors. Declares its own irreversibility level,
     /// which policy then gates on, per `12 autonomy and deny list`.
@@ -148,7 +209,9 @@ pub enum ValidationError {
     EmptyCellId,
     #[error("name is empty; `21 a2a conformance` generates the A2A agent card from it")]
     EmptyName,
-    #[error("manager.runner is empty; `01 cell primitive` makes the manager mandatory")]
+    #[error(
+        "manager.runners must contain at least one non-empty runner; `01 cell primitive` makes the manager mandatory"
+    )]
     EmptyManagerRunner,
     #[error("roster entry `{0}` is declared more than once")]
     DuplicateRosterName(String),
@@ -173,6 +236,18 @@ pub enum Advisory {
     /// `13 harness build kit`: a definition with no workers is coherent, and the social cell being
     /// thinner than the coding cell is a fact about the domain, not a smell.
     NoWorkers,
+    /// `38 the tool verb`: a roster has three kinds and two verbs.
+    ///
+    /// `delegate_to_worker` reaches a `kind = "worker"` entry and `delegate_to_cell`
+    /// reaches a `kind = "cell"` one, both roster-checked. Nothing reaches a
+    /// `kind = "tool"` entry, because farseer serves no such tool. The entry is
+    /// still real - it is in the sealed contract and in the record, so two runs
+    /// of one contract are distinguishable by it - but it grants no reach.
+    ///
+    /// An advisory rather than an error, on `12 autonomy and deny list`'s own
+    /// precedent: a control that reads stronger than it is should **say so**,
+    /// not fail the definition that declares it.
+    ToolHasNoVerb { tool: String },
 }
 
 impl std::fmt::Display for Advisory {
@@ -183,6 +258,10 @@ impl std::fmt::Display for Advisory {
                 "tool `{shell_tool}` reaches a shell, so the deny list is advisory for this cell"
             ),
             Self::NoWorkers => f.write_str("roster declares no workers; this cell delegates only"),
+            Self::ToolHasNoVerb { tool } => write!(
+                f,
+                "tool `{tool}` is declared and recorded, and no verb reaches it: farseer serves no tool call, so it grants nothing and gates nothing"
+            ),
         }
     }
 }
@@ -231,7 +310,13 @@ impl CellDefinition {
         if self.name.trim().is_empty() {
             report.errors.push(ValidationError::EmptyName);
         }
-        if self.manager.runner.trim().is_empty() {
+        if self.manager.runners.is_empty()
+            || self
+                .manager
+                .runners
+                .iter()
+                .any(|runner| runner.trim().is_empty())
+        {
             report.errors.push(ValidationError::EmptyManagerRunner);
         }
 
@@ -262,10 +347,15 @@ impl CellDefinition {
                 }
                 RosterEntry::Tool {
                     name, grants_shell, ..
-                } if *grants_shell => {
-                    report.advisories.push(Advisory::DenyListIsAdvisory {
-                        shell_tool: name.clone(),
-                    });
+                } => {
+                    report
+                        .advisories
+                        .push(Advisory::ToolHasNoVerb { tool: name.clone() });
+                    if *grants_shell {
+                        report.advisories.push(Advisory::DenyListIsAdvisory {
+                            shell_tool: name.clone(),
+                        });
+                    }
                 }
                 _ => {}
             }
@@ -383,7 +473,7 @@ also_read = ["social"]
     fn a_hand_written_definition_loads_and_keeps_its_shape() {
         let (cell, _) = CellDefinition::load(CODING).unwrap();
         assert_eq!(cell.cell_id.as_str(), "zero");
-        assert_eq!(cell.manager.runner, "claude-code");
+        assert_eq!(cell.manager.runners, ["claude-code"]);
         assert_eq!(cell.roster.len(), 3);
         assert_eq!(cell.budget.usd_micros, Some(5_000_000));
         assert!(matches!(
@@ -398,6 +488,14 @@ also_read = ["social"]
         assert_eq!(cell.tool_grants(), ["shell"]);
         assert_eq!(cell.policy.worker_cap, 4);
         assert!(cell.record_scope.also_read.contains(&CellId::new("social")));
+    }
+
+    #[test]
+    fn a_manager_accepts_ordered_runner_candidates() {
+        let text = CODING.replace("runner = \"claude-code\"", "runners = [\"pi\", \"omp\"]");
+        let (cell, _) = CellDefinition::load(&text).unwrap();
+        assert_eq!(cell.manager.runners, ["pi", "omp"]);
+        assert_eq!(cell.manager.runner(), "pi");
     }
 
     #[test]
@@ -460,6 +558,22 @@ max_autonomy_ceiling = "undoable"
             cell.roster.first(),
             Some(RosterEntry::Cell { max_budget, .. }) if *max_budget == Budget::default()
         ));
+    }
+
+    /// `38 the tool verb`: a roster kind with no verb should say so where an
+    /// author reads it, rather than in a record nobody reconstructs.
+    #[test]
+    fn every_tool_entry_states_that_nothing_can_call_it() {
+        let (cell, advisories) = CellDefinition::load(CODING).unwrap();
+        for tool in cell.tool_grants() {
+            assert!(
+                advisories.contains(&Advisory::ToolHasNoVerb { tool: tool.clone() }),
+                "`{tool}` is declared and unreachable, and the report is silent about it"
+            );
+        }
+        // Not an error: `zero.toml` and `social.toml` both ship tool entries, and
+        // failing them would refuse the two definitions this repo runs on.
+        assert!(!cell.tool_grants().is_empty());
     }
 
     #[test]

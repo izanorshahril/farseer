@@ -34,10 +34,13 @@ name = "coder"
 runner = "pi"
 skills = ["farseer-record"]
 
+# `26 routing policy`: an ordered list, best first, and the author asserting the
+# two are equivalent **for this kind of work** - which farseer cannot infer and
+# never will. If pi's window is spent, review still happens.
 [[roster]]
 kind = "worker"
 name = "reviewer"
-runner = "pi"
+runners = ["pi", "omp"]
 
 [[roster]]
 kind = "tool"

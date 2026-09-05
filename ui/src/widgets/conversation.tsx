@@ -1,7 +1,7 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { Bridge } from "../bridge";
+import { onSubjectSelection, selectedSubject } from "../selection";
 import { follow, type RecordEvent } from "../stream";
-
 /**
  * What the top manager said, as a conversation.
  *
@@ -33,7 +33,7 @@ type Meta = {
   /** A **hint**: what the runner is configured to reach for, not what this turn used. */
   effort?: string;
   effortFrom?: string;
-  session_id?: string;
+  sessions: { kind: string; id: string }[];
   cell?: string;
   cost?: number;
   tokens?: number;
@@ -59,7 +59,14 @@ function context(meta: Meta): string | undefined {
 type Turn = {
   seq: number;
   run: string;
-  who: "operator" | "manager";
+  /**
+   * `farseer` is the runtime's own voice, and it exists because the runtime's
+   * voice was being put in the manager's mouth. A run that died before the
+   * model ever spoke ends with farseer's error as its text - a spawn failure,
+   * a workspace that could not be made - and rendering that under "top manager"
+   * claims an agent said something no agent was alive to say.
+   */
+  who: "operator" | "manager" | "farseer";
   text: string;
   ts: number;
   outcome?: string;
@@ -70,6 +77,19 @@ type Turn = {
 
 const time = (ts: number) => new Date(ts).toLocaleTimeString(undefined, { hour12: false });
 const usd = (micros: number) => `$${(micros / 1_000_000).toFixed(2)}`;
+
+/**
+ * Decode immutable `session_started` records written before
+ * `40 work model and session explorer` added an explicit `session_kind`.
+ *
+ * Current events carry the kind and never consult this frozen compatibility
+ * table, so adding a new runner does not create another evolving registry.
+ */
+function legacySessionKind(runner: string): string {
+  if (runner === "codex" || runner === "codex-app-server") return "thread";
+  if (runner === "agy") return "conversation";
+  return "session";
+}
 
 /**
  * The goal an operator typed, out of the queued event's contract snapshot.
@@ -108,10 +128,15 @@ function turnFrom(event: RecordEvent): Turn | null {
     if (typeof text !== "string" || !text.trim()) return null;
     // A run whose last answer is already in the thread should not repeat it
     // when it finally exits; the outcome is what is new by then.
+    const failed = payload["outcome"] === "failed";
     return {
       seq: event.seq,
       run: event.run_id,
-      who: "manager",
+      // Kept verbatim rather than replaced with a friendlier sentence: the
+      // operator needs the exe and the argv to fix it, and `02 record scope`'s
+      // whole argument is that the record says what happened. What changes is
+      // **who is credited with saying it**.
+      who: failed ? "farseer" : "manager",
       text,
       ts: event.ts,
       final: true,
@@ -122,13 +147,22 @@ function turnFrom(event: RecordEvent): Turn | null {
   return null;
 }
 
-export function ConversationWidget({ bridge }: { bridge: Bridge }) {
-  const [turns, setTurns] = useState<Turn[]>([]);
-  const [meta, setMeta] = useState<Meta>({});
-  const [error, setError] = useState<string | null>(null);
 
+export function ConversationWidget({ bridge }: { bridge: Bridge }) {
+  const initial = selectedSubject();
+  const [subject, setSubject] = useState(initial);
+  const [turns, setTurns] = useState<Turn[]>([]);
+  const [meta, setMeta] = useState<Meta>({ sessions: [] });
+  const [error, setError] = useState<string | null>(null);
+  const [showSilent, setShowSilent] = useState(false);
+  const thread = useRef<HTMLOListElement>(null);
+
+  useEffect(() => onSubjectSelection(setSubject), []);
   useEffect(() => {
     let live = true;
+    setTurns([]);
+    setMeta({ sessions: [] });
+    setError(null);
     const add = (event: RecordEvent) => {
       const payload = (event.payload ?? {}) as Record<string, unknown>;
       const str = (key: string) =>
@@ -136,24 +170,22 @@ export function ConversationWidget({ bridge }: { bridge: Bridge }) {
       const num = (key: string) =>
         typeof payload[key] === "number" ? (payload[key] as number) : undefined;
 
-      // The meta describes the latest session, so later events win. A run that
-      // never named a model leaves the field absent rather than stale.
       if (event.kind === "session_started") {
+        const id = str("session_id");
+        const runner = str("runner") ?? "";
+        const kind = str("session_kind") ?? legacySessionKind(runner);
         setMeta((current) => ({
           ...current,
-          runner: str("runner") ?? current.runner,
+          runner: runner || current.runner,
           model: str("model"),
           provider: str("provider"),
           effort: str("configured_effort"),
           effortFrom: str("configured_from"),
-          session_id: str("session_id"),
+          sessions:
+            id && !current.sessions.some((session) => session.kind === kind && session.id === id)
+              ? [...current.sessions, { kind, id }]
+              : current.sessions,
           cell: event.cell_id,
-          // Cleared, not carried. A new session has spent nothing yet, and a
-          // runner that reports no context window must not inherit the last
-          // one's - `pi` reporting neither was showing a `codex-app-server`
-          // context reading under a pi session id, which is precisely the
-          // absent-because-unreportable / absent-because-nothing-happened
-          // confusion `10 runner inventory`'s rule exists to prevent.
           used: undefined,
           size: undefined,
           tokens: undefined,
@@ -200,17 +232,65 @@ export function ConversationWidget({ bridge }: { bridge: Bridge }) {
       });
     };
 
-    // Replay what was already said, then follow. Same call, different cursor.
+    const subscription = follow((event) => {
+      if (subject.run === event.run_id) add(event);
+    });
+    if (!subject.conversation) {
+      setTurns([]);
+      setMeta({ sessions: [] });
+      return () => subscription.close();
+    }
+
+    let runIds = new Set<string>();
     bridge
-      .read<RecordEvent[]>("/events?limit=200")
-      .then((events) => live && events.forEach(add))
+      .read<{ task_id: string }[]>(
+        `/tasks?conversation_id=${encodeURIComponent(subject.conversation)}&limit=500`,
+      )
+      .then((tasks) =>
+        Promise.all(
+          tasks.map((task) =>
+            bridge.read<{ runs: { run_id: string }[] }>(`/tasks/${task.task_id}`),
+          ),
+        ),
+      )
+      .then((details) => {
+        if (!live) return;
+        runIds = new Set(details.flatMap((detail) => detail.runs.map((run) => run.run_id)));
+        return bridge.read<RecordEvent[]>("/events?tail=1000");
+      })
+      .then((events) => events?.filter((event) => runIds.has(event.run_id)).forEach(add))
       .catch((e: Error) => live && setError(e.message));
-    const subscription = follow(add);
+
+    const selectedSubscription = follow((event) => {
+      if (runIds.has(event.run_id)) add(event);
+    });
     return () => {
       live = false;
       subscription.close();
+      selectedSubscription.close();
     };
-  }, [bridge]);
+  }, [bridge, subject.conversation, subject.task, subject.run]);
+
+  // The newest turn is the one being waited for, and a thread that keeps its
+  // scroll at the top hides exactly the line the operator is here to read.
+  //
+  // The thread owns its scroll so the runner metadata above it stays visible.
+  // Keyed on the newest turn rather than on how many there are. The thread is
+  // capped at 40, so **once it fills, the count stops changing** and an effect
+  // watching the length never fires again - the widget scrolled itself for the
+  // first forty turns and then quietly stopped, which is the worst version of
+  // this bug because it works while you are testing it.
+  const newest = turns.length > 0 ? turns[turns.length - 1]!.seq : 0;
+  useEffect(() => {
+    // After the frame, not during it: the thread takes what the flex column
+    // leaves it, so its scroll height is not settled at the moment the turns
+    // change - scrolling now lands short of the bottom on first paint.
+    const frame = requestAnimationFrame(() => {
+      const el = thread.current;
+      if (el) el.scrollTop = el.scrollHeight;
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [newest]);
 
   // 75-90% is worth noticing and above 95% the next prompt may not fit, which
   // is the convention ACP's clients already settled on - farseer does not need
@@ -224,9 +304,7 @@ export function ConversationWidget({ bridge }: { bridge: Bridge }) {
           : ""
       : "";
 
-  const strip = (
-    <div className="meta">
-      {[
+  const fields: [string, string | undefined][] = [
         ["cell", meta.cell],
         ["runner", meta.runner],
         ["model", meta.model],
@@ -235,45 +313,69 @@ export function ConversationWidget({ bridge }: { bridge: Bridge }) {
         // it will reach for, and farseer never sets it, so calling it the level
         // this turn used would be a claim nobody made.
         ["configured effort", meta.effort],
-        ["session", meta.session_id?.slice(0, 8)],
+        ["sessions", meta.sessions.length ? meta.sessions.map((session) => `${session.kind}:${session.id.slice(0, 8)}`).join(", ") : undefined],
         ["context", context(meta)],
         ["tokens", meta.tokens?.toLocaleString()],
         ["cost", typeof meta.cost === "number" ? usd(meta.cost) : undefined],
         ["last run", meta.outcome],
-      ].map(([label, value]) => (
-        <span
-          key={label}
-          className={[value ? "" : "absent", label === "context" ? pressure : ""]
-            .filter(Boolean)
-            .join(" ")}
-        >
+  ];
+  const reported = fields.filter(([, value]) => value !== undefined);
+  const silent = fields.filter(([, value]) => value === undefined);
+
+  // `10 runner inventory`'s rule is that a blank means the runner declined, and
+  // that is information. It is not information worth seven of the ten slots on
+  // the tallest element in the widget - most runners report almost nothing, so
+  // the strip was mostly a list of things that were never going to be there.
+  // Folded, counted, and one click away, which keeps the fact without paying
+  // full height for it every render.
+  const strip = (
+    <div className="meta">
+      {reported.map(([label, value]) => (
+        <span key={label} className={label === "context" ? pressure : ""}>
           <i>{label}</i>
-          <b className="mono">{value ?? "not reported"}</b>
+          <b className="mono">{value}</b>
         </span>
       ))}
+      {silent.length > 0 && (
+        <button
+          type="button"
+          className="chip"
+          aria-expanded={showSilent}
+          onClick={() => setShowSilent((current) => !current)}
+          title={silent.map(([label]) => label).join(", ")}
+        >
+          {showSilent ? "hide" : `${silent.length} not reported`}
+        </button>
+      )}
+      {showSilent &&
+        silent.map(([label]) => (
+          <span key={label} className="absent">
+            <i>{label}</i>
+            <b className="mono">not reported</b>
+          </span>
+        ))}
     </div>
   );
 
   if (error) return <p className="empty bad">{error}</p>;
+  if (!subject.conversation)
+    return <p className="empty">Start or select a conversation in Work, then use the canvas composer.</p>;
   if (turns.length === 0)
     return (
       <>
         {strip}
-        <p className="empty">
-          Nothing said yet. Type below - it goes to the top manager, and its answer lands here
-          when the run finishes.
-        </p>
+        <p className="empty">Nothing said in this conversation yet.</p>
       </>
     );
 
   return (
     <>
       {strip}
-      <ol className="thread">
+      <ol className="thread" ref={thread}>
       {turns.map((turn) => (
         <li key={turn.seq} className={turn.who}>
           <div className="row small">
-            <b>{turn.who === "operator" ? "you" : "top manager"}</b>
+            <b>{turn.who === "operator" ? "you" : turn.who === "farseer" ? "farseer" : "top manager"}</b>
             <span className="faint mono">{time(turn.ts)}</span>
             <span className="faint mono">{turn.run.slice(0, 8)}</span>
             {turn.outcome && turn.outcome !== "ok" && (

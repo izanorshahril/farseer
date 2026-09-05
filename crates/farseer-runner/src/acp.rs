@@ -71,17 +71,140 @@ pub fn initialize_frame(id: i64) -> String {
     .to_string()
 }
 
-/// `session/new` in a workspace. `mcpServers` is empty because farseer's own
-/// MCP face is reached by the manager's runner-native configuration rather than
-/// forwarded per session - `16 local api surface` owns that address.
-pub fn session_new_frame(id: i64, cwd: &str) -> String {
+/// `session/new` in a workspace, optionally carrying farseer's own MCP face.
+///
+/// `31 manager delegation reach`'s fourth transport, and the one that looked
+/// least likely: `29 harness protocol` found ACP's `fs/*` and `terminal/*` are
+/// served **by the client**, incompatible with a runner-owned worktree, so
+/// farseer declines both - and that made it easy to assume ACP had nothing else
+/// to offer a manager. It has `mcpServers`, which is a different mechanism
+/// entirely: farseer does not serve the tools, it names an address the agent
+/// connects to itself.
+///
+/// **The token is inline here, and that is a real step down from the other two
+/// transports.** Codex takes the *name* of an environment variable and pi's
+/// extension holds its own; ACP's `HttpHeader` is a literal value, so the
+/// bearer is in the frame. It is still not in the record - `02 record scope`
+/// scrubs - and the frame is on a pipe to a child farseer spawned. Worth
+/// knowing rather than worth blocking on.
+pub fn session_new_frame(id: i64, cwd: &str, mcp: Option<(&str, &str)>) -> String {
+    let servers = match mcp {
+        Some((url, bearer)) => json!([{
+            "name": "farseer",
+            "type": "http",
+            "url": url,
+            "headers": [{ "name": "Authorization", "value": format!("Bearer {bearer}") }],
+        }]),
+        None => json!([]),
+    };
     json!({
         "jsonrpc": "2.0",
         "id": id,
         "method": "session/new",
-        "params": { "cwd": cwd, "mcpServers": [] }
+        "params": { "cwd": cwd, "mcpServers": servers }
     })
     .to_string()
+}
+
+/// Whether the agent said it can reach an MCP server over HTTP.
+///
+/// Read from `initialize`'s `agentCapabilities.mcpCapabilities.http`, which
+/// goose 1.47.0 reports as `true` and its `sse` as `false`. Absent is `false`:
+/// `10 runner inventory`'s rule, applied to a negotiation rather than an
+/// observation - an agent that does not say it can is not assumed to.
+pub fn serves_http_mcp(line: &str) -> bool {
+    serde_json::from_str::<Value>(line)
+        .ok()
+        .and_then(|v| {
+            v.pointer("/result/agentCapabilities/mcpCapabilities/http")
+                .and_then(Value::as_bool)
+        })
+        .unwrap_or(false)
+}
+
+/// Every tool server this session loaded, as `(name, ok, error)` - **farseer's
+/// and the operator's alike**.
+///
+/// `37 inherited tool environment` is why this reports the successes too. A
+/// `goose acp` session with an empty `mcpServers` still loaded five extensions
+/// of the operator's own - `developer`, `skills`, `scheduler`, `summon`,
+/// `Extension Manager` - before farseer said anything at all. That is `32
+/// harness capability floor`'s skills finding in a second place: **a run reaches
+/// whatever happened to be installed on the machine**, and the record could not
+/// say what.
+///
+/// It still cannot say *whether it should have*. This only makes it visible.
+///
+/// What the agent says happened when it tried to connect to the servers it was
+/// given, as `(name, error)` pairs for the ones that failed.
+///
+/// goose reports this on `session/new` as `_meta.extensionResults`, and it is
+/// the difference between farseer *offering* a delegation channel and farseer
+/// *having* one. A manager whose farseer server failed to start has the roster
+/// in its prompt and no way to reach it - the exact fabrication `31 manager
+/// delegation reach` exists to prevent - so this is not a nicety.
+///
+/// **opencode 1.18.22 reports nothing here**, though it advertises
+/// `mcpCapabilities.http` and `sse` and does connect - proven live, a delegation
+/// relayed from a real worker. So empty means "nothing was said", not "nothing
+/// failed", and the two are not distinguishable on this runner. That is a
+/// limitation of the evidence rather than of the channel, and it is why this
+/// returns failures rather than a verdict: farseer records what an agent said
+/// and never a conclusion it did not.
+pub fn loaded_mcp_servers(line: &str) -> Vec<(String, bool, String)> {
+    serde_json::from_str::<Value>(line)
+        .ok()
+        .and_then(|v| {
+            v.pointer("/result/_meta/extensionResults")
+                .and_then(Value::as_array)
+                .map(|results| {
+                    results
+                        .iter()
+                        .map(|r| {
+                            (
+                                r.get("name")
+                                    .and_then(Value::as_str)
+                                    .unwrap_or_default()
+                                    .to_string(),
+                                r.get("success").and_then(Value::as_bool).unwrap_or(false),
+                                r.get("error")
+                                    .and_then(Value::as_str)
+                                    .unwrap_or_default()
+                                    .to_string(),
+                            )
+                        })
+                        .collect()
+                })
+        })
+        .unwrap_or_default()
+}
+
+pub fn failed_mcp_servers(line: &str) -> Vec<(String, String)> {
+    serde_json::from_str::<Value>(line)
+        .ok()
+        .and_then(|v| {
+            v.pointer("/result/_meta/extensionResults")
+                .and_then(Value::as_array)
+                .map(|results| {
+                    results
+                        .iter()
+                        .filter(|r| r.get("success").and_then(Value::as_bool) == Some(false))
+                        .map(|r| {
+                            (
+                                r.get("name")
+                                    .and_then(Value::as_str)
+                                    .unwrap_or_default()
+                                    .to_string(),
+                                r.get("error")
+                                    .and_then(Value::as_str)
+                                    .unwrap_or_default()
+                                    .to_string(),
+                            )
+                        })
+                        .collect()
+                })
+        })
+        .unwrap_or_default()
 }
 
 /// `session/set_mode`, which is how farseer refuses to be asked.
@@ -138,6 +261,12 @@ pub struct SessionOpened {
     pub current_mode: Option<String>,
     /// Modes the agent will accept, so a driver can pick one that does not ask.
     pub available_modes: Vec<String>,
+    /// MCP servers the agent was given and could not reach, `(name, error)`.
+    /// See [`failed_mcp_servers`].
+    pub failed_mcp_servers: Vec<(String, String)>,
+    /// Every tool server the session loaded, farseer's and the operator's
+    /// alike. See [`loaded_mcp_servers`] and `37 inherited tool environment`.
+    pub loaded_mcp_servers: Vec<(String, bool, String)>,
     /// The agent's own settings, as `id -> currentValue`.
     ///
     /// `goose acp` returns a `configOptions` array on `session/new` naming its
@@ -199,6 +328,8 @@ pub fn session_opened(line: &str) -> Option<SessionOpened> {
     let modes = result.get("modes");
     Some(SessionOpened {
         session_id,
+        failed_mcp_servers: Vec::new(),
+        loaded_mcp_servers: Vec::new(),
         current_mode: modes
             .and_then(|m| m.get("currentModeId"))
             .and_then(Value::as_str)
@@ -374,6 +505,72 @@ mod tests {
 
     /// Every fixture below is a literal line from the `goose acp` 1.47.0
     /// transcript captured on 2026-08-26, trimmed only of `_meta`.
+    /// `31 manager delegation reach`'s fourth transport, on the two lines the
+    /// live probe of goose 1.47.0 returned.
+    #[test]
+    fn an_acp_agent_is_offered_farseers_face_and_says_whether_it_reached_it() {
+        let hello = r#"{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":1,
+            "agentCapabilities":{"mcpCapabilities":{"http":true,"sse":false}}}}"#;
+        assert!(serves_http_mcp(hello));
+        // Absent is false: an agent that did not say it can is not assumed to.
+        assert!(!serves_http_mcp(r#"{"result":{"agentCapabilities":{}}}"#));
+
+        let frame = session_new_frame(2, "D:/w", Some(("http://127.0.0.1:8787/v1/mcp", "sekrit")));
+        let v: Value = serde_json::from_str(&frame).unwrap();
+        let server = &v["params"]["mcpServers"][0];
+        assert_eq!(server["type"], "http");
+        assert_eq!(server["url"], "http://127.0.0.1:8787/v1/mcp");
+        assert_eq!(server["headers"][0]["value"], "Bearer sekrit");
+
+        // No reach, no server - not an empty entry that reads like one farseer
+        // forgot to fill in.
+        let bare = session_new_frame(2, "D:/w", None);
+        let v: Value = serde_json::from_str(&bare).unwrap();
+        assert_eq!(v["params"]["mcpServers"].as_array().map(Vec::len), Some(0));
+    }
+
+    /// The line that separates offering a channel from having one.
+    ///
+    /// Verbatim from the probe: farseer pointed goose at a dead port on purpose,
+    /// and goose said so. A manager whose server failed has the roster in its
+    /// prompt and no way to reach it, which is exactly what `31` exists to stop.
+    #[test]
+    fn a_server_the_agent_could_not_reach_is_reported_rather_than_assumed_good() {
+        let answer = r#"{"jsonrpc":"2.0","id":2,"result":{"sessionId":"20260828_1",
+            "_meta":{"extensionResults":[
+              {"name":"farseer","success":false,"error":"failed to initialize MCP client"},
+              {"name":"other","success":true}]}}}"#;
+        assert_eq!(
+            failed_mcp_servers(answer),
+            vec![(
+                "farseer".to_string(),
+                "failed to initialize MCP client".to_string()
+            )]
+        );
+        // An agent that reports nothing is not accused of anything.
+        assert!(failed_mcp_servers(r#"{"result":{"sessionId":"s"}}"#).is_empty());
+    }
+
+    /// `37 inherited tool environment`, on the line that raised it.
+    ///
+    /// Verbatim from a `goose acp` session farseer gave **no** servers at all:
+    /// five of the operator's own loaded anyway. The record could not say what a
+    /// run reached until this, which is `32 harness capability floor`'s skills
+    /// finding in a second place.
+    #[test]
+    fn a_session_reports_the_operators_own_tool_servers_not_only_farseers() {
+        let answer = r#"{"result":{"sessionId":"s","_meta":{"extensionResults":[
+            {"name":"developer","success":true},{"name":"skills","success":true},
+            {"name":"scheduler","success":true},{"name":"summon","success":true},
+            {"name":"Extension Manager","success":true}]}}}"#;
+        let loaded = loaded_mcp_servers(answer);
+        assert_eq!(loaded.len(), 5, "{loaded:?}");
+        assert!(loaded.iter().all(|(_, ok, _)| *ok), "{loaded:?}");
+        // None of them is farseer's, and none of them failed - so the failure
+        // list stays empty and the loaded list is the only thing that knows.
+        assert!(failed_mcp_servers(answer).is_empty());
+    }
+
     #[test]
     fn a_usage_update_carries_the_context_window_farseer_had_no_source_for() {
         let line = r#"{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"20260825_10","update":{"sessionUpdate":"usage_update","used":4560,"size":1050000,"cost":{"amount":0.000918,"currency":"USD"}}}}"#;

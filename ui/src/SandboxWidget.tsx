@@ -33,6 +33,22 @@ type Props = {
   cell?: string;
 };
 
+/**
+ * Resources a widget may not read, however safe reading generally is.
+ *
+ * `bridge.read` is GET-only and `16 local api surface` makes reads safe, so the
+ * sandbox hands the whole `/v1` read surface over deliberately - a widget that
+ * cannot see the fleet cannot display it.
+ *
+ * `ui-state` is the exception, and it is the one this file already knew about:
+ * `saveState` is namespaced per widget precisely so one widget cannot overwrite
+ * another's slice **or the canvas layout itself**. A generic read walked
+ * straight past that - `farseer.read('/ui-state/canvas')` handed a widget the
+ * operator's whole arrangement, and every other widget's private state with it.
+ * Namespacing the write and not the read protects nothing.
+ */
+const READ_DENIED = /^\/ui-state(\/|$)/;
+
 type Call = { id: number; method: "read" | "ask" | "loadState" | "saveState"; args: unknown[] };
 
 const RUNTIME = String.raw`
@@ -143,7 +159,7 @@ export function SandboxWidget({ id, title, bridge, cell }: Props) {
       }
       const { id: callId, method, args } = data as Call;
       try {
-        const value = await serve(bridge, { widget: title, subject: cell }, method, args);
+        const value = await serve(bridge, { id, widget: title, subject: cell }, method, args);
         channel.port1.postMessage({ id: callId, value });
       } catch (e) {
         channel.port1.postMessage({ id: callId, error: (e as Error).message });
@@ -171,7 +187,7 @@ export function SandboxWidget({ id, title, bridge, cell }: Props) {
       element.removeEventListener("load", send);
       channel.port1.close();
     };
-  }, [html, bridge, title, cell]);
+  }, [html, bridge, id, title, cell]);
 
   if (error) return <p className="empty bad">this widget did not compile - {error}</p>;
   if (!html) return <p className="empty">compiling...</p>;
@@ -200,7 +216,7 @@ export function SandboxWidget({ id, title, bridge, cell }: Props) {
  */
 async function serve(
   bridge: Bridge,
-  anchor: { widget: string; subject?: string },
+  anchor: { id: string; widget: string; subject?: string },
   method: Call["method"],
   args: unknown[],
 ): Promise<unknown> {
@@ -208,13 +224,24 @@ async function serve(
   switch (method) {
     case "read": {
       if (!first.startsWith("/")) throw new Error("read takes a /v1 path");
+      if (READ_DENIED.test(first)) {
+        throw new Error(
+          "ui-state is not readable from a widget - use farseer.loadState, which is scoped to you",
+        );
+      }
       return bridge.read(first);
     }
     case "ask":
       return bridge.ask(anchor, first);
+    // Keyed by the widget's **id**, not its title. A title is a line in
+    // `widget.json` that its author chose and can change; two widgets calling
+    // themselves "Costs" would have shared one slice of state and quietly
+    // overwritten each other, and renaming a widget would have lost its state
+    // rather than kept it. The id is the directory name, which is what the
+    // widget actually is.
     case "loadState":
-      return bridge.loadState(`widget.${anchor.widget}.${first}`);
+      return bridge.loadState(`widget.${anchor.id}.${first}`);
     case "saveState":
-      return bridge.saveState(`widget.${anchor.widget}.${first}`, args[1]);
+      return bridge.saveState(`widget.${anchor.id}.${first}`, args[1]);
   }
 }

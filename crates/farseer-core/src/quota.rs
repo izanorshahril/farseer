@@ -106,6 +106,26 @@ pub struct WindowObservation {
     /// says. Codex reports 300 and 10080; nothing else reports any.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub window_duration_mins: Option<i64>,
+    /// Which **provider** this window belongs to, in the provider's own id -
+    /// `openai-codex`, `anthropic`, `cursor`, `xai-oauth`, `google-antigravity`.
+    ///
+    /// Separate from [`Self::account`], which is a login, because **one login
+    /// spans several providers**: four of the five omp reports on this machine
+    /// carry the same email, so grouping by account put a Cursor window, an xAI
+    /// window and a Claude window under one heading and called it a
+    /// subscription. The provider is what an operator is actually looking for.
+    ///
+    /// Absent for a window a run reported: `rate_limit_event` names a runner and
+    /// a limit and never a provider, and `10 runner inventory`'s rule is that
+    /// farseer transcribes what it was told rather than filling the gap in.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
+    /// The provider's own name for this window - `5 hours`, `Claude 7 Day`,
+    /// `Usage (Google)`. Transcribed, never composed: farseer used to build a
+    /// name out of [`Self::window_duration_mins`] and got `1 day` for three
+    /// different Antigravity windows that omp calls apart perfectly well.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
 }
 
 impl WindowObservation {
@@ -153,6 +173,8 @@ mod tests {
             is_using_overage: false,
             used_percent: None,
             window_duration_mins: None,
+            provider: None,
+            label: None,
         }
     }
 

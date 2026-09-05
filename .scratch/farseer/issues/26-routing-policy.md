@@ -148,3 +148,95 @@ That is true of `codex exec`. It is **false of `codex app-server`**, which pushe
 So the choice this ticket framed - one observable runner against two blind ones - is now two observable runners against one blind one, and the observable ones **do not report the same shape**. "Level down" gets more expensive as more runners can see; "exploit it" was priced against one exception and now has two.
 
 Neither design is invalidated. The number they were being weighed against changed, and this ticket should be re-read before it is wired rather than wired as written.
+
+---
+
+## Built 2026-08-28, all four sections
+
+Sections 1 to 3 went in first and section 4 followed in the same day; the note below was written between the two and its "not built" section is superseded at the foot of this page.
+
+### The roster entry holds the list, and one item is still a pin
+
+`runner = "pi"` and `runners = ["pi", "omp"]` are the same field, deserialised through a string-or-sequence helper.
+That is not a legacy alias to be removed later: this ticket found a one-item list is the normal case, and making every cell write brackets to say the ordinary thing would tax the common path for the benefit of the rare one.
+
+`cells/zero.toml`'s `reviewer` now names `["pi", "omp"]`, which is the author asserting equivalence **for that kind of work** - the claim `10 runner inventory` says a runtime cannot make.
+
+### The router, and `unknown` doing the work
+
+`first_available_runner` takes the author's order and returns the first candidate whose account has no spent window.
+Exhaustion is read from the record - `27 quota accounting`'s on-change window log - and expanded through `runners_on`, so **an account being spent takes every runner on it out of the running at once**, which is the whole reason `27` keyed by account rather than by runner.
+
+A runner farseer has never seen a window for is not in the exhausted set, so it stays eligible.
+That is section 2's `unknown` behaving as available until proven otherwise, and it is the common case rather than a gap: most runners will never report a window.
+
+### `runner_exhausted`, and the reorder that explains itself
+
+Every candidate spent is `runner_exhausted` on the delegation, not a fifth outcome.
+
+When a non-preferred runner is chosen, farseer appends a `status_changed` event with `actor: system` naming the preferred and the chosen.
+Section 4 asked for that in the budget case; it is needed in this case for the same reason, and the reason is the load-bearing part - **if the record does not say why a non-preferred runner ran, `11 analytics questions`'s cost-by-runner numbers cannot be explained.**
+
+### Not built: section 4, the budget-aware reorder
+
+The price table this ticket put "with the runner configuration" **does not exist yet**.
+`crates/farseer-core/src/runners.rs` says so in a comment on `RunnerEntry::account`: absent rather than stubbed, per `13 harness build kit`.
+
+So farseer routes on availability today and not on money.
+The cliff this ticket identified - a subscription costs nothing marginal until the window turns over, then only a pay-per-token key continues - is real and unaddressed.
+Whoever builds it inherits section 4's three constraints unchanged, and the first is the one to hold on to: **budget pressure may only reorder within the author's list**, never introduce a runner the author did not name.
+
+### Also still true
+
+`11 analytics questions` must exclude `runner_exhausted` from rework. Nothing enforces that yet, and rework is not computed from this reason today.
+
+
+---
+
+## Section 4, built the same day
+
+### The trigger is observed, not estimated
+
+The draft of this build was going to price a run in advance and reorder when the estimate pressed on the remaining budget.
+That needs the one number nobody has: what a run will cost before it runs.
+
+Section 4 already contained the better answer and it took a second reading to see it.
+The cost curve **is not a slope**, it is a cliff: a subscription run costs nothing marginal until its window turns over, and past that the only way to continue is a pay-per-token key that costs real money.
+`is_using_overage` is the provider stating which side of that cliff a runner is on - `10 runner inventory` measured Claude Code reporting it in band, and it has been a field on `WindowObservation` the whole time.
+
+So routing prefers a candidate not on overage, and no estimate enters the decision at all.
+
+**Preference, never exclusion.** A runner on overage still runs when it is the only one left, because this ticket is explicit that budget pressure may **reorder within the author's list** and never add or remove a runner the author named.
+
+### The price table exists, and only for the record
+
+`RunnerEntry::usd_micros_per_mtok`, absent for every runner until an operator writes one down.
+
+One blended rate rather than input and output separately, because that is the granularity farseer can observe: pi and omp report a total token count and no split.
+
+A run that reported tokens and no currency is costed from it and carries **`cost_estimated: true`**, which is this ticket's own constraint - a routing decision made on a farseer estimate must be distinguishable from one made on a reported figure, or a mispriced table becomes invisible.
+A runner that stated its own figure is never overwritten by the table, and with no price at all the field stays **absent rather than zero**, per `10 runner inventory`.
+
+### The reorder event says less than it could
+
+It records `preferred_runner_unavailable` with the preferred and the chosen, and does not say which of the two pressures moved it.
+Exhaustion and overage are read in one pass and the distinction is not reconstructed.
+`11 analytics questions` needs to know a reorder happened and what ran; a confident wrong reason would be worse than an honest vague one.
+
+### The rework exclusion, and a departure from section 3
+
+Section 3 asked for `failed` with reason `runner_exhausted`, on `17 cell lifecycle`'s precedent of an orphaned run becoming `finished(failed)` with reason `runtime_restarted`.
+**That is not what was built, and the difference is the point.**
+
+`17`'s run had started: a process existed and its outcome was genuinely unknown, so a row saying so is the honest record of something that happened.
+An exhausted delegation starts nothing - no contract sealed, no workspace, no process.
+Writing a run row would put a run into `11 analytics questions`'s denominators that never ran, in order to record an event that is not about a run at all.
+
+So it is a `status_changed` event on the manager's own run, naming the worker and every candidate.
+"How often did exhaustion block work" is a scan of those, rather than an outcome filter over phantom rows.
+
+And the consequence section 3 wanted arrives for free.
+With no run and no rescope edge, `runner_exhausted` **cannot** reach `rework_depth`, whose chain walks `rescoped_from`.
+`11`'s exclusion is true by construction rather than by a rule somebody has to keep remembering - which is the only kind that survives.
+
+`26` is closed.

@@ -7,6 +7,8 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
+mod acp_server;
+
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use farseer_api::{AppState, RuntimeToken, serve, validate_dir};
@@ -57,6 +59,13 @@ enum Command {
     Validate,
     /// Print where the runtime writes its port and token.
     Where,
+    /// Speak ACP on stdio, so an editor can drive a running farseer.
+    ///
+    /// `16 local api surface` made this an adapter on top of the HTTP surface
+    /// rather than a second transport, so it attaches to a farseer that is
+    /// already serving rather than starting one - and it declares at the
+    /// handshake that it is an orchestrator, per `06 cell transport`.
+    Acp,
 }
 
 fn main() -> Result<()> {
@@ -66,6 +75,16 @@ fn main() -> Result<()> {
         Command::Where => {
             println!("{}", farseer_api::runtime_file_path().display());
             Ok(())
+        }
+        Command::Acp => {
+            let runtime = acp_server::Runtime::attach()?;
+            // Multi-threaded, because a prompt runs as its own task while the
+            // read loop keeps serving - which is what lets `session/cancel`
+            // overtake the turn it cancels.
+            tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()?
+                .block_on(acp_server::serve_stdio(runtime))
         }
         Command::Serve { port } => {
             let record = cli.record.map(Ok).unwrap_or_else(default_record_path)?;

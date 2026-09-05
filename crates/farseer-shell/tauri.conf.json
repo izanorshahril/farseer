@@ -6,11 +6,34 @@
   "build": {},
   "app": {
     "windows": [],
-    "security": { "csp": null }
+    "security": {
+      "csp": null
+    }
   },
   "bundle": {
     "active": true,
-    "targets": ["nsis"],
-    "icon": []
+    "targets": [
+      "nsis"
+    ],
+    "icon": [
+      "icons/icon.ico"
+    ],
+    "publisher": "farseer",
+    "copyright": "farseer",
+    "category": "DeveloperTool",
+    "shortDescription": "An operator's console for a fleet of coding agents.",
+    "longDescription": "farseer runs coding agents as bounded runs against a sealed contract, keeps an append-only record of everything they did, and puts a canvas in front of it.",
+    "resources": {
+      "../../ui/dist": "canvas",
+      "../../cells": "cells",
+      "../../runners.toml": "runners.toml"
+    },
+    "externalBin": [],
+    "windows": {
+      "nsis": {
+        "installMode": "perMachine",
+        "displayLanguageSelector": false
+      }
+    }
   }
 }

@@ -71,7 +71,7 @@ So the kit must not compute the id from a hash of the definition, which is the o
 Everything else `12` decided is runtime behaviour rather than definition content: autonomy ceilings compose at call time, deny lists union down the chain, and gating is a runtime decision.
 
 Note also that **the delivery gate is a tool, not a field**.
-`05` put `definition_of_done` on the worker contract; whether satisfying it means `no-mistakes`, `cargo test` or a human watching a video is a tool grant.
+- **No delivery-gate field.** `05` put `definition_of_done` on the worker contract; whether the repository tests, CI, or a human review satisfies it is a tool grant.
 A kit that adds a delivery-gate field has broken `08`'s test.
 
 ## Resolution

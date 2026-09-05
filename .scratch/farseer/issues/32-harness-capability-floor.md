@@ -1,6 +1,6 @@
 # 32 harness capability floor
 
-**Status:** open. A measurement, and three things it changed.
+**Status:** closed 2026-08-29. A measurement, three things it changed, and four consequences worked through - the last of them answered by noticing this ticket had invalidated its own question.
 **Measured:** 2026-08-27, live, against `pi 0.84.3`, `omp 18.0.4`, `agy 1.1.13`, `codex-cli 0.149.1`.
 
 pi is the benchmark, because the operator picked it as the fleet default and because it is the runner farseer drives most completely. The question is what a coding harness is *expected* to do, and which of those things farseer can **see** - `10 runner inventory`'s rule holds throughout: observed, never advertised. Every row below is a captured line, not a help page.
@@ -83,9 +83,13 @@ Stripped of the shared floor, three real differences:
 
 ## Open
 
-- Skills, per the three consequences above. The largest gap on this page.
-- omp's `hub` tool - background jobs are farseer's own concern (`05 run state model` has a whole vocabulary for a run in flight), and a runner having its own parallel one is worth a look before the two collide.
-- Whether `agent_end`'s under-counting is fixed in the adapter or in `RunReport`. It is the design review's "RunReport is becoming a bag" finding arriving with a concrete cost attached.
+Two of the four items below are discharged; struck through rather than deleted, because what closed them is the useful part.
+
+- **Skills consequence 1 - a cell cannot ask for a skill.** ~~Open.~~ **Closed 2026-08-28**: a cell declares `skills = [...]`, farseer passes them by path on the runners that take one, and refuses in front of a person on the ones that do not.
+- **Skills consequence 2 - the record does not say a skill was used.** **Half closed 2026-08-29**: `run_queued` now carries the skill **paths** a run was handed, so two runs of one contract that differ only in their skills are no longer identical in the record. What is still missing is *invocation* - farseer records what a run was given, not what it reached for, and a skill loaded and never used looks the same as one the model leaned on throughout.
+- **Skills consequence 3 - the menu cannot show them.** **Closed 2026-08-29, and this ticket's own fix changed which menu was wanted.** `GET /v1/skills` lists the directories under the repository's `skills/` and says which cells declare each; the settings widget renders it. Listing what a *harness* discovered would be a menu of things **no cell can order**, because this ticket denied discovery - so a run reaches only what its cell names, and a cell may name only a repository directory. The original framing was written before its own consequence landed.
+- ~~omp's `hub` tool.~~ **Moved to `36 tool grant enforcement` 2026-08-28**: `task` and `hub` are tools, so whether an omp manager spawns its own subagents is a tool level somebody chose rather than a capability nobody did.
+- ~~Whether `agent_end`'s under-counting is fixed in the adapter or in `RunReport`.~~ **Fixed in the adapter 2026-08-28**, as `RunnerSignal::LegSpend`: the record keeps the event for a person and a separate signal carries the arithmetic, because money that only exists in a payload string is money the report cannot add up.
 
 ---
 
@@ -134,3 +138,30 @@ tool_call_started  write  {"path":"xd://delegate_to_worker", "content":"{...}"} 
 omp mounts extension tools as **devices addressed by writing JSON to `xd://<tool>`**. It guessed an MCP-shaped name first, read the schema, then called correctly - self-correcting, and farseer's tool descriptions were enough to do it from.
 
 One consequence for `02 record scope`: the event's `tool_name` is `write`, and the verb is inside `args.path`. **An operator scanning omp's events sees a file write where a delegation happened.** The delegation itself is recorded correctly - the child run row exists, under the parent task, with its own spend - so this is a legibility gap in the event stream rather than a false record. Not fixed here.
+
+## The multi-leg spend gap, closed 2026-08-28
+
+This ticket left the under-count open when it recorded omp's background job:
+the non-terminal `agent_end` was written to the record as a `tool_result`, and
+**the run report still carried only the final leg**.
+So an omp run that delegated to a background job reported a fraction of what it
+spent - to `11 analytics questions`, and to the budget that draws down against it.
+
+Fixed with a signal rather than a re-read of the record.
+`RunnerSignal::LegSpend` carries what a non-terminal leg spent, the manager holds it,
+and the terminal `RunReport` adds it in.
+The event still goes to the record, because the record is for a person and the
+signal is for the arithmetic - **money that only exists in a payload string is
+money the report cannot add up.**
+
+`None + None` stays `None`.
+A runner that reports no spend must not be made to look like it reported zero,
+which is `10 runner inventory`'s observed-never-advertised rule applied to money.
+
+## The `hub` question moved, 2026-08-28
+
+This ticket's open item - "omp's `hub` tool ... a runner having its own parallel one is worth a look before the two collide" - was looked at, and it is not its own question.
+`task` and `hub` are **tools**, and omp takes a `--tools` allowlist.
+Whether an omp manager may spawn its own subagents alongside farseer's workers is therefore a grant somebody makes on purpose, which is `36 tool grant enforcement`.
+
+That look found the larger thing: **farseer records `tool_grants` on every contract and passes them to no runner at all.**

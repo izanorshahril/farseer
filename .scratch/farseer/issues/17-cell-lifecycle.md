@@ -178,3 +178,22 @@ A blob is removed by writing an empty one, which needs no verb of its own.
 
 The consequence is deliberate: a layout may pin a cell that was purged, and farseer will not notice, because it never parses a blob.
 That is the UI's problem to skip - the alternative is farseer owing a schema forever.
+
+## Built, 2026-08-31
+
+The verbs are `POST /v1/cells/{id}/{pause,resume,archive,restore,purge,delete}`, plus `GET /v1/cells/states` for everything that has moved.
+Delete is a `POST` rather than `DELETE` on the cell because it removes a binding and not a resource - the definition is still in git, which is exactly the asymmetry section 4 draws.
+
+**Lifecycle lives in the store, in a `cell_state` row that exists only for a cell that has moved.**
+A deletion held in the loaded registry alone would be undone by the next reload, which re-reads the directory the file never left.
+Absent means active, so a fresh store needs no seeding to be correct, and returning to active removes the row rather than writing the word.
+
+**Pause is checked where runs begin**, in all three: the operator's instruction, worker delegation and cell delegation.
+A policy flag nothing reads is a switch that does nothing.
+
+**Purge is scoped by `ts`**, inclusive at both ends, over each table's own timestamp - an event's `ts`, a run's `started_ts`, a memory's `ts` - rather than over `seq`, because the operator asking is asking about dates and `seq` is farseer's cursor rather than a clock.
+The tombstone is appended after the delete, so its own `ts` is later than any range that purge could have destroyed. A later purge whose range reaches forward over it does remove it; that is honest rather than special-cased, since a tombstone is a record entry and purge is defined over the record.
+
+**One thing this could not finish.** Section 5 asks that a reader be able to tell a `void` from a `gap`.
+The kind exists and the tombstone names it, but **farseer emits no `gap` today** - the stream resumes from a cursor and never announces a hole - so there is nothing yet for `void` to be distinguished *from* on the wire.
+The distinction becomes real the day `16`'s backpressure gap is emitted; until then it lives in the record, where the tombstone explains the hole to anyone who scans across it.

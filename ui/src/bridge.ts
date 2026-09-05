@@ -13,6 +13,9 @@
  * Claude Design component returning to the main agent.
  */
 
+import { currentProject } from "./project";
+import { selectSubject, selectedSubject } from "./selection";
+
 /** Which cell farseer's operator talks to. `01 cell primitive` made it the address. */
 const TOP_MANAGER = "zero";
 
@@ -33,7 +36,16 @@ export type Bridge = {
    * **deliberately absent from the sandbox bridge** in `SandboxWidget.tsx`: a
    * widget the operator did not write can show a run, and cannot cancel one.
    */
-  post: (path: string, body?: unknown) => Promise<void>;
+  post: (path: string, body?: unknown) => Promise<unknown>;
+  /**
+   * Withdraw something. One entry today - a project root - and the same
+   * allowlist discipline as `post`.
+   *
+   * A separate verb rather than a `POST /remove`, because `39 what an installed
+   * farseer points at` makes revoking a grant the operator's act and it should
+   * read as one wherever it is written down.
+   */
+  del: (path: string, body?: unknown) => Promise<void>;
   /**
    * Send a request to the **top manager**, anchored to where it came from.
    *
@@ -57,8 +69,22 @@ export function createBridge(): Bridge {
     read: (path) => json(`/v1${path}`),
 
     post: async (path, body) => {
-      if (!/^\/runs\/[0-9a-f-]+\/(steer|cancel|rerun|rescope)$/.test(path)) {
-        throw new Error(`${path} is not a run verb`);
+      // Still an allowlist, now with two entries. `28 operator surface` gate 3
+      // narrows what a widget may reach, and the narrowing is the point - so a
+      // second entry is added by name rather than by loosening the pattern.
+      //
+      // `quota/refresh` launches a poll the operator has already enabled in
+      // `runners.toml`; the runtime refuses it when they have not.
+      const allowed = [
+        /^\/runs\/[0-9a-f-]+\/(steer|cancel|rerun|rescope|observe|take-over|release|intervene|transcripts)$/,
+        /^\/tasks\/[0-9a-f-]+\/transition$/,
+        /^\/conversations$/,
+        /^\/quota\/refresh$/,
+        /^\/projects$/,
+        /^\/projects\/roots$/,
+      ];
+      if (!allowed.some((pattern) => pattern.test(path))) {
+        throw new Error(`${path} is not a verb this bridge offers`);
       }
       const response = await fetch(`/v1${path}`, {
         method: "POST",
@@ -68,18 +94,64 @@ export function createBridge(): Bridge {
       // `400` is a runner with no steering path and `404` a run already
       // finished. Both are the runtime refusing a verb the surface should not
       // have offered, so they surface as errors rather than being swallowed.
-      if (!response.ok) throw new Error(`${path}: ${response.status}`);
+      //
+      // The runtime's own sentence when it wrote one: a refusal that says
+      // `quota/refresh: 400` tells the operator nothing, while the body says
+      // which line of `runners.toml` to add.
+      if (!response.ok) {
+        const said = await response
+          .json()
+          .then((body: { error?: string }) => body.error)
+          .catch(() => undefined);
+        throw new Error(said ?? `${path}: ${response.status}`);
+      }
+      // The body, for the verbs that answer with one. `rerun` and `rescope`
+      // return the **new** run's id - they start a run rather than change this
+      // one - and a caller that cannot see it has no way to follow what it just
+      // started. `204` and an unparseable body are both `undefined`, which is
+      // what `cancel` and `steer` have always effectively returned.
+      return await response.json().catch(() => undefined);
+    },
+
+    del: async (path, body) => {
+      if (path !== "/projects/roots") {
+        throw new Error(`${path} is not a verb this bridge offers`);
+      }
+      const response = await fetch(`/v1${path}`, {
+        method: "DELETE",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(body ?? {}),
+      });
+      if (!response.ok) {
+        const said = await response
+          .json()
+          .then((body: { error?: string }) => body.error)
+          .catch(() => undefined);
+        throw new Error(said ?? `${path}: ${response.status}`);
+      }
     },
 
     ask: async (anchor, text) => {
-      // The anchor rides in the goal as prose because the reader is an LLM.
-      // `16 local api surface`'s additive-only promise leaves room for a
-      // structured `context` field the day something needs to machine-read it.
       const where = anchor.subject ? `${anchor.widget}, showing ${anchor.subject}` : anchor.widget;
-      const body = await json<{ run_id: string }>(`/v1/cells/${TOP_MANAGER}/instruct`, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ goal: `[from the ${where} widget]\n${text}` }),
+      const subject = selectedSubject();
+      const body = await json<{ run_id: string; task_id: string; conversation_id: string }>(
+        `/v1/cells/${TOP_MANAGER}/instruct`,
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            goal: `[from the ${where} widget]\n${text}`,
+            project: subject.project ?? currentProject(),
+            conversation_id: subject.conversation,
+            manager_runner: subject.managerRunner,
+          }),
+        },
+      );
+      selectSubject({
+        conversation: body.conversation_id,
+        task: body.task_id,
+        run: body.run_id,
+        project: subject.project ?? currentProject(),
       });
       return body.run_id;
     },

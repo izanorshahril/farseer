@@ -50,6 +50,10 @@ pub fn handshake<F>(
     process: &mut SupervisedProcess,
     cwd: &Path,
     mode: Option<&str>,
+    // `(endpoint, bearer)` for farseer's own MCP face, per
+    // `acp::session_new_frame`. Offered only if `initialize` said the agent
+    // speaks HTTP MCP at all.
+    mcp: Option<(&str, &str)>,
     next_id: &mut i64,
     on_line: &mut F,
 ) -> Result<SessionOpened, AcpError>
@@ -63,7 +67,7 @@ where
     };
 
     let id = take(next_id);
-    request(
+    let hello = request(
         process,
         &acp::initialize_frame(id),
         id,
@@ -71,20 +75,30 @@ where
         acp::parse_line,
         on_line,
     )?;
+    // Asked before offered. An agent that never said it speaks HTTP MCP is not
+    // handed an address it may quietly ignore - `10 runner inventory`'s rule,
+    // and the difference between a manager that can delegate and one that has
+    // been told it can.
+    let mcp = mcp.filter(|_| acp::serves_http_mcp(&hello.to_string()));
 
     let id = take(next_id);
     let answer = request(
         process,
-        &acp::session_new_frame(id, &cwd.to_string_lossy()),
+        &acp::session_new_frame(id, &cwd.to_string_lossy(), mcp),
         id,
         "session/new",
         acp::parse_line,
         on_line,
     )?;
-    let opened = acp::session_opened(&answer.to_string()).ok_or(AcpError::Missing {
+    let mut opened = acp::session_opened(&answer.to_string()).ok_or(AcpError::Missing {
         method: "session/new",
         field: "sessionId",
     })?;
+    // The agent's own account of whether it reached what it was given. A server
+    // that failed to start is a delegation channel that does not exist, and a
+    // manager told otherwise would fabricate - which is the whole of `31`.
+    opened.failed_mcp_servers = acp::failed_mcp_servers(&answer.to_string());
+    opened.loaded_mcp_servers = acp::loaded_mcp_servers(&answer.to_string());
 
     // Only if the agent said it would take it. `opencode acp` advertises **no
     // modes at all**, and asking it to set one is a JSON-RPC error that kills
@@ -154,6 +168,9 @@ impl AcpSession {
         args: &[String],
         cwd: &Path,
         mode: Option<&str>,
+        // Offered to the agent only if it says it speaks HTTP MCP. See
+        // `handshake`.
+        mcp: Option<(&str, &str)>,
         on_line: &mut F,
     ) -> Result<Self, AcpError>
     where
@@ -165,7 +182,7 @@ impl AcpSession {
         // distinguish.
         let mut process = SupervisedProcess::spawn(exe, args, cwd, &[], StdinMode::Live)?;
         let mut next_id = 1;
-        let opened = handshake(&mut process, cwd, mode, &mut next_id, on_line)?;
+        let opened = handshake(&mut process, cwd, mode, mcp, &mut next_id, on_line)?;
         let session = Self {
             process,
             opened,
@@ -274,6 +291,7 @@ mod tests {
             &cwd,
             // The mode that does not ask. Nobody is watching a prompt.
             Some("auto"),
+            None,
             &mut sink,
         )
         .expect("the handshake completes");

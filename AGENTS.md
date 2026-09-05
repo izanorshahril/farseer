@@ -5,7 +5,8 @@ Twenty-eight decision tickets are closed, and the foundation is implemented agai
 ## Scope
 
 Farseer builds, tests and runs with **`cargo` and `bun` alone**.
-`cargo test`, `cargo clippy --all-targets`, `cargo fmt` and `bun run --cwd ui check` are the whole toolchain, and every live-runner test is `#[ignore]`d behind them.
+`cargo test --workspace`, `cargo clippy --workspace --all-targets`, `cargo fmt`, `bun run --cwd ui test` and `bun run --cwd ui check` are the whole toolchain, and every live-runner test is `#[ignore]`d behind them.
+**`--workspace` is not optional on either**: `cargo run` opens the desktop shell, which means `default-members` is the shell, which means a bare `cargo test` covers the shell and nothing else.
 
 No push gate, review pipeline or daemon is part of this project. If one is installed on a machine it belongs to that machine, not to farseer, and farseer must keep working when it is absent.
 
@@ -34,18 +35,21 @@ Every bounded budget dimension currently fails closed before spawn because no na
 Cross-cell delegation is implemented as the manager-scoped `delegate_to_cell`: a `kind = "cell"` roster grant, an ungranted name refused however it is phrased, a foreign `peer` refused while `06 cell transport`'s A2A endpoint is off, the ceiling narrowed by roster entry then callee policy, and the caller's budget **reserved** rather than drawn because the call is fire-and-forget.
 The callee's manager runs in the callee's cell with the callee's workspace, runner and tool grants, under the caller's task id, and the caller keeps one `cell_called` event naming the callee's run.
 The `a_manager_reaches_another_cell_through_farseers_mcp_face` test proves the live round trip: HTTP instruction -> Claude manager in cell zero -> farseer MCP -> a Goose manager in cell social, finishing `ok` under the caller's task.
-Verified MCP launch wiring for non-Claude managers remains open.
+`31 manager delegation reach` closed that: four transports cover every manager runner - a generated MCP config for `claude-code`, `thread/start` `config.mcp_servers` for `codex-app-server`, `session/new` `mcpServers` for the ACP runners, and farseer's own extension for `pi` and `omp` - and none of them tells a manager its own token.
 A `Worktree` cell uses the repository named by `--repo`, which defaults to the directory where `farseer serve` started because `13 harness build kit` keeps git paths out of `CellDefinition`.
 
-The operator surface is decided but not built: `28 operator surface` made the **canvas the home screen**, and anything that is not the canvas a **widget** on it.
+The operator surface is built: `28 operator surface` made the **canvas the home screen**, and anything that is not the canvas a **widget** on it.
 A widget is a **cell's face** - it renders, and the cell behind it thinks - so there is no second place agents run and no new API operation.
 A widget **displays** a cell and never **addresses** one: every AI input from every widget goes to the **top manager**, which decides where the work goes, while operator verbs on a run stay direct.
 That made cross-cell delegation a **blocking dependency** of the operator surface rather than merely open, since a widget fronting any cell but zero needs the top manager to reach outward, and it is why `delegate_to_cell` was built before the canvas.
 Widget code is authored by cell zero into `widgets/` in git and farseer never stores it, which keeps `01 cell primitive`'s no-plugin-ABI ruling intact: the loader lives in the client, and the runtime still loads nothing.
+The dev server compiles a widget on request; `bun run --cwd ui build` compiles them into `ui/dist/widgets/`, which is where the **desktop shell** serves them from - so a new widget appears immediately under `bun run dev` and after a build in the packaged app.
+`widgets/sandbox-probe/` asserts the seven boundaries from inside the frame and publishes its verdict through `saveState`, because the frame is deliberately unreadable from outside.
 
 `27 quota accounting` is wired: a runner's `rate_limit_event` becomes a `WindowObservation` keyed by the **account** declared in `runners.toml` (`farseer serve --runners`), appended to the record **on change only** with `actor: system`, and current state derives from the latest event exactly as liveness derives from a timestamp.
 `GET /v1/quota` reports `allowed` / `exhausted_until` / `unknown`, a `resets_at` countdown, farseer's own spend since the window opened, and the runners sharing that account.
-**It never reports a percentage**, and tests assert its absence: farseer's own spend is a lower bound on a window drained by sessions it cannot see, so a percentage would be most wrong exactly near exhaustion. An undeclared runner is its own account, which declines to merge rather than guessing at a shared login.
+**It never computes a percentage**, and tests assert its absence: farseer's own spend is a lower bound on a window drained by sessions it cannot see, so a derived percentage would be most wrong exactly near exhaustion. A percentage the **provider** states travels as-is, which is a different number reached a different way. An undeclared runner is its own account, which declines to merge rather than guessing at a shared login.
+`[usage] source = "omp"` in `runners.toml` reads every provider omp is signed into while nothing is running - five here, including the only Google quota farseer can see - and windows are grouped by the **provider** rather than the login, because one login spans several providers.
 
 `GET /v1/runs` lists recent runs, newest first, sharing one view builder with `GET /v1/runs/{id}` so a list row and a single read can never disagree.
 The **Runs** widget draws `05 run state model`'s verbs on that line and derives which ones to offer from lifecycle, control and the runner's steering path - a finished run offers none, and `steer` never appears for a runner that cannot take one.
@@ -57,6 +61,13 @@ A field a runner declines to report stays absent rather than being defaulted, pe
 A manager's own words reach the record as **`manager_answered`**, appended per turn rather than at the end - `10 runner inventory` observed that a Claude Code manager on live stdin answers and stays alive for the next steer, so holding the text until the run finished would mean the operator hears nothing until they close the session they are talking to.
 **`run_finished`** is `05 run state model`'s lifecycle kind, which nothing emitted until now; it carries outcome, text, cost and tokens, and a run with no report quotes its error rather than inventing an apology in the manager's voice.
 Together they are what makes `16 local api surface`'s "the answer arrives on the event stream" true, and the **Conversation** widget is built from them.
+
+`40 work model and session explorer` is wired end to end: conversations group durable tasks, each instruction creates one task and one root run, and reruns, rescopes, continuations, delegations, and cell calls retain explicit parent edges.
+Task transitions are validated in the store and retain actor, reason, and timestamp; project and global boards are projections over the same rows.
+A run may report several harness-owned session identifiers with their provider kind, and transcript custody is explicitly `reference`, `copy`, or `copy-plus-index`.
+`SessionInfo.log_pointer` carries a runner-reported transcript pointer when one exists; every currently captured runner shape omits it, so the stored value stays absent rather than being derived from private runner directories.
+Copied raw transcript bytes live outside SQLite; only scrubbed derived text is indexed, and similarity edges carry their projection metadata.
+The version-eight canvas defaults to Conversation, Work, Fleet, and Capacity, while Settings is a top-bar popover and narrower diagnostic widgets remain optional.
 
 The canvas reads the record live: `src/stream.ts` follows `/v1/stream` and the **Activity** widget renders it, so an instruction the composer fires has somewhere to land.
 It parses SSE by hand rather than using `EventSource`, because farseer puts the **event kind** in the `event:` field and `EventSource.onmessage` fires only for unnamed events - it would silently receive nothing.
@@ -124,13 +135,18 @@ Two platform facts the spikes established the hard way:
 cargo test --workspace
 ```
 
-The canvas has its own check, and it is a typecheck rather than a test suite - there is nothing there yet whose behaviour a test would pin:
+The canvas typechecks and has focused behavior tests for its persisted layout contract:
+
+```bash
+bun run --cwd ui test
+```
 
 ```bash
 bun run --cwd ui check
 ```
 
 `cargo clippy --workspace --all-targets` is expected to be silent, and `cargo fmt --all` is applied before every commit.
+`.github/workflows/check.yml` runs both on `windows-latest` with `RUSTFLAGS: -D warnings`, so a warning fails the build rather than accumulating.
 
 Ten tests in `farseer-api` are `#[ignore]`d: seven spawn a real headless `claude` process, one spawns Goose, and the full manager-loop and cross-cell tests spawn both.
 The "a one-word prompt cost $0.32 loading plugins" finding means the Claude tests are real minutes and real cost, not a hang.
@@ -173,6 +189,6 @@ Recorded in [10 runner inventory](.scratch/farseer/issues/10-runner-inventory.md
 - **A runner inherits the operator's configuration directory** unless its adapter prevents it. A one-word prompt cost $0.32 loading plugins nobody granted it.
 - **cursor-agent's own invocation and terminal shape**, probed 2026-08-24 against the real, installed `cursor-agent` 2026.08.11-e8db854 and cited in [`cursor_agent.rs`](crates/farseer-runner/src/cursor_agent.rs)'s doc comment: `--print --output-format stream-json --trust`, `is_error` on the terminal `result` event (not `subtype`, same authority order `claude_code.rs` found), and `usage`'s four token fields (`inputTokens`/`outputTokens`/`cacheReadTokens`/`cacheWriteTokens`) - no cost in currency, matching `10`'s finding that only Claude Code reports one.
 - **goose's own invocation and terminal shape**, probed 2026-08-24 against the real, installed `goose` 1.47.0 and cited in [`goose.rs`](crates/farseer-runner/src/goose.rs)'s doc comment: `run --no-session -q --output-format stream-json -t "<goal>"`, no fresh-workspace trust gate (verified in a fresh `git init` directory), terminal `complete` line with `total_tokens` and `cost_usd` but no success/failure field at all. This machine's configured goose provider (`chatgpt_codex`) delegates through the already-authenticated `codex` CLI, so the probe spent no new credential.
-- **`pi` (badlogic/pi-mono, `~/.bun/bin/pi` 0.84.2) is installed but has no ready provider on this machine** - `pi auth check --provider google --json` answers `credentials_not_configured`, and its default provider is `google`. Wiring it as a fifth runner needs an API key configured first (`pi auth`, or one of its many `*_API_KEY` env vars) - that is a credential decision for the operator, not one this session makes unilaterally, so `pi` stays unimplemented pending that choice.
+- **`pi` (badlogic/pi-mono) is wired and is what `cells/zero.toml` runs today**, with `omp` beside it on the same adapter. The credential question that once blocked it was the operator's to answer and they answered it. What it still reports is an **API list price against a subscription**, so every surface labels its cost `at list price, not billed` rather than adding it to anything.
 
 What a runner can reach is **observed, never advertised**. Codex CLI accepted `--sandbox read-only` and created the file anyway.

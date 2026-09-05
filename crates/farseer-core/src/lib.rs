@@ -13,18 +13,23 @@ pub mod quota;
 pub mod run;
 pub mod runners;
 pub mod scrub;
+pub mod work;
 
 pub use call::CellCall;
 pub use cell::{
     Advisory, CellDefinition, LoadError, Manager, RosterEntry, ValidationError, ValidationReport,
 };
 pub use event::{Actor, Event, EventKind, MemoryTier, NewEvent};
-pub use ids::{CallId, CellId, EventId, MemoryId, RunId, Seq, TaskId};
-pub use policy::{Budget, BudgetError, BudgetStack, Irreversibility, Policy, Spend};
+pub use ids::{CallId, CellId, ConversationId, EventId, MemoryId, RunId, Seq, TaskId};
+pub use policy::{Budget, BudgetError, BudgetStack, Irreversibility, Policy, Spend, ToolLevel};
 pub use quota::{Availability, WindowObservation};
 pub use run::{
     ActivityClock, Control, Lifecycle, Liveness, LivenessThresholds, ManagerVerb, Outcome, Pause,
     WorkerContract, WorkerContractSpec, WorkspaceState, WorkspaceStrategy,
 };
-pub use runners::{RunnerConfig, RunnerEntry};
+pub use runners::{A2aConfig, A2aPeer, RunnerConfig, RunnerEntry};
 pub use scrub::scrub;
+pub use work::{
+    Conversation, HarnessSession, Task, TaskState, TaskTransition, TranscriptCustody,
+    UnknownTaskState, UnknownTranscriptCustody,
+};

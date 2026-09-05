@@ -243,3 +243,17 @@ It is now **`steer_frame`**, and the surrounding prose says **frame**.
 `frame` is not a new noun for anything this glossary names.
 It is the wire-level term for one stream-json line, which is the layer it describes: a `worker contract` is what the run is allowed to do, and a frame is one line on stdin.
 Where the retired sense was the contract one - `run.rs`'s "steering moves within the ..." - the replacement is `worker contract`, not `frame`.
+
+## Widened by 40
+
+`40 Work model and session explorer` adds one noun and narrows three related terms.
+
+**Conversation** is the durable operator-visible thread that groups tasks.
+It belongs to farseer and is distinct from a harness-owned **session**.
+
+**Task** remains the operator's whole request and belongs to exactly one conversation.
+**Run** remains one worker contract's execution and may name a parent run.
+**Project** remains a filesystem-discovered directory under an authorized root and never becomes a durable `ProjectId`.
+
+The explorer is a widget face rather than a domain noun.
+Its topology edges are runtime observations and its similarity edges are derived projections.

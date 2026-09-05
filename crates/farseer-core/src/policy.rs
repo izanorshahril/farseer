@@ -11,6 +11,70 @@
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 
+/// How much of a runner's own tool set a run gets.
+///
+/// `36 tool grant enforcement` found that farseer recorded `tool_grants` on
+/// every contract and handed them to no runner - a control that reads as
+/// enforced in the cell definition, the contract and the record, and was inert
+/// in all three.
+///
+/// **This is a second axis, not the same one.** A roster's [`crate::RosterEntry::Tool`]
+/// names a *cell-level* capability - `post`, `draft-file`, `cargo-test` - which
+/// is a thing the cell may do. This names what the **runner** hands the model.
+/// Conflating them was the mistake that kept the gap open: `post` has no pi tool
+/// name and never will.
+///
+/// Three levels because `12 autonomy and deny list` settled the shape: without a sandbox,
+/// **grant lists beat deny lists**, and **if shell is granted, everything is
+/// granted**. A fourth level below `Read` would be a run that cannot look at
+/// anything, which is not a run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolLevel {
+    /// Look, do not touch. Reading, listing, searching.
+    Read,
+    /// `Read`, plus writing files inside the workspace - which `12 autonomy and deny list` already
+    /// made the autonomy boundary, because a worktree delete takes it all back.
+    Edit,
+    /// Everything the runner ships with.
+    ///
+    /// Named `Shell` rather than `All` because that is the honest description:
+    /// `12 autonomy and deny list`'s rule is that granting a shell grants everything, so a
+    /// level that includes `bash` cannot pretend to exclude anything else.
+    Shell,
+}
+
+impl ToolLevel {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Read => "read",
+            Self::Edit => "edit",
+            Self::Shell => "shell",
+        }
+    }
+
+    pub fn parse(level: &str) -> Option<Self> {
+        match level {
+            "read" => Some(Self::Read),
+            "edit" => Some(Self::Edit),
+            "shell" => Some(Self::Shell),
+            _ => None,
+        }
+    }
+}
+
+impl Default for ToolLevel {
+    /// **Everything, which is what farseer has always done** - now said out loud
+    /// instead of happening because nothing was passed.
+    ///
+    /// A stricter default would be safer and would also silently change what
+    /// every existing cell can do, which is `36`'s own complaint pointed the
+    /// other way. A cell opts down on purpose.
+    fn default() -> Self {
+        Self::Shell
+    }
+}
+
 /// How hard a tool call is to take back. `12 autonomy and deny list` chose three levels: two would
 /// collapse "embarrassing but fixable" with "the money is gone", and a spectrum
 /// would be unfalsifiable.

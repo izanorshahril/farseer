@@ -18,13 +18,129 @@ use serde::{Deserialize, Serialize};
 /// accounting, not a precondition for running anything.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RunnerConfig {
+    /// Where farseer reads subscription windows while nothing is running.
+    ///
+    /// **Its own section, because it is not a runner setting.** It used to be
+    /// `usage_poll = true` under `[omp]`, which said "poll the runner omp" - but
+    /// omp reports five providers here and farseer launches one of them. Cursor,
+    /// xAI and Anthropic windows were reachable and unaskable, because the knob
+    /// that turned the read on was filed under a runner the operator may never
+    /// use for work.
+    #[serde(default)]
+    pub usage: UsageConfig,
+    /// The inbound A2A endpoint, per `06 cell transport` section 2.
+    ///
+    /// **Its own section and off unless written.** Turning it on is the moment
+    /// the Agent Card becomes a public commitment that is hard to walk back, so
+    /// it is a deliberate act rather than a default nobody read.
+    #[serde(default)]
+    pub a2a: A2aConfig,
     #[serde(default, flatten)]
     pub runners: BTreeMap<String, RunnerEntry>,
 }
 
+/// Where the idle-time window reading comes from.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct UsageConfig {
+    /// `"omp"` shells out to `omp usage --json`; absent or `"off"` reads
+    /// nothing while idle, which stays the default - farseer launching another
+    /// vendor's binary is a thing an operator asks for, per `13 harness build
+    /// kit`.
+    #[serde(default)]
+    pub source: Option<String>,
+}
+
+/// Who may call farseer from outside, and as what.
+///
+/// `06 cell transport` section 2: local cells never traverse this - they take
+/// the in-process path - so the endpoint serves foreign callers exclusively and
+/// is off until an operator writes a peer.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct A2aConfig {
+    /// What the Agent Card calls this farseer. `21 A2A conformance` section 4
+    /// requires a name, and an unnamed agent on somebody else's registry is
+    /// worse than an opinionated default.
+    #[serde(default)]
+    pub name: Option<String>,
+    /// Which cells the card advertises, and the only ones a peer may address.
+    ///
+    /// Named rather than "every cell", because the card is public and read
+    /// before any token is presented: the fleet is not something to disclose by
+    /// omission.
+    #[serde(default)]
+    pub expose: Vec<String>,
+    /// One entry per caller. `06` chose a token **per peer** rather than one
+    /// global key, so revocation is per peer, and each is bound to the cell it
+    /// speaks as - which is where `from_cell` comes from, derived from auth
+    /// rather than asserted by the caller.
+    #[serde(default)]
+    pub peer: Vec<A2aPeer>,
+}
+
+impl A2aConfig {
+    /// The endpoint answers only when a peer exists. A card with no peer is an
+    /// advertisement for a door nobody can open.
+    pub fn is_on(&self) -> bool {
+        !self.peer.is_empty()
+    }
+
+    /// Which cell a bearer speaks as, if any.
+    ///
+    /// Compared in constant time, like the operator token: a peer token is a
+    /// credential, and a comparison that returns early leaks its prefix.
+    pub fn peer_for(&self, token: &str) -> Option<&A2aPeer> {
+        let mut found = None;
+        for peer in &self.peer {
+            let expected = peer.token.as_bytes();
+            let got = token.as_bytes();
+            let mut diff = (expected.len() ^ got.len()) as u8;
+            for i in 0..expected.len().max(got.len()) {
+                diff |= expected.get(i).copied().unwrap_or(0) ^ got.get(i).copied().unwrap_or(0);
+            }
+            if diff == 0 {
+                found = Some(peer);
+            }
+        }
+        found
+    }
+}
+
+/// One foreign caller.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct A2aPeer {
+    /// What to call this caller in the record. Not a secret and not an
+    /// identity claim - the token is the identity.
+    pub name: String,
+    pub token: String,
+    /// The cell this peer addresses. One cell per peer, so a token that leaks
+    /// reaches exactly what it was issued for.
+    pub cell: String,
+}
+
+/// A source farseer knows how to read windows from while nothing is running.
+///
+/// Named rather than free text so a surface can offer the list and the runtime
+/// can refuse anything else: `13 harness build kit`'s menu, applied to a config
+/// value instead of a runner.
+pub const USAGE_SOURCES: [&str; 1] = ["omp"];
+
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RunnerEntry {
+    /// Which **provider** this runner's account is, in the usage source's own
+    /// id - `openai-codex`, `anthropic`.
+    ///
+    /// Declared, never inferred, for the same reason [`Self::account`] is: the
+    /// operator named their account `chatgpt` and omp calls the same
+    /// subscription `openai-codex`, and nothing farseer can observe joins those
+    /// two strings. Without the declaration the widget showed one Codex
+    /// subscription twice - once from the record and once from the poll - with
+    /// two different names and two different readings of the same window.
+    #[serde(default)]
+    pub provider: Option<String>,
     /// Runners sharing this string share one subscription window.
     ///
     /// `26 routing policy`'s price table belongs beside this when `26` is built.
@@ -45,6 +161,37 @@ pub struct RunnerEntry {
     /// is why this is config rather than a constant.
     #[serde(default)]
     pub model: Option<String>,
+    /// What a million tokens costs on this runner, in USD micros.
+    ///
+    /// `26 routing policy`'s price table, which that ticket placed here rather
+    /// than in a cell definition: pricing is per runner and machine-wide, so
+    /// putting it in the definition would duplicate it into every cell and
+    /// reopen `08 generalization test` for no gain.
+    ///
+    /// **Absent means farseer prices nothing**, which is the honest default:
+    /// `10 runner inventory` found only some runners report currency at all,
+    /// and a made-up figure in the record is worse than a blank one because an
+    /// operator would plan around it. A run whose cost is derived from this
+    /// carries `cost_estimated` beside it, per `26` - a routing decision made
+    /// on a farseer estimate must be distinguishable from one made on a
+    /// reported figure, or a mispriced table becomes invisible.
+    ///
+    /// One blended rate rather than input and output separately, because that
+    /// is the granularity farseer can actually observe: pi and omp report a
+    /// total token count and no split.
+    #[serde(default)]
+    pub usd_micros_per_mtok: Option<i64>,
+    /// Whether farseer may run this runner's own usage command on a timer to
+    /// read subscription windows it could not otherwise see.
+    ///
+    /// **Off unless the operator says so.** `33 google quota` found `omp usage
+    /// --json` reports every account it is logged into - including a Google
+    /// quota nothing else on this machine exposes - which is worth having and is
+    /// still farseer launching somebody else's binary on its own initiative.
+    /// `13 harness build kit` made the inventory a menu an author picks from,
+    /// and a poll nobody chose is the opposite of that.
+    #[serde(default)]
+    pub usage_poll: bool,
     /// How hard the runner should think: `low`, `medium`, `high`, `xhigh` on
     /// this machine, in the runner's own vocabulary rather than a farseer one.
     ///
@@ -95,6 +242,53 @@ impl RunnerConfig {
     /// `27 quota accounting` section 3: **the correct key for accounting and the
     /// natural key for display are different**, and that is fine as long as it
     /// is deliberate.
+    /// What the operator says a million tokens costs on this runner.
+    ///
+    /// Absent for every runner until somebody writes one down - see
+    /// [`RunnerEntry::usd_micros_per_mtok`].
+    pub fn price_for(&self, runner: &str) -> Option<i64> {
+        self.runners
+            .get(runner)
+            .and_then(|entry| entry.usd_micros_per_mtok)
+    }
+
+    /// Whether the operator asked farseer to poll this runner for usage.
+    ///
+    /// Two spellings, one answer: `[usage] source = "omp"` is the current one,
+    /// and `usage_poll = true` under the runner is the older one this kept
+    /// working rather than failing a file somebody already wrote.
+    pub fn polls_usage(&self, runner: &str) -> bool {
+        self.usage.source.as_deref() == Some(runner)
+            || self
+                .runners
+                .get(runner)
+                .is_some_and(|entry| entry.usage_poll)
+    }
+
+    /// Which provider an **account** belongs to, when the operator said.
+    ///
+    /// Keyed by account rather than by runner because that is how a window is
+    /// keyed: `27 quota accounting` merges runners onto an account, and this is
+    /// the next join outwards - the account onto the provider a usage source
+    /// reports it under.
+    pub fn provider_for_account(&self, account: &str) -> Option<&str> {
+        self.runners
+            .values()
+            .find(|entry| entry.account.as_deref() == Some(account) && entry.provider.is_some())
+            .and_then(|entry| entry.provider.as_deref())
+    }
+
+    /// The source farseer will read windows from while idle, if any.
+    ///
+    /// An unknown name reads as **off** rather than as an error: a typo in a
+    /// config file should not stop farseer starting, and the surface lists the
+    /// names it accepts.
+    pub fn usage_source(&self) -> Option<&'static str> {
+        USAGE_SOURCES
+            .into_iter()
+            .find(|source| self.polls_usage(source))
+    }
+
     pub fn runners_on(&self, account: &str) -> Vec<String> {
         let declared: Vec<String> = self
             .runners
@@ -124,6 +318,34 @@ account = "anthropic-max"
 [codex]
 account = "openai-plus"
 "#;
+
+    /// Off unless the operator wrote it down. Starting farseer used to launch
+    /// `omp` on its own initiative, which put a console window on the operator's
+    /// screen and took the desktop shell down with it when they closed it.
+    #[test]
+    fn a_usage_poll_happens_only_where_an_operator_asked_for_one() {
+        let config = RunnerConfig::load(
+            "[omp]
+usage_poll = true
+
+[pi]
+account = \"x\"
+",
+        )
+        .expect("parses");
+        assert!(config.polls_usage("omp"));
+        assert!(!config.polls_usage("pi"), "declared, but not for this");
+        assert!(
+            !config.polls_usage("goose"),
+            "undeclared runners poll nothing"
+        );
+        assert!(
+            !RunnerConfig::load("")
+                .expect("empty parses")
+                .polls_usage("omp"),
+            "an absent config polls nothing at all"
+        );
+    }
 
     #[test]
     fn two_runners_declaring_one_account_share_one_window() {

@@ -119,6 +119,7 @@ mod tests {
             workspace: WorkspaceStrategy::Worktree,
             runner: "claude-code".into(),
             tool_grants: vec![],
+            tool_level: Default::default(),
             autonomy_ceiling: Irreversibility::Reversible,
             budget: Budget::default(),
             definition_of_done: "".into(),

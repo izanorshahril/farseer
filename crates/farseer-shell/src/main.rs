@@ -10,11 +10,14 @@
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod geometry;
 mod runtime;
 mod serve;
 mod settings;
+mod tray;
 
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 
 fn main() {
     if let Err(error) = run() {
@@ -44,7 +47,7 @@ fn run() -> anyhow::Result<()> {
             let binary = runtime::sidecar_path().ok_or_else(|| {
                 anyhow::anyhow!("no farseer binary beside this executable, and none running")
             })?;
-            let owned = runtime::spawn(&binary, &repo_relative("cells"), &repo_root())?;
+            let owned = runtime::spawn(&binary, &cells_dir(), &repo_root())?;
             println!("farseer-shell: started farseer on {}", owned.runtime.port);
             AttachedRuntime {
                 port: owned.runtime.port,
@@ -59,19 +62,40 @@ fn run() -> anyhow::Result<()> {
         .build()?;
     let origin = tokio.block_on(serve::start(
         canvas,
-        repo_relative("cells"),
+        cells_dir(),
         attached.port,
         attached.token.clone(),
     ))?;
     println!("farseer-shell: canvas on {origin}");
 
     let url = tauri::WebviewUrl::External(origin.parse()?);
+    let (tray_port, tray_token) = (attached.port, attached.token.clone());
+
+    // Where the window was last time, from the same store the canvas keeps its
+    // widget order in. Read before the window exists, so it opens in the right
+    // place rather than appearing and then jumping.
+    let farseer = format!("http://127.0.0.1:{}", attached.port);
+    let restored = tokio.block_on(geometry::load(&farseer, &attached.token));
+    // Shared with the window's event handler, which needs the last **restored**
+    // size to answer what a maximized window is: maximizing overwrites the size
+    // with the screen's, and un-maximizing has to give back the operator's.
+    let held = Arc::new(Mutex::new(restored));
+
     tauri::Builder::default()
         .setup(move |app| {
-            tauri::WebviewWindowBuilder::new(app, "canvas", url.clone())
+            let window = tauri::WebviewWindowBuilder::new(app, "canvas", url.clone())
                 .title("farseer")
-                .inner_size(1280.0, 820.0)
+                .inner_size(restored.width, restored.height)
                 .build()?;
+            geometry::apply(&window, restored);
+            watch_geometry(&window, farseer.clone(), tray_token.clone(), held.clone());
+            // The tray asks the daemon directly rather than the canvas origin:
+            // it is a second reader of one surface, not a second surface.
+            tray::install(
+                app.handle(),
+                format!("http://127.0.0.1:{tray_port}"),
+                tray_token.clone(),
+            )?;
             Ok(())
         })
         .run(tauri::generate_context!())?;
@@ -81,6 +105,67 @@ fn run() -> anyhow::Result<()> {
     drop(attached.owned);
     drop(tokio);
     Ok(())
+}
+
+/// How long to wait after a window event before believing what the window says.
+///
+/// **Not a debounce for write volume; a wait for the truth.** Measured on
+/// Windows: maximizing emits `Resized` with the screen's dimensions *before*
+/// `is_maximized()` starts answering `true`, so reading at the instant of the
+/// event records the screen as the size the operator chose. It then reopens
+/// maximized - correct - and un-maximizes to the screen size, which is the bug
+/// wearing the fix's clothes.
+///
+/// Coalescing a drag is the incidental benefit, not the reason.
+const SETTLE: std::time::Duration = std::time::Duration::from_millis(250);
+
+/// Keep the store in step with the window.
+///
+/// **Saved on move and resize rather than only on close**, because a shell that
+/// records its geometry only on a clean exit records nothing at all the one time
+/// it matters - a crash, a forced quit, a machine that slept and did not wake.
+fn watch_geometry<R: tauri::Runtime>(
+    window: &tauri::WebviewWindow<R>,
+    farseer: String,
+    token: String,
+    held: Arc<Mutex<geometry::Geometry>>,
+) {
+    let handle = window.clone();
+    // Which settle is the current one. A drag emits events at frame rate, and
+    // every one of them starts a wait; only the last still matters by the time
+    // the waits expire, so the earlier ones stand down rather than each writing
+    // a frame of the drag.
+    let generation = Arc::new(std::sync::atomic::AtomicU64::new(0));
+    window.on_window_event(move |event| {
+        use std::sync::atomic::Ordering;
+        use tauri::WindowEvent;
+        if !matches!(
+            event,
+            WindowEvent::Resized(_) | WindowEvent::Moved(_) | WindowEvent::CloseRequested { .. }
+        ) {
+            return;
+        }
+        let mine = generation.fetch_add(1, Ordering::SeqCst) + 1;
+        let (handle, farseer, token) = (handle.clone(), farseer.clone(), token.clone());
+        let (held, generation) = (held.clone(), generation.clone());
+        tauri::async_runtime::spawn(async move {
+            tokio::time::sleep(SETTLE).await;
+            if generation.load(Ordering::SeqCst) != mine {
+                return;
+            }
+            let last = *held.lock().unwrap_or_else(|e| e.into_inner());
+            // `None` while minimized: Windows reports a minimized window at
+            // -32000, and storing that is how an app comes back invisible.
+            let Some(now) = geometry::current(&handle, last) else {
+                return;
+            };
+            if now == last {
+                return;
+            }
+            *held.lock().unwrap_or_else(|e| e.into_inner()) = now;
+            geometry::save(farseer, token, now).await;
+        });
+    });
 }
 
 struct AttachedRuntime {
@@ -95,4 +180,44 @@ fn repo_root() -> PathBuf {
 
 fn repo_relative(name: &str) -> PathBuf {
     repo_root().join(name)
+}
+
+/// Where the cell definitions are, for a shell that may not be in a repository.
+///
+/// **An installed farseer found none at all.** The shell asked for `cells/`
+/// relative to the working directory, which is the repository root during
+/// development and the installation directory from a Start Menu shortcut. The
+/// application opened, the canvas rendered, and there was no top manager to
+/// talk to - a fleet console with an empty fleet, saying nothing about why.
+///
+/// Three places, in the order that makes each one right:
+///
+/// 1. **The working directory**, which is the repository when farseer is run
+///    from one and the project when an operator opens it in theirs.
+/// 2. **Beside the executable**, which is where an installer puts the
+///    definitions it shipped.
+/// 3. **The operator's own data directory**, beside the record, which is where
+///    definitions they wrote live once farseer is installed rather than cloned.
+///
+/// Nothing is created here and nothing is copied. `01 cell primitive` made a
+/// definition a plain file the operator edits and `13 harness build kit` warned
+/// against farseer having opinions nobody asked for; seeding a directory with
+/// cells somebody did not write is both. An empty answer is returned as an empty
+/// answer, and the canvas says so.
+fn cells_dir() -> PathBuf {
+    let candidates = [
+        Some(repo_relative("cells")),
+        std::env::current_exe()
+            .ok()
+            .and_then(|exe| exe.parent().map(|dir| dir.join("cells"))),
+        farseer_api::runtime_file_path()
+            .parent()
+            .map(|dir| dir.join("cells")),
+    ];
+    for candidate in candidates.into_iter().flatten() {
+        if candidate.is_dir() {
+            return candidate;
+        }
+    }
+    repo_relative("cells")
 }

@@ -1,0 +1,116 @@
+# The suite, run by a machine instead of by whoever remembered.
+#
+# Everything here is a command that already existed and was only ever run by
+# hand. That was survivable while the core was the work; it stops being
+# survivable the moment attention moves to the UI, because a regression in the
+# daemon then has nobody looking at it.
+#
+# **Windows, and only Windows.** Not a preference - `rust-toolchain.toml` pins
+# `x86_64-pc-windows-msvc` as the only target, and the things this project got
+# wrong twice are Windows things: Job Objects, `CREATE_NO_WINDOW`, a console
+# whose close button reached a whole process group. A Linux runner would be
+# green for code that cannot work on the machine farseer runs on.
+name: check
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+  workflow_dispatch:
+
+# A second push supersedes the first. These jobs build Tauri; letting three
+# stale runs finish is minutes of runner time spent on commits nobody is
+# waiting for.
+concurrency:
+  group: check-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  # A warning that fails a build is a warning somebody fixes.
+  RUSTFLAGS: -D warnings
+
+jobs:
+  rust:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4.2.2
+
+      # Tauri embeds the already-built UI during the Rust shell build. Keep
+      # that resource available in this job as well as in the independent
+      # canvas job below; otherwise cargo clippy/test fail on a clean runner.
+      - uses: oven-sh/setup-bun@v2.0.2
+        with:
+          bun-version-file: ui/.bun-version
+
+      - name: Install UI dependencies
+        working-directory: ui
+        run: bun install --frozen-lockfile
+
+      - name: Build the UI assets
+        working-directory: ui
+        run: bun run build
+
+      # No toolchain is named here on purpose: `rust-toolchain.toml` pins
+      # 1.98.0 with rustfmt and clippy, and naming a version in a second place
+      # is two places that can disagree - the rule `runners.toml` already
+      # states about model and effort.
+      - name: Install the pinned toolchain
+        run: rustup show
+
+      - uses: Swatinem/rust-cache@v2.7.8
+        with:
+          # The shell links Tauri, which is most of the cold build time.
+          cache-all-crates: true
+
+      - name: Formatting
+        run: cargo fmt --all --check
+
+      # `--workspace` is not decoration. `default-members` is set to the shell
+      # so that `cargo run` opens the desktop app, which quietly narrows every
+      # bare cargo command to one crate - a footgun this repository has already
+      # shipped a stale binary through once.
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets --locked
+
+      - name: Tests
+        run: cargo test --workspace --locked
+
+      # The 27 `#[ignore]` tests need runners installed - `pi`, `omp`, `codex`,
+      # `goose`, `opencode` - and spend a real subscription. They cannot run
+      # here, and pretending otherwise by removing the attribute would turn a
+      # green suite into a lie. `capability_drift.rs` is the exception in
+      # spirit, since it only reads `--help`, but the binaries are still absent.
+      - name: Say what was not run
+        if: always()
+        run: echo "27 ignored tests need live runners on the developer's machine; see HARNESS.md."
+
+  canvas:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4.2.2
+
+      - uses: oven-sh/setup-bun@v2.0.2
+        with:
+          bun-version-file: ui/.bun-version
+
+      # `--frozen-lockfile` so a dependency cannot drift between this run and
+      # the developer's machine. Lifecycle scripts are left enabled here and
+      # only here: the runner is disposable and holds no credentials, which is
+      # the condition that makes running them acceptable at all.
+      - name: Install
+        working-directory: ui
+        run: bun install --frozen-lockfile
+
+      # `24 ui state persistence` leaves layout validation to the canvas, so
+      # its malformed-blob and snapping checks run wherever the canvas builds.
+      - name: Test the canvas
+        working-directory: ui
+        run: bun run test
+
+      # `bun run build` is `tsc --noEmit && vite build`, so this type-checks and
+      # compiles in one step. The shell reads `ui/dist` at runtime rather than
+      # embedding it, so this is genuinely independent of the Rust job.
+      - name: Build the canvas
+        working-directory: ui
+        run: bun run build

@@ -67,11 +67,38 @@ impl FarseerMcp {
         }
     }
 
+    /// Who is calling, preferring the credential the **transport** already
+    /// proved over one the model was asked to copy.
+    ///
+    /// `31 manager delegation reach` argued that a credential in a prompt is one
+    /// a model can quote, spend or leak. On 2026-08-28 a `goose-acp` manager
+    /// found a third way to get it wrong: it reached the tool and **mistyped the
+    /// 64-character token**, failing with `manager_token does not authorize this
+    /// manager run` - which reads like an authorization bug and was a
+    /// transcription error. Codex copied the same string correctly an hour
+    /// earlier, which is the point: it worked by luck of the model.
+    ///
+    /// So the bearer wins. Every transport that reaches this face already
+    /// presents one - the guard scans [`crate::AppState::manager_token_matches`]
+    /// to let the request through at all, resolving this identity a few frames
+    /// earlier and throwing it away. The arguments stay accepted and optional,
+    /// because they cost nothing and a runner that only knows how to pass them
+    /// is a runner this still serves.
     fn authorize_manager(
         &self,
-        manager_run_id: &str,
-        manager_token: &str,
+        manager_run_id: Option<&str>,
+        manager_token: Option<&str>,
+        bearer: Option<&str>,
     ) -> Result<crate::ManagerContext, McpError> {
+        if let Some(manager) = bearer.and_then(|token| self.state.manager_by_token(token)) {
+            return Ok(manager);
+        }
+        let (Some(manager_run_id), Some(manager_token)) = (manager_run_id, manager_token) else {
+            return Err(McpError::invalid_params(
+                "this call carried no manager credential: farseer takes the identity from the                  request's bearer token, and neither that nor manager_run_id/manager_token                  named an active manager run",
+                None,
+            ));
+        };
         let run_id = manager_run_id
             .parse::<RunId>()
             .map_err(|_| McpError::invalid_params("manager_run_id must be a UUID", None))?;
@@ -89,22 +116,42 @@ impl FarseerMcp {
         }
         Ok(manager)
     }
+
+    /// The bearer this MCP call arrived with, if any.
+    ///
+    /// rmcp injects the HTTP `Parts` into the request's extensions, which is the
+    /// only route from the transport to a tool body - see rmcp 3.1.4's own
+    /// documentation on `ctx.extensions`.
+    fn bearer_of(ctx: &rmcp::service::RequestContext<rmcp::RoleServer>) -> Option<String> {
+        ctx.extensions
+            .get::<axum::http::request::Parts>()?
+            .headers
+            .get(axum::http::header::AUTHORIZATION)?
+            .to_str()
+            .ok()?
+            .strip_prefix("Bearer ")
+            .map(str::to_string)
+    }
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 struct ReadMemoryArgs {
-    /// The active manager identity injected into this manager's system prompt.
-    manager_run_id: String,
-    /// The per-manager capability injected beside `manager_run_id`.
-    manager_token: String,
+    /// Optional. farseer takes the calling manager's identity from the
+    /// request's bearer token; this is accepted for a client that prefers to
+    /// state it. See `FarseerMcp::authorize_manager`.
+    manager_run_id: Option<String>,
+    /// Optional, and paired with `manager_run_id`.
+    manager_token: Option<String>,
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 struct WriteMemoryArgs {
-    /// The active manager identity injected into this manager's system prompt.
-    manager_run_id: String,
-    /// The per-manager capability injected beside `manager_run_id`.
-    manager_token: String,
+    /// Optional. farseer takes the calling manager's identity from the
+    /// request's bearer token; this is accepted for a client that prefers to
+    /// state it. See `FarseerMcp::authorize_manager`.
+    manager_run_id: Option<String>,
+    /// Optional, and paired with `manager_run_id`.
+    manager_token: Option<String>,
     body: String,
     /// `cell_local` (the default, per `25 memory lifecycle`) or `run_local`. `global` is
     /// refused here - `25 memory lifecycle` gates it on the operator, a promotion this face
@@ -120,8 +167,13 @@ impl FarseerMcp {
     fn read_memory(
         &self,
         Parameters(args): Parameters<ReadMemoryArgs>,
+        ctx: rmcp::service::RequestContext<rmcp::RoleServer>,
     ) -> Result<CallToolResult, McpError> {
-        let manager = self.authorize_manager(&args.manager_run_id, &args.manager_token)?;
+        let manager = self.authorize_manager(
+            args.manager_run_id.as_deref(),
+            args.manager_token.as_deref(),
+            Self::bearer_of(&ctx).as_deref(),
+        )?;
         // `02 record scope`: identity comes from the active manager's pinned
         // definition, never from a caller-supplied cell id that could impersonate
         // another reader and silently gain its `also_read` grants.
@@ -159,8 +211,13 @@ impl FarseerMcp {
     fn write_memory(
         &self,
         Parameters(args): Parameters<WriteMemoryArgs>,
+        ctx: rmcp::service::RequestContext<rmcp::RoleServer>,
     ) -> Result<CallToolResult, McpError> {
-        let manager = self.authorize_manager(&args.manager_run_id, &args.manager_token)?;
+        let manager = self.authorize_manager(
+            args.manager_run_id.as_deref(),
+            args.manager_token.as_deref(),
+            Self::bearer_of(&ctx).as_deref(),
+        )?;
         let tier = match args.tier.as_deref() {
             None | Some("cell_local") => MemoryTier::CellLocal,
             Some("run_local") => MemoryTier::RunLocal,
@@ -200,9 +257,12 @@ impl FarseerMcp {
     fn delegate_to_worker(
         &self,
         Parameters(args): Parameters<DelegateToWorkerArgs>,
+        ctx: rmcp::service::RequestContext<rmcp::RoleServer>,
     ) -> Result<CallToolResult, McpError> {
+        let bearer = Self::bearer_of(&ctx);
         Ok(CallToolResult::success(vec![ContentBlock::text(
-            self.delegate_to_worker_json(args)?.to_string(),
+            self.delegate_to_worker_json(args, bearer.as_deref())?
+                .to_string(),
         )]))
     }
 
@@ -212,9 +272,12 @@ impl FarseerMcp {
     fn delegate_to_cell(
         &self,
         Parameters(args): Parameters<DelegateToCellArgs>,
+        ctx: rmcp::service::RequestContext<rmcp::RoleServer>,
     ) -> Result<CallToolResult, McpError> {
+        let bearer = Self::bearer_of(&ctx);
         Ok(CallToolResult::success(vec![ContentBlock::text(
-            self.delegate_to_cell_json(args)?.to_string(),
+            self.delegate_to_cell_json(args, bearer.as_deref())?
+                .to_string(),
         )]))
     }
 
@@ -228,10 +291,16 @@ impl FarseerMcp {
         // checked by the caller - this function has the contract but not the
         // roster entry it came from.
         skill_dirs: &[std::path::PathBuf],
+        // The manager's project, inherited: `39 what an installed farseer
+        // points at` makes the project a per-run fact, and a worker that landed
+        // in a different repository from the manager that delegated it would be
+        // a second answer to where the work happened.
+        project: Option<&std::path::Path>,
     ) -> Result<farseer_manager::RunReport, McpError> {
         let run_id = contract.run_id;
         let (cwd, repo_for_teardown) =
-            create_workspace(&self.state, contract.workspace, run_id).map_err(api_error)?;
+            create_workspace(&self.state, contract.workspace, run_id, project)
+                .map_err(api_error)?;
 
         let result = execute_run(
             &self.state,
@@ -243,16 +312,29 @@ impl FarseerMcp {
                 manager_cell: Some(pinned_cell.clone()),
                 claude_mcp_config: None,
                 append_system_prompt: None,
-        runner_env: Vec::new(),
-        extensions: Vec::new(),
+                runner_env: Vec::new(),
+                mcp: None,
+                extensions: Vec::new(),
+                project: project.map(std::path::Path::to_path_buf),
                 account: Some(self.state.runner_config().account_for(&contract.runner)),
+                usd_micros_per_mtok: self.state.runner_config().price_for(&contract.runner),
                 skills: skill_dirs.to_vec(),
                 // What the operator pinned, or nothing at all. `30 codex app
                 // server`: farseer passes a model or an effort only when a
                 // person wrote one down, so an unpinned runner keeps whatever
                 // its own config says.
-                model: self.state.runner_config().launch_of(&contract.runner).0.map(str::to_string),
-                effort: self.state.runner_config().launch_of(&contract.runner).1.map(str::to_string),
+                model: self
+                    .state
+                    .runner_config()
+                    .launch_of(&contract.runner)
+                    .0
+                    .map(str::to_string),
+                effort: self
+                    .state
+                    .runner_config()
+                    .launch_of(&contract.runner)
+                    .1
+                    .map(str::to_string),
             },
             Some(cancel_requested),
         );
@@ -281,8 +363,13 @@ impl FarseerMcp {
     pub(crate) fn delegate_to_worker_json(
         &self,
         args: DelegateToWorkerArgs,
+        bearer: Option<&str>,
     ) -> Result<serde_json::Value, McpError> {
-        let manager = self.authorize_manager(&args.manager_run_id, &args.manager_token)?;
+        let manager = self.authorize_manager(
+            args.manager_run_id.as_deref(),
+            args.manager_token.as_deref(),
+            bearer,
+        )?;
         if manager
             .cancel_requested
             .load(std::sync::atomic::Ordering::Acquire)
@@ -295,22 +382,22 @@ impl FarseerMcp {
         if args.goal.trim().is_empty() {
             return Err(McpError::invalid_params("goal must not be empty", None));
         }
-        let (runner, roster_budget, skill_names) = manager
+        let (candidates, roster_budget, skill_names, tool_level) = manager
             .cell
             .roster
             .iter()
             .find_map(|entry| match entry {
                 RosterEntry::Worker {
                     name,
-                    runner,
+                    runners,
                     max_budget,
                     skills,
+                    tools,
                 } if *name == args.worker => {
-                    // The roster entry's own skills, not the manager's:
-                    // `22 cell addressing` made the roster the grant, and a
-                    // reviewer and a coder should not get the same instructions
-                    // by accident.
-                    Some((runner.clone(), *max_budget, skills.clone()))
+                    // The roster entry's own skills and tool level, not the
+                    // manager's: `22 cell addressing` made the roster the grant,
+                    // and a reviewer has no business holding what a coder needs.
+                    Some((runners.clone(), *max_budget, skills.clone(), *tools))
                 }
                 _ => None,
             })
@@ -323,9 +410,88 @@ impl FarseerMcp {
                     None,
                 )
             })?;
+        // `26 routing policy`: the author's order, first candidate whose window
+        // is not spent. Every runner farseer cannot see a window for reports
+        // `unknown`, which behaves as **available until proven otherwise** -
+        // most runners will never report one, so that is the permanent normal
+        // case rather than a shim.
+        let Some(runner) = crate::first_available_runner(&self.state, &candidates) else {
+            // `26 routing policy` section 3 asked for `failed` with reason
+            // `runner_exhausted`, on the precedent of `17 cell lifecycle`'s
+            // orphaned run. **This departs from that, and deliberately.**
+            //
+            // `17`'s run had started - a process existed and its outcome was
+            // genuinely unknown. Nothing starts here: no contract is sealed, no
+            // workspace is made, no process is spawned. Writing a run row would
+            // put a run in `11 analytics questions`'s denominators that never
+            // ran, to record an event that is not about a run at all.
+            //
+            // So it is an event, on the manager's own run, and the operator's
+            // question - how often did exhaustion block work - is a scan of
+            // these rather than an outcome filter over phantom rows.
+            //
+            // The consequence `26` wanted falls out for free: with no run and no
+            // rescope edge, `runner_exhausted` cannot reach rework depth, so the
+            // exclusion it asked for is true by construction rather than by a
+            // rule somebody has to remember.
+            let _ = self.state.store().append(&NewEvent::new(
+                manager.cell.cell_id.clone(),
+                manager.contract.run_id,
+                EventKind::new(EventKind::STATUS_CHANGED),
+                Actor::System,
+                now_ms(),
+                serde_json::json!({
+                    "routing": "runner_exhausted",
+                    "worker": args.worker,
+                    "candidates": candidates,
+                }),
+            ));
+            return Err(McpError::internal_error(
+                format!(
+                    "runner_exhausted: every runner for worker `{}` has a spent window ({candidates:?})",
+                    args.worker
+                ),
+                None,
+            ));
+        };
+        if candidates.first() != Some(&runner) {
+            // `26` section 4: **a reorder emits an event.** Without it,
+            // `11 analytics questions`'s cost-by-runner cannot explain why a
+            // non-preferred runner ran.
+            let _ = self.state.store().append(&NewEvent::new(
+                manager.cell.cell_id.clone(),
+                manager.contract.run_id,
+                EventKind::new(EventKind::STATUS_CHANGED),
+                Actor::System,
+                now_ms(),
+                serde_json::json!({
+                    // Which of `26 routing policy`'s two pressures moved it is
+                    // not distinguishable here, and saying so is better than
+                    // naming one: `11 analytics questions` needs to know a
+                    // reorder happened and what it chose, and a confident wrong
+                    // reason would be worse than an honest vague one.
+                    "routing": "preferred_runner_unavailable",
+                    "worker": args.worker,
+                    "preferred": candidates.first(),
+                    "chosen": runner,
+                }),
+            ));
+        }
         // Resolved here, where the roster entry is in hand: a worker that names
         // a skill farseer cannot find is a refusal at delegation time rather
         // than a worse answer later for a reason nobody can see.
+        if tool_level != farseer_core::ToolLevel::Shell
+            && !farseer_runner::pi::takes_tool_allowlist(&runner)
+        {
+            return Err(McpError::invalid_params(
+                format!(
+                    "worker `{}` runs on `{runner}`, which farseer cannot hold to a tool                      allowlist, and its roster entry asks for `{}`",
+                    args.worker,
+                    tool_level.as_str()
+                ),
+                None,
+            ));
+        }
         if !skill_names.is_empty() && !crate::runner_loads_skills(&runner) {
             return Err(McpError::invalid_params(
                 format!(
@@ -340,7 +506,10 @@ impl FarseerMcp {
             .iter()
             .map(|name| crate::skill_dir(self.state.repo_root(), name))
             .collect::<Vec<_>>();
-        if let Some(missing) = skill_dirs.iter().find(|dir| !dir.join("SKILL.md").is_file()) {
+        if let Some(missing) = skill_dirs
+            .iter()
+            .find(|dir| !dir.join("SKILL.md").is_file())
+        {
             return Err(McpError::invalid_params(
                 format!("skill `{}` is not in this repository", missing.display()),
                 None,
@@ -359,6 +528,12 @@ impl FarseerMcp {
                     None,
                 )
             })?;
+        // Pause is "the manager starts no new runs", so it is checked here as
+        // well as on the operator's own instruction - `17 cell lifecycle` made
+        // it a policy flag, and a flag nothing reads is a switch that does
+        // nothing.
+        crate::lifecycle::ensure_accepts_work(&self.state, &manager.cell.cell_id)
+            .map_err(api_error)?;
         let mut remaining_budget = manager
             .remaining_budget
             .lock()
@@ -390,6 +565,10 @@ impl FarseerMcp {
             ));
         }
         let run_id = RunId::new();
+        self.state
+            .store()
+            .record_run_parent(run_id, manager.contract.run_id, "delegation")
+            .map_err(store_error)?;
         manager
             .child_runs
             .lock()
@@ -407,6 +586,7 @@ impl FarseerMcp {
             workspace: manager.cell.workspace_strategy,
             runner,
             tool_grants: manager.contract.tool_grants.clone(),
+            tool_level,
             autonomy_ceiling: manager.contract.autonomy_ceiling,
             budget: effective_budget,
             definition_of_done: args.definition_of_done.unwrap_or_default(),
@@ -423,6 +603,7 @@ impl FarseerMcp {
                 &manager.cell,
                 &manager.cancel_requested,
                 &skill_dirs,
+                manager.project.as_deref(),
             )
         }) {
             Ok(report) => report,
@@ -464,8 +645,13 @@ impl FarseerMcp {
     pub(crate) fn delegate_to_cell_json(
         &self,
         args: DelegateToCellArgs,
+        bearer: Option<&str>,
     ) -> Result<serde_json::Value, McpError> {
-        let manager = self.authorize_manager(&args.manager_run_id, &args.manager_token)?;
+        let manager = self.authorize_manager(
+            args.manager_run_id.as_deref(),
+            args.manager_token.as_deref(),
+            bearer,
+        )?;
         if manager
             .cancel_requested
             .load(std::sync::atomic::Ordering::Acquire)
@@ -524,6 +710,10 @@ impl FarseerMcp {
                 None,
             )
         })?;
+        // `17 cell lifecycle`: a paused or archived callee starts no new run,
+        // and a caller finding that out is better than a run that begins in a
+        // cell the operator has stopped.
+        crate::lifecycle::ensure_accepts_work(&self.state, &to_cell).map_err(api_error)?;
 
         // `22 cell addressing` section 4 caps the grant at the roster entry, `06 cell
         // transport` lets a caller cap but never raise, and the callee's own
@@ -576,7 +766,14 @@ impl FarseerMcp {
         reserve(&mut remaining_budget, budget);
         drop(remaining_budget);
 
-        let run_id = match spawn_run(&self.state, contract, RunRole::Manager, callee) {
+        let run_id = match spawn_run(
+            &self.state,
+            contract,
+            RunRole::Manager,
+            callee,
+            manager.project.clone(),
+            Some(Arc::clone(&manager.child_runs)),
+        ) {
             Ok(run_id) => run_id,
             Err(error) => {
                 let mut pool = manager
@@ -587,6 +784,10 @@ impl FarseerMcp {
                 return Err(api_error(error));
             }
         };
+        self.state
+            .store()
+            .record_run_parent(run_id, manager.contract.run_id, "cell_call")
+            .map_err(store_error)?;
 
         // The caller's own record entry for the call, per `06 cell transport`
         // section 6, and the link `02 record scope` left open between a
@@ -643,10 +844,12 @@ fn api_error(e: crate::ApiError) -> McpError {
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 pub(crate) struct DelegateToWorkerArgs {
-    /// The active manager identity injected into this manager's system prompt.
-    manager_run_id: String,
-    /// The per-manager capability injected beside `manager_run_id`.
-    manager_token: String,
+    /// Optional. farseer takes the calling manager's identity from the
+    /// request's bearer token; this is accepted for a client that prefers to
+    /// state it. See `FarseerMcp::authorize_manager`.
+    manager_run_id: Option<String>,
+    /// Optional, and paired with `manager_run_id`.
+    manager_token: Option<String>,
     /// Must name a `kind = "worker"` entry in the manager's pinned roster.
     worker: String,
     goal: String,
@@ -674,10 +877,12 @@ impl From<DelegationBudgetArgs> for Budget {
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 pub(crate) struct DelegateToCellArgs {
-    /// The active manager identity injected into this manager's system prompt.
-    manager_run_id: String,
-    /// The per-manager capability injected beside `manager_run_id`.
-    manager_token: String,
+    /// Optional. farseer takes the calling manager's identity from the
+    /// request's bearer token; this is accepted for a client that prefers to
+    /// state it. See `FarseerMcp::authorize_manager`.
+    manager_run_id: Option<String>,
+    /// Optional, and paired with `manager_run_id`.
+    manager_token: Option<String>,
     /// Must name a `kind = "cell"` entry in the manager's pinned roster.
     cell: String,
     goal: String,
@@ -714,8 +919,11 @@ fn cell_call_contract(
         cell_id: callee.cell_id.clone(),
         goal: call.goal.clone(),
         workspace: callee.workspace_strategy,
-        runner: callee.manager.runner.clone(),
+        runner: callee.manager.runner().to_string(),
         tool_grants: callee.tool_grants(),
+        // The callee's own, like the runner and the grants beside it: a caller
+        // does not get to widen what the cell it is calling may touch.
+        tool_level: callee.manager.tools,
         autonomy_ceiling: call.autonomy_ceiling,
         budget: call.budget,
         definition_of_done: call.definition_of_done.clone(),

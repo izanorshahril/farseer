@@ -115,3 +115,20 @@ Raised as `18 How do comparable tools detect hangs and handle observation and ta
 ### Terms settled, for the vocabulary lock
 
 `run`, `task`, `attach`, `observed`, `taken over`, `autonomous`, `operator_intervened`, `operator_touched`.
+
+## Built, 2026-08-31
+
+`POST /v1/runs/{id}/{observe,take-over,release,heartbeat,intervene}` and `GET /v1/runs/{id}/control`, with the axis on every run view beside lifecycle and liveness.
+
+**The lease lapses on read, not on a timer.**
+Section 7 requires that detaching without releasing auto-releases, and a swept lease needs a task that a busy or restarted farseer might not run - so control is derived the way `05` derives liveness, and a lease nobody renewed is already autonomous the moment anyone asks.
+The lapse is appended to the record like any other release, because the agent getting the wheel back is the fact, whoever caused it.
+
+**`steer` and `intervene` are two verbs on purpose.**
+Both put the operator's words into a run, so both mark it `operator_touched` and append `operator_intervened`, per section 6.
+They differ in what is on the other end: a manager is a conversation the operator is having and `05` put `steer` on it as the way to talk, while a worker is executing a contract somebody else wrote - and typing into one unannounced is exactly what section 3 refused.
+So the Runs widget offers `steer` on a manager, and on a worker offers `take over` first and `intervene` only once the takeover exists.
+
+**Attach works on a finished run**, per section 1: the widget offers `observe` whatever the lifecycle, because the subscription is the event stream and replay is the same address as live.
+
+**Not built.** Cross-cell attach needs no code - the record is farseer's and the stream already filters by run - but a peer cell's workers are not attachable and there is no A2A endpoint yet to make that distinction observable.

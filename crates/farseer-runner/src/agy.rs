@@ -89,7 +89,10 @@ fn clipped(text: Option<&str>) -> Option<String> {
     if text.chars().count() <= LIMIT {
         return Some(text.to_string());
     }
-    Some(format!("{}...", text.chars().take(LIMIT).collect::<String>()))
+    Some(format!(
+        "{}...",
+        text.chars().take(LIMIT).collect::<String>()
+    ))
 }
 
 pub fn parse_line(line: &str) -> Result<Vec<RunnerSignal>, ParseError> {
@@ -109,6 +112,7 @@ pub fn parse_line(line: &str) -> Result<Vec<RunnerSignal>, ParseError> {
                 .get("conversation_id")
                 .and_then(Value::as_str)
                 .map(str::to_string),
+            log_pointer: None,
             // agy names no provider and no configured effort. The effort is
             // inside the model id, and splitting it out here would be farseer
             // parsing a vendor's naming scheme into a claim the runner never
@@ -194,6 +198,7 @@ mod tests {
             vec![RunnerSignal::Session(SessionInfo {
                 model: Some("gemini-3.7-flash-low".to_string()),
                 session_id: Some("8a55adea-9ef1".to_string()),
+                log_pointer: None,
                 provider: None,
                 // The effort is inside the model id. Splitting `-low` off it
                 // would be farseer reading a vendor's naming scheme as a claim.
@@ -295,9 +300,9 @@ mod tests {
                 "--dangerously-skip-permissions"
             ]
         );
-        assert!(build_args("say hi", Some("gemini-3.7-flash-low")).ends_with(&[
-            "--model".to_string(),
-            "gemini-3.7-flash-low".to_string()
-        ]));
+        assert!(
+            build_args("say hi", Some("gemini-3.7-flash-low"))
+                .ends_with(&["--model".to_string(), "gemini-3.7-flash-low".to_string()])
+        );
     }
 }

@@ -1,6 +1,6 @@
 # 31 manager delegation reach
 
-**Status:** open, blocking.
+**Status:** closed 2026-08-29. Four transports, every manager runner, none of them told its own token - see the notes at the foot of this ticket.
 **Found:** 2026-08-27, by reading the record of a run nobody thought was wrong.
 
 ## What happened
@@ -151,3 +151,154 @@ The MCP shape put it in the prompt, because a Claude Code manager presents its o
 - **ACP.** `goose-acp` and `opencode-acp` get the roster prompt and no reach. The client serves capabilities in ACP, and farseer currently declines `fs` and `terminal`; whether it can serve tools instead is unprobed.
 - **codex-app-server.** Its route was the one this ticket predicted - `thread/start`'s free-form `config` plus `bearer_token_env_var` - and `spawn` can now set that variable. Untried, because pi got there first and the operator runs pi.
 - **omp's own subagents next to farseer's workers.** `32 harness capability floor` left `hub` open; an omp manager can now delegate two different ways, and they do not know about each other.
+
+---
+
+## codex-app-server reaches it too, 2026-08-28
+
+Third transport, and the one this ticket predicted on closing: `thread/start`'s free-form config plus `bearer_token_env_var`.
+
+### The nesting was the whole finding
+
+`mcpServers` at the top of `params` is **accepted and silently ignored**. The thread starts, no server is launched, and nothing says so - the same failure mode `36 tool grant enforcement` found in `pi --tools nosuchtool`, from a different vendor on the same afternoon.
+
+Under `config`, in Codex's own snake_case, it starts:
+
+```
+"name":"farseerprobe","status":"starting"
+"name":"farseerprobe","status":"failed"
+"error":"MCP client for `farseerprobe` failed to start: MCP startup failed:
+         Environment variable FARSEER_MANAGER_TOKEN for MCP server 'farseerprobe' is not set"
+```
+
+A deliberately unreachable URL and a deliberately unset variable, and the error is the server **proving it read the field**. A probe that only asked "did the thread start" would have called the ignored spelling a success.
+
+The test asserts the nesting and asserts `params.mcpServers` is absent, because a test checking only that the field appears *somewhere* in the frame would pass on the shape that does nothing.
+
+### What running it corrected
+
+The first version reused pi's prompt - no credentials, because pi's extension injects them. The manager answered:
+
+```
+Unable to delegate: manager authorization token unavailable.
+```
+
+It could see the tools and had nothing to present. **An MCP client calls the tool itself**, so it must pass the two credentials the tool authorizes on; an extension route does not. Codex now shares Claude Code's wording because it shares Claude Code's transport, and the split in this ticket's prompts is by transport rather than by runner.
+
+### Proven
+
+`PERSIMMON`, relayed by a `codex-app-server` manager from a real `pi` worker (`01a048ff-3e8a`, finished ok) delegated through farseer's MCP face.
+
+### The asymmetry this leaves, and it is worth closing
+
+This ticket called the env-var route **strictly better** than the MCP shape where a manager carries its own bearer, and Codex has landed on the worse of the two: the token is in its prompt, where the model can quote it.
+
+Half of it is already better - the *transport* bearer is an env var Codex resolves in its own process, so it is not in the frame or the record. What remains is the tool's own `manager_token` argument.
+
+**The fix is to derive manager identity from the bearer the guard already validated**, making both arguments optional. That would remove the credential from Claude Code's prompt as well, which is the older instance of the same problem. Not done here.
+
+---
+
+## ACP has a channel after all, 2026-08-28
+
+### The assumption that hid it
+
+`29 harness protocol` found ACP's `fs/*` and `terminal/*` are served **by the client**, incompatible with a runner-owned worktree, so farseer declines both.
+That made it easy to conclude ACP had nothing to offer a manager, and this ticket closed saying "whether it can serve tools instead is unprobed".
+
+**It does not need to serve tools.** `session/new` takes `mcpServers`, which is the opposite arrangement: farseer names an address and the agent dials it. farseer's own comment on that field said it was empty because the MCP face "is reached by the manager's runner-native configuration" - true for Claude Code, and for an ACP runner there is no such configuration, so the field was empty for a reason that did not apply.
+
+### Probed, not read
+
+goose 1.47.0, live:
+
+```
+"agentCapabilities":{"mcpCapabilities":{"http":true,"sse":false}}
+"_meta":{"extensionResults":[{"name":"farseerprobe","success":false,
+  "error":"failed to initialize MCP client: ... error sending request for url (http://127.0.0.1:9/v1/mcp)"}]}
+```
+
+Two facts in one exchange: goose says it speaks HTTP MCP, and goose says **whether it reached what it was given**. The second is the more valuable, and farseer now records it as a `status_changed` event before anything else in the run - a manager whose channel never opened did the work itself, and the record has to say so.
+
+Offered only when `initialize` claims the capability, so an agent that never said it speaks HTTP MCP is not handed an address it may quietly ignore.
+
+### The bearer is inline here, and that split the type
+
+ACP's `HttpHeader` is a literal value, so the token is in the frame. Codex takes the **name** of an environment variable it resolves itself.
+
+One `Option<(String, String)>` carrying either would be exactly the ambiguity `14 vocabulary lock` refuses, so `McpReach` is an enum: `BearerFromEnv { url, var }` and `BearerInline { url, bearer }`. Each protocol matches the spelling it can use and neither invents the other.
+
+### What is built, and what stopped
+
+The channel works. goose connected to farseer's MCP face, found `delegate_to_worker`, and called it. It then failed on the credential:
+
+```
+manager_answered {'text': 'Delegation failed: manager_token does not authorize this manager run.'}
+```
+
+The run id resolved to a live manager; the token did not match. The token is a 64-character hex string that this transport requires the **model** to copy out of its prompt and into a tool argument - and `gpt-5.6-luna` did not copy it exactly. Codex did, on the same prompt, an hour earlier.
+
+**This is the asymmetry noted above arriving as a live failure rather than a principle.** This ticket argued a credential in a prompt is one the model can quote, spend or leak; it can also simply mistype it, and then the delegation fails in a way that reads like an authorization bug.
+
+**The fix is unchanged and now has evidence: derive manager identity from the bearer the guard already validated, and make both arguments optional.** The guard scans `AppState::managers` for the presented token already, so the identity is resolved a few frames earlier and thrown away. That removes the credential from every MCP prompt - Claude Code's included - and makes this transport work without asking a model to be a courier for a secret.
+
+Not built here. It is one change that touches all three MCP transports and deserves its own pass.
+
+---
+
+## The credential left the prompt, 2026-08-28
+
+`CARDAMOM`, relayed by a `goose-acp` manager from a real `pi` worker - `01a04917-35d3`, ok, 1535 micros, 7641 tokens. Same instruction that failed an hour earlier on a mistyped token.
+
+### The fix this ticket kept deferring
+
+Identity now comes from **the bearer the request already carried**, and `manager_run_id` / `manager_token` are optional arguments kept for a client that prefers to state them.
+
+The guard was already resolving this and throwing it away: it scans `AppState::managers` for the presented token to let a manager-scoped request through at all. `manager_by_token` returns the context instead of a bool, and rmcp hands a tool body the HTTP `Parts` through `ctx.extensions`, which is how the bearer reaches `authorize_manager`.
+
+**No manager on any transport is told its own token any more** - Claude Code and Codex included, which were carrying one for no reason other than that Claude Code's route was built first. A test asserts it across all three MCP reaches, so the next transport inherits the property instead of the habit.
+
+### Three ways a prompt-borne credential fails, and the third was the surprise
+
+This ticket argued a credential in a prompt is one a model can **quote** or **leak**. goose found the third: it can **mistype** it. A 64-character hex string copied from a prompt into a tool argument, one character out, failing as `manager_token does not authorize this manager run` - which reads like an authorization bug and is a transcription error.
+
+Codex copied the same string correctly an hour earlier. **It had been working by luck of the model**, and nothing in the design said so.
+
+### A test whose premise the fix expired
+
+`delegating_to_a_worker_not_in_the_roster_is_refused` asserted that an active manager UUID with a wrong `manager_token` is refused. Its client presents the manager's real bearer, so it is now authorized and the wrong argument is ignored - which is the intended behaviour, not a regression.
+
+It asserts the new rule instead: **the transport proved this manager, and a mistyped argument beside it must not undo that.** A caller with no bearer never reaches a tool body at all; the guard tests already cover that.
+
+That is the second time this map has found a test that would have passed on a premise that had quietly expired, after `31`'s own `a_manager_that_cannot_delegate...` asserted against pi once pi could delegate.
+
+---
+
+## opencode closes the set, 2026-08-29
+
+`SAFFRON`, relayed by an `opencode-acp` manager from a real `pi` worker - `01a0494e-ac12`, ok, 1535 micros, 7638 tokens.
+
+No new code. `opencode-acp` is an ACP runner, so it inherited the channel goose's work built, and this was a probe rather than a build.
+
+**Every runner farseer drives as a manager can now delegate**, over four transports:
+
+| transport | runners | bearer |
+| --- | --- | --- |
+| generated MCP config file | claude-code | from the request |
+| `thread/start` `config.mcp_servers` | codex-app-server | env var name in the frame |
+| `session/new` `mcpServers` | goose-acp, opencode-acp | literal header in the frame |
+| farseer's own extension | pi, omp | environment, never in a frame |
+
+None of the four tells a manager its own token.
+
+### What opencode does not say
+
+goose reports `_meta.extensionResults` on `session/new` - whether each server it was handed actually started. **opencode reports nothing at all**, while advertising both `mcpCapabilities.http` and `sse`, and while in fact connecting.
+
+So on this runner an empty failure list means "nothing was said", not "nothing failed", and the two are indistinguishable.
+
+That is a limitation of the evidence and not of the channel, and it is why `failed_mcp_servers` returns what the agent said rather than a verdict farseer computed. The rule holds either way: **farseer records what an agent said and never a conclusion it did not.**
+
+### Also worth noting for `29 harness protocol`
+
+opencode advertises `sse: true` where goose advertises `sse: false`, and opencode's `sessionCapabilities` include `fork` and `resume` where goose's include `delete`. Two ACP agents, one protocol version, different surfaces - the same lesson `32 harness capability floor` learned about pi and omp, arriving in a protocol designed to prevent it.

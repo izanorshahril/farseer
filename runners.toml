@@ -3,10 +3,39 @@
 #
 # Two kinds of declaration live here, and they are different acts:
 #
+#   provider what the usage source calls this account - `openai-codex` for the
+#            ChatGPT subscription, `anthropic` for Claude. Declared for the same
+#            reason `account` is: the operator named their account `chatgpt` and
+#            omp calls the same subscription `openai-codex`, and nothing farseer
+#            can observe joins those two strings. Without it the widget shows one
+#            subscription twice - once from the record, once from the live poll -
+#            under two names, with two readings of the same window.
+#
 #   account  which subscription a runner spends, per `27 quota accounting`.
 #            Declared, never inferred - nothing farseer can observe tells it
 #            that two runners share a login, so it declines to guess and shows
 #            two windows until an operator says otherwise.
+#
+#   [usage] source
+#            where farseer reads subscription windows while nothing is running.
+#            Off unless written. `omp usage --json` reads every provider omp is
+#            signed into - five of them here, including the only reading of a
+#            Google quota farseer has - and it is still farseer launching
+#            somebody else's binary, so the operator asks for it rather than
+#            discovering it running.
+#
+#            It is **not** a runner setting, which is what it used to be
+#            (`usage_poll = true` under `[omp]`). omp reports five providers and
+#            farseer launches one of them, so filing the knob under a runner made
+#            Cursor, xAI and Anthropic windows reachable and unaskable.
+#
+#   usd_micros_per_mtok
+#            what a million tokens costs here, per `26 routing policy`. Absent
+#            means farseer prices nothing, which is the default and the honest
+#            one: a made-up figure is worse than a blank because an operator
+#            plans around it. A run costed from this carries `cost_estimated`
+#            in the record, so a mispriced table argues with somebody rather
+#            than hiding.
 #
 #   model    what farseer launches the runner with. Absent means farseer passes
 #   effort   nothing and the runner keeps its own configuration, which is
@@ -22,8 +51,40 @@
 # One ChatGPT subscription, three faces of it. Without these three lines the
 # quota widget shows three separate windows at 1% each, which is not wrong so
 # much as unreadable: it is one window being reported three times.
+# Every provider omp is signed into - openai-codex, anthropic, cursor, xai and
+# google-antigravity here - read on a five-minute timer and on demand from the
+# Windows widget. Comment this out to stop farseer launching omp at all.
+[usage]
+source = "omp"
+
+# `06 cell transport`: the inbound A2A endpoint, for a foreign orchestrator that
+# wants to call a farseer cell. **Off until a peer is written here**, because
+# turning it on is the moment the Agent Card at
+# `/.well-known/agent-card.json` becomes a public commitment that is hard to
+# walk back - and local cells never traverse it, so nothing farseer does itself
+# needs it.
+#
+#   name    what the card calls this farseer.
+#   expose  which cells the card advertises, and the only ones a peer may
+#           address. Named rather than "all", because the card is read before
+#           any token is presented.
+#   peer    one entry per caller, each with its own token bound to one cell.
+#           `21 A2A conformance`: the caller's identity is which token
+#           authenticated the request, so a peer never asserts who it is.
+#
+# [a2a]
+# name = "farseer on this machine"
+# expose = ["zero"]
+#
+#   [[a2a.peer]]
+#   name = "a colleague's orchestrator"
+#   token = "generate-something-long"
+#   cell = "zero"
+
+
 [codex]
 account = "chatgpt"
+provider = "openai-codex"
 model = "gpt-5.6-luna"
 effort = "low"
 

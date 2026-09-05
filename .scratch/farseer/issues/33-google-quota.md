@@ -1,6 +1,6 @@
 # 33 google quota
 
-**Status:** closed with a negative answer, and a re-check condition.
+**Status:** **reopened and answered 2026-08-28.** The negative answer below was correct about `agy` and wrong about the world - see the reversal at the foot of this ticket.
 **Researched:** 2026-08-27, against `agy 1.1.13` on this machine, plus the operator's prior art in `D:\Dev\baby-menu-win`.
 
 ## The question
@@ -62,3 +62,57 @@ Verify live on the machine before writing a parser: read the real source, print 
 - [Report credits used per request - antigravity-cli issue #332](https://github.com/google-antigravity/antigravity-cli/issues/332)
 - [Google has tripled Gemini usage limits for Antigravity, twice](https://9to5google.com/2026/05/21/google-has-tripled-gemini-usage-limits-for-antigravity-twice/)
 - `D:\Dev\baby-menu-win/extensions/recipes/antigravity-quota.html` (local prior art)
+
+---
+
+## Reversed 2026-08-28: the answer came from a different binary
+
+`omp usage --json` reports the Antigravity quota, live, on this machine:
+
+```
+google-antigravity:google:default:daily     | Usage (Google)    | 0/100 percent | resets in 4h59m
+google-antigravity:anthropic:default:daily  | Usage (Anthropic) | 0/100 percent | resets in 4h59m
+google-antigravity:openai:default:daily     | Usage (OpenAI)    | 0/100 percent | resets in 4h59m
+```
+
+It reports Codex's two windows beside them, with `metadata.email` naming the account on both.
+
+### The re-check condition named the wrong binary
+
+This ticket said to re-check when Google documents an endpoint, **or when `agy` grows `agy usage --json`**.
+Neither happened.
+The condition assumed the answer would come from the harness that *owns* the account, and it came from a harness that merely **shares the login** - omp is authenticated to Antigravity and reads the same quota through the same credential.
+
+That is the transferable part.
+A negative answer about a capability was scoped to one binary, and the capability was never a property of the binary.
+**A re-check condition should name the capability, not the tool** - "when anything on this machine can read a Google quota non-interactively", not "when agy can".
+
+### What was kept from the negative answer
+
+Everything else in it stands, and one line especially:
+
+> a wrong number here is worse than no number, because the operator would plan real work around it.
+
+So farseer passes omp's numbers through and computes none of its own, which is `27 quota accounting`'s standing rule for `used_percent` rather than a new one.
+
+### Built
+
+[`farseer_runner::omp_usage`](../../../crates/farseer-runner/src/omp_usage.rs), surfaced on `GET /v1/quota` with `source: "omp usage"` beside the recorded windows.
+
+**A read, never an append.** `27` made the record's windows a log of transitions *observed by a run*; this snapshot belongs to no run and no cell, and writing it would need a cell id the record has no honest value for. `27` also made current state derived, and a live poll is the most derived thing there is.
+
+Two details the fixture exists to hold:
+
+- **Three Antigravity windows all report `window.id: "daily"`.** Keying on the window id would collapse them into one window flapping between three states, which is `30 codex app server`'s finding arriving from a new direction. The limit's own `id` is the discriminator.
+- **omp reports `resetsAt` in milliseconds**, where `10 runner inventory` transcribed Claude Code's as seconds. The record is in seconds, so this is the one place farseer converts a unit rather than passing it through.
+
+### What this changes for 27
+
+`32 harness capability floor` recorded codex-app-server as **the only runner reporting quota**, and `27` was built on that single foundation.
+It now has a second, wider one - and the first view of any window **while nothing is running**, which is when an operator actually asks.
+
+### Two things the build got wrong first, both caught by an existing test
+
+**The handler shelled out per request.** A live `omp usage` takes seconds, so an operator's quota view cost a process launch every time it was opened. Now a background poll every five minutes into a cached snapshot, started from `serve` - which also means **nothing polls in a test**, because a unit test that shells out to a binary on the developer's own machine is not testing farseer. A failed poll leaves the last good snapshot rather than blanking the view.
+
+**A guard was over-broad and looked like a rule.** `the_quota_surface_reports_windows_by_account_and_never_a_percentage` asserted that the string `percent` appears nowhere in the payload. The rule it protects is narrower: farseer must never present a percentage **it computed**, because its own spend is a lower bound and would be most wrong at exhaustion. A number the provider states is an observation - `30 codex app server` settled that for codex-app-server, and this brings omp's through the same door. The assertion is now scoped to the recorded window it was written for.
