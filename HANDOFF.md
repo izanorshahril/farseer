@@ -22,7 +22,7 @@ Run `git status --short --branch` before doing anything else.
 - The version-eight canvas defaults to Conversation, Work, Fleet, and Capacity, shares conversation/task/run/project/manager context, and keeps Settings in a top-bar popover.
 - Work includes global and project boards, conversations, completed work, full-canvas expansion, complete observed topology, transcript nodes, and separately styled similarity edges.
 
-## Follow-up fixes currently in the worktree
+## Follow-up fixes in the committed change
 
 - Fixed repeated transcript content replacing another run's attachment by changing the association key to `(digest, run_id)`.
 - Added a transactional migration for the earlier digest-only schema, including the legacy index path and a regression test.
@@ -45,30 +45,20 @@ Run `git status --short --branch` before doing anything else.
 - Parallel standards and ticket-40 reviews found no remaining concrete blocker after the follow-up fixes.
 - Temporary databases, screenshots, and isolated Cargo target directories were removed.
 
-## External gate blocker
+## Delivery
 
-No-mistakes run `01M1Q9ZCHCV78YHA2FX5MB4TX3` failed before its own review because Claude Code reported: `Your organization has disabled Claude subscription access for Claude Code`.
+Local validation is complete, and delivery proceeds through the repository's GitHub pull request and Actions checks.
 
-No-mistakes v1.48.0 recorded preserved head `f273e3a9` but left the gate branch at `ec67ee6`, so both recovery commands refused with `blocked_recover_gate_diverged`.
-
-The exact preserved commit was verified in the gate object store, the old gate ref was retained at `refs/no-mistakes/manual-recovery/01M1Q9ZCHCV78YHA2FX5MB4TX3/gate-before`, and the guarded `no-mistakes axi sync --recover --keep-local` then returned custody without touching the dirty worktree.
-
-The inconsistency was reported through `xd://report_issue`.
-
-Updating to no-mistakes v1.64.0 is currently blocked by unrelated active pipeline `01M07734GPSERZED3GZTQ5PV2X` on `fix/windows-herdr-socket`.
-
-Do not force-update or disrupt that unrelated run.
-
-The global no-mistakes configuration now sets `agent: codex`; `no-mistakes doctor` reports `codex is runnable`.
+The existing pull request is #8: `https://github.com/izanorshahril/farseer/pull/8`.
 
 ## Remaining work
 
-1. Rerun the full no-mistakes pipeline with the original intent using Codex.
-2. Drive any gate findings, push, PR, and CI to a terminal successful outcome.
-3. After the unrelated pipeline ends, update no-mistakes from v1.48.0 without using `--force`.
+1. Push `feat/acp-runner` to `origin`.
+2. Verify pull request #8 and its GitHub Actions checks.
+3. Address any new CI findings until all required checks pass.
 
 ## Original gate intent
 
 `Iterate and complete the durable work and session explorer plus the approved operator UX safely. Implement durable conversations, validated task boards, explicit run topology, multiple provider-owned harness session identifiers, transcript custody with scrubbed rebuildable search and similarity projections, ordered cell-zero manager candidates, the version-eight Conversation/Work/Fleet/Capacity canvas, shared composer context, and a settings popover. Preserve top-manager-only routing, SQLite as truth, raw transcripts outside the event log, no plugin ABI, Windows-native behavior, and update decision records and documentation.`
 
-State: implementation, local validation, gate custody recovery, Codex configuration, and the follow-up commit are complete; pipeline, push, PR, and CI remain.
+State: implementation, local validation, and the follow-up commit are complete; push, PR, and CI remain.
