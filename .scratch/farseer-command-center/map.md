@@ -37,7 +37,7 @@ The package was approved for implementation on the command-center branch.
 Verified startup, independent runtime lifecycle, paged work-board reads, scoped graph, bounded transcript projection, recoverable schema/backup, and honest tool authority are implemented and tested.
 Widget recovery, explicit composer context, responsive canvas, privacy presentation, focused workspace, session explorer, attributed usage, explainable routing, and project team profiles have bounded increments in progress; their remaining acceptance items stay open.
 Terminal profiles, the deterministic local artifact manifest, and the optional resource monitor now have bounded runtime/API/UI slices with explicit follow-up limits.
-Maintenance proposals and staged promotion now have store-level fixture primitives but no public maintenance task or promotion command.
+Maintenance proposals now admit ordinary tasks and candidate artifacts through bounded operator routes, and staged promotion has an explicit disposable fixture CLI; live candidate startup, migration, and public smoke evidence remain open.
 All remaining acceptance items stay open until their blockers and evidence are complete.
 
 ## Corrections after approval

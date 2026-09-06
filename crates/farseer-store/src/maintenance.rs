@@ -29,6 +29,10 @@ pub enum MaintenanceError {
     MissingProposal(String),
     #[error("proposal attempt limit is one")]
     AttemptLimit,
+    #[error("maintenance proposal `{0}` is not open")]
+    ProposalNotOpen(String),
+    #[error("maintenance proposal `{0}` already has a task")]
+    TaskAlreadyLinked(String),
     #[error("successful proposal requires a candidate and validation evidence")]
     MissingEvidence,
     #[error("invalid promotion transition from `{from}` to `{to}`")]
@@ -201,10 +205,10 @@ impl ProposalLedger {
             .find(|proposal| proposal.proposal_id == proposal_id)
             .ok_or_else(|| MaintenanceError::MissingProposal(proposal_id.into()))?;
         if proposal.task_id.is_some() {
-            return Err(MaintenanceError::InvalidPromotionTransition {
-                from: "task-linked".into(),
-                to: "task-linked".into(),
-            });
+            return Err(MaintenanceError::TaskAlreadyLinked(proposal_id.into()));
+        }
+        if !proposal.status.active() {
+            return Err(MaintenanceError::ProposalNotOpen(proposal_id.into()));
         }
         proposal.task_id = Some(task_id);
         Ok(())
@@ -216,6 +220,9 @@ impl ProposalLedger {
             .iter_mut()
             .find(|proposal| proposal.proposal_id == proposal_id)
             .ok_or_else(|| MaintenanceError::MissingProposal(proposal_id.into()))?;
+        if !proposal.status.active() {
+            return Err(MaintenanceError::ProposalNotOpen(proposal_id.into()));
+        }
         if proposal.attempts.len() >= MAX_PROPOSAL_ATTEMPTS {
             return Err(MaintenanceError::AttemptLimit);
         }
@@ -239,6 +246,9 @@ impl ProposalLedger {
             .iter_mut()
             .find(|proposal| proposal.proposal_id == proposal_id)
             .ok_or_else(|| MaintenanceError::MissingProposal(proposal_id.into()))?;
+        if !proposal.status.active() {
+            return Err(MaintenanceError::ProposalNotOpen(proposal_id.into()));
+        }
         proposal.candidate = Some(candidate);
         Ok(())
     }
@@ -255,6 +265,9 @@ impl ProposalLedger {
             .iter_mut()
             .find(|proposal| proposal.proposal_id == proposal_id)
             .ok_or_else(|| MaintenanceError::MissingProposal(proposal_id.into()))?;
+        if !proposal.status.active() {
+            return Err(MaintenanceError::ProposalNotOpen(proposal_id.into()));
+        }
         if matches!(status, ProposalStatus::Succeeded)
             && (proposal.candidate.is_none() || proposal.attempts.is_empty())
         {
