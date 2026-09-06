@@ -92,6 +92,11 @@ pub(super) async fn begin(
     if body.goal.trim().is_empty() {
         return Err(ApiError::BadRequest("maintenance goal must not be empty"));
     }
+    if !matches!(body.actor.as_str(), "operator" | "system") {
+        return Err(ApiError::BadRequest(
+            "maintenance actor must be `operator` or `system`",
+        ));
+    }
     let project = body
         .project
         .as_deref()
