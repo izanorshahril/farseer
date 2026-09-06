@@ -13,7 +13,8 @@ Keep the two maps, their decisions and tickets, referenced research, and cited p
 Keep runtime implementation detail in [the optional reference](farseer/runtime-reference.md), outside automatically loaded AGENTS.md.
 Keep .git, .github, .gitignore, .claude/launch.json, and CLAUDE.md: they support versioning, CI, generated-file exclusions, local UI launch, and instruction discovery.
 Keep source, lockfiles, runner configuration, and current PRODUCT.md, DESIGN.md, and HARNESS.md.
-Generated target, node_modules, and UI build output are ignored; retain them to avoid unnecessary rebuilds or downloads.
+Generated `target/`, `ui/node_modules/`, and `ui/dist/` are disposable and ignored; keep them only while actively iterating, and delete them after stopping local processes when disk space matters.
+Rebuild `ui/dist/` before running the packaged shell after deleting it.
 feedback.txt remains private user source material, not an implementation backlog.
 
 ## Git-only history
