@@ -267,7 +267,7 @@ export function RunWidget({ bridge }: { bridge: Bridge }) {
     <>
       {error && <ReadFailure capability="run detail" error={error} stale onRetry={() => runId ? void load(runId) : undefined} />}
       <div className="row" style={{ marginBottom: 8 }}>
-        <b>{run.title ?? run.run_id.slice(0, 8)}</b>
+        <b>{run.title ?? mask(run.run_id.slice(0, 8), "session", privacy)}</b>
         <span className="grow" />
         <span className="faint mono small">{mask(run.run_id.slice(0, 8), "session", privacy)}</span>
         <button className="chip" onClick={() => selectRun(null)} title="close this run">
@@ -375,7 +375,7 @@ export function RunWidget({ bridge }: { bridge: Bridge }) {
             className="chip danger"
             disabled={busy !== null}
             onClick={() => {
-              if (confirmVerb("cancel", run.title ?? run.run_id.slice(0, 8))) void act("cancel");
+              if (confirmVerb("cancel", run.title ? mask(run.title, "diagnostic", privacy) : mask(run.run_id.slice(0, 8), "session", privacy))) void act("cancel");
             }}
           >
             {busy === "cancel" ? "..." : "cancel"}

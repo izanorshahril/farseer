@@ -4,6 +4,7 @@ import { follow } from "../stream";
 import { selectRun } from "../selection";
 import { confirmVerb } from "../confirm";
 import { meaningOf } from "../meaning";
+import { mask, usePrivacy } from "../privacy";
 import { ReadFailure } from "../ReadFailure";
 
 /**
@@ -151,6 +152,7 @@ const TONE: Record<string, string> = {
 };
 
 export function RunsWidget({ bridge }: { bridge: Bridge }) {
+  const privacy = usePrivacy();
   const [runs, setRuns] = useState<Run[] | null>(null);
   /** Runner name to what farseer cannot do with it, from the settings surface. */
   const [cannot, setCannot] = useState<Record<string, string[]>>({});
@@ -264,10 +266,10 @@ export function RunsWidget({ bridge }: { bridge: Bridge }) {
                   this is the click that puts it there. */}
               <button
                 className="run-title link"
-                title={`open ${run.run_id}`}
+                title={`open ${mask(run.run_id, "session", privacy)}`}
                 onClick={() => selectRun(run.run_id)}
               >
-                {run.title ?? run.run_id.slice(0, 8)}
+                {run.title ?? mask(run.run_id.slice(0, 8), "session", privacy)}
               </button>
               <span className="badge">{run.cell_id}</span>
               <span className="dim mono small">{run.runner}</span>
@@ -312,7 +314,7 @@ export function RunsWidget({ bridge }: { bridge: Bridge }) {
                     // Named, not "are you sure": the risk here is having hit the
                     // wrong row in a list of twenty-five, and a dialog that does
                     // not name the row cannot catch that.
-                    if (confirmVerb(verb, run.title ?? run.run_id.slice(0, 8))) {
+                    if (confirmVerb(verb, run.title ? mask(run.title, "diagnostic", privacy) : mask(run.run_id.slice(0, 8), "session", privacy))) {
                       void act(run, verb);
                     }
                   }}

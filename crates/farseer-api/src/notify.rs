@@ -120,7 +120,10 @@ fn poll(state: &AppState, cursor: &mut Seq, warned: &mut HashSet<RunId>) -> Vec<
             // hook on - the agent has said its piece and is waiting on a person.
             out.push(Notification {
                 title: "farseer: answered".to_string(),
-                body: format!("run {} is waiting for you", short(event.run_id)),
+                body: format!(
+                    "record event {}: an active run is waiting for you",
+                    event.seq
+                ),
                 priority: 3,
             });
             continue;
@@ -134,7 +137,10 @@ fn poll(state: &AppState, cursor: &mut Seq, warned: &mut HashSet<RunId>) -> Vec<
             .unwrap_or("finished");
         out.push(Notification {
             title: format!("farseer: {outcome}"),
-            body: format!("run {} {outcome}", short(event.run_id)),
+            // A notification is an external presentation surface.  The record
+            // sequence keeps a finished event correlatable without exporting a
+            // provider-owned session/run identifier into a phone or webhook.
+            body: format!("record event {}: {outcome}", event.seq),
             // Failure is the one an operator wants pushed through a quiet hour.
             priority: if outcome == "ok" { 3 } else { 4 },
         });
@@ -158,8 +164,7 @@ fn poll(state: &AppState, cursor: &mut Seq, warned: &mut HashSet<RunId>) -> Vec<
             out.push(Notification {
                 title: "farseer: likely hung".to_string(),
                 body: format!(
-                    "run {} has produced nothing for {}s",
-                    short(*run_id),
+                    "an active run has produced nothing for {}s",
                     state.thresholds.likely_hung_secs
                 ),
                 priority: 4,
@@ -187,11 +192,6 @@ fn is_root_run(state: &AppState, run_id: RunId) -> bool {
         Ok(Some(first)) => first == run_id,
         _ => true,
     }
-}
-
-/// The first segment of an id, which is what the operator's own tooling prints.
-fn short(run_id: RunId) -> String {
-    run_id.to_string()[..8].to_string()
 }
 
 /// Best-effort, and deliberately so.
@@ -252,5 +252,14 @@ mod tests {
         assert!(!warned.insert(run), "the second says nothing");
         warned.retain(|r| *r != run);
         assert!(warned.insert(run), "a run that recovered may hang again");
+    }
+
+    #[test]
+    fn external_notifications_correlate_by_record_event_without_exporting_run_ids() {
+        let run = RunId::new();
+        let body = format!("record event {}: ok", 42);
+        assert!(body.contains("record event 42"));
+        assert!(!body.contains(&run.to_string()));
+        assert!(!body.contains("run "));
     }
 }

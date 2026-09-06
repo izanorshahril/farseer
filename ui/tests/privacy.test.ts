@@ -1,5 +1,14 @@
 import { describe, expect, test } from "bun:test";
-import { isFieldRevealed, mask, presentationValue, privacyEnabled, revealField, setPrivacy } from "../src/privacy";
+import {
+  copyPresentation,
+  exportPresentation,
+  isFieldRevealed,
+  mask,
+  presentationValue,
+  privacyEnabled,
+  revealField,
+  setPrivacy,
+} from "../src/privacy";
 
 describe("presentation privacy", () => {
   test("masks sensitive values without changing the source value", () => {
@@ -24,7 +33,33 @@ describe("presentation privacy", () => {
     const source = "C:\\private\\farseer";
     expect(presentationValue(source, "path", true)).toBe("path hidden");
     expect(presentationValue(source, "path", false)).toBe(source);
+    expect(presentationValue(source, "path", true, true)).toBe(source);
+    expect(exportPresentation({
+      account: { value: "account@example.test", kind: "account" },
+      path: { value: source, kind: "path" },
+    }, true)).toContain('"path": "path hidden"');
+    const authorizedExport = exportPresentation({
+      account: { value: "account@example.test", kind: "account" },
+      path: { value: source, kind: "path" },
+    }, true, true);
+    expect(JSON.parse(authorizedExport)).toEqual({
+      account: "account@example.test",
+      path: source,
+    });
     expect(source).toBe("C:\\private\\farseer");
+  });
+
+  test("copy writes the masked value until a field is explicitly authorized", async () => {
+    const writes: string[] = [];
+    const prior = globalThis.navigator;
+    Object.defineProperty(globalThis, "navigator", {
+      configurable: true,
+      value: { clipboard: { writeText: (value: string) => { writes.push(value); } } },
+    });
+    await copyPresentation("account@example.test", "account", true);
+    await copyPresentation("account@example.test", "account", true, true);
+    Object.defineProperty(globalThis, "navigator", { configurable: true, value: prior });
+    expect(writes).toEqual(["account hidden", "account@example.test"]);
   });
 
   test("reveals one field briefly and clears it when privacy is re-enabled", () => {

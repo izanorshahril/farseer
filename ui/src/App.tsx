@@ -1074,8 +1074,8 @@ export function App() {
               <span className="route-chip" title="the selected widget is sent as request context">
                 {anchor.widget}
               </span>
-              {subject.project && <span className="route-chip" title={subject.project}>project: {subject.project.split(/[\\/]/).at(-1)}</span>}
-              {subject.conversation && <span className="route-chip" title={subject.conversation}>conversation: {subject.conversation.slice(0, 8)}</span>}
+              {subject.project && <span className="route-chip" title={mask(subject.project, "path", privacy)}>project: {mask(subject.project.split(/[\\/]/).at(-1) ?? subject.project, "path", privacy)}</span>}
+              {subject.conversation && <span className="route-chip" title={mask(subject.conversation, "session", privacy)}>conversation: {mask(subject.conversation.slice(0, 8), "session", privacy)}</span>}
               <button
                 type="button"
                 className="anchor-chip"
@@ -1134,7 +1134,7 @@ export function App() {
                 >
                   <option value="">none</option>
                   {contextConversations.map((conversation) => <option key={conversation.conversation_id} value={conversation.conversation_id}>{conversation.title}</option>)}
-                  {subject.conversation && !contextConversations.some((conversation) => conversation.conversation_id === subject.conversation) && <option value={subject.conversation}>{subject.conversation.slice(0, 8)}</option>}
+                  {subject.conversation && !contextConversations.some((conversation) => conversation.conversation_id === subject.conversation) && <option value={subject.conversation}>{mask(subject.conversation.slice(0, 8), "session", privacy)}</option>}
                 </select>
               </label>
               <label>
@@ -1153,7 +1153,7 @@ export function App() {
                 >
                   <option value="">none</option>
                   {contextTasks.map((task) => <option key={task.task_id} value={task.task_id}>{task.title}</option>)}
-                  {subject.task && !contextTasks.some((task) => task.task_id === subject.task) && <option value={subject.task}>{subject.task.slice(0, 8)}</option>}
+                  {subject.task && !contextTasks.some((task) => task.task_id === subject.task) && <option value={subject.task}>{mask(subject.task.slice(0, 8), "session", privacy)}</option>}
                 </select>
               </label>
               <label>
@@ -1182,7 +1182,7 @@ export function App() {
                   <span className="bad">{error}</span>
                 ) : lastRun ? (
                   <>
-                    accepted as run <span className="mono">{lastRun.slice(0, 8)}</span>
+                    accepted as run <span className="mono">{mask(lastRun.slice(0, 8), "session", privacy)}</span>
                   </>
                 ) : (
                   "Click a widget to pin composer context."

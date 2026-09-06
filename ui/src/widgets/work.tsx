@@ -504,7 +504,7 @@ export function WorkWidget({ bridge }: { bridge: Bridge }) {
             <span><i>duration</i><b>{(detail.usage.duration_ms / 1000).toFixed(1)}s</b></span>
           </div>}
           <div className="task-actions">{detail.allowed_transitions.map((state) => <button key={state} className="chip" onClick={() => transition(state).catch((failure: Error) => setError(failure.message))}>{stateLabel(state)}</button>)}</div>
-          <div className="task-runs">{detail.runs.map((run) => <button key={run.run_id} className="chip" onClick={() => selectSubject({ run: run.run_id })}>{short(run.run_id)} · {run.runner} · {run.model ?? "model not reported"} · {run.outcome ?? "running"}</button>)}</div>
+          <div className="task-runs">{detail.runs.map((run) => <button key={run.run_id} className="chip" onClick={() => selectSubject({ run: run.run_id })}>{mask(short(run.run_id), "session", privacy)} · {run.runner} · {run.model ?? "model not reported"} · {run.outcome ?? "running"}</button>)}</div>
           {detail.artifacts?.map((artifact) => <p key={artifact.artifact_id} className="mono small">{artifact.kind} · {artifact.status} · {mask(artifact.input_path, "path", privacy)}{artifact.error ? ` · ${mask(artifact.error, "diagnostic", privacy)}` : ""}</p>)}
           {detail.sessions.map((session) => <p key={`${session.identifier_kind}:${session.identifier}`} className="mono small">{session.identifier_kind} {mask(session.identifier, "session", privacy)}{session.log_pointer ? ` · ${mask(session.log_pointer, "path", privacy)}` : ""}</p>)}
           <form className="transcript-form" onSubmit={(event) => { event.preventDefault(); addTranscript().catch((failure: Error) => setError(failure.message)); }}>
@@ -541,7 +541,7 @@ function WorkGraph({ graph, privacy, onSelect }: { graph: Graph; privacy: boolea
         {observed.map((edge, index) => { const from = at.get(edge.from); const to = at.get(edge.to); return from && to ? <line key={`${edge.from}:${edge.to}:${index}`} x1={from.x} y1={from.y} x2={to.x} y2={to.y} className="observed-edge"><title>{edge.kind}</title></line> : null; })}
         {nodes.map((node) => { const point = at.get(node.id)!; const label = node.kind === "project" ? mask(node.label, "path", privacy) : node.kind === "session" || node.kind === "attachment" ? mask(node.label, "session", privacy) : node.label; return <g key={node.id} transform={`translate(${point.x},${point.y})`} className={`graph-node ${node.kind}`} onClick={() => onSelect(node)} onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") onSelect(node); }} role={node.target ? "button" : undefined} tabIndex={node.target ? 0 : undefined}><circle r="25"/><text y="42" textAnchor="middle">{label.slice(0, 18)}</text></g>; })}
       </svg>
-      <ul className="similarity-list">{derived.map((edge) => <li key={`${edge.from}:${edge.to}`}><span className="derived">derived</span> {short(edge.from)} ↔ {short(edge.to)} · {edge.score?.toFixed(2) ?? ""} · {edge.projection ?? ""}</li>)}</ul>
+      <ul className="similarity-list">{derived.map((edge) => <li key={`${edge.from}:${edge.to}`}><span className="derived">derived</span> {mask(short(edge.from), "session", privacy)} ↔ {mask(short(edge.to), "session", privacy)} · {edge.score?.toFixed(2) ?? ""} · {edge.projection ?? ""}</li>)}</ul>
     </div>
   );
 }

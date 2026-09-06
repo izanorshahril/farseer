@@ -47,14 +47,19 @@ export function confirmVerb(verb: string, subject: string): boolean {
  * goes, the composer keeps saying where work is headed, and the failure lands
  * one instruction later, decoupled from the click that caused it.
  */
-export function confirmGrantWithdrawal(root: string, losing: string | null): boolean {
-  const aftermath = losing
+export function confirmGrantWithdrawal(
+  root: string,
+  losing: string | null,
+  presentedRoot = root,
+  presentedLosing = losing,
+): boolean {
+  const aftermath = presentedLosing
     ? `
 
-Work is currently pointed at ${losing}, which is inside it. That will be cleared, and instructions go back to the folder farseer itself was started in.`
+Work is currently pointed at ${presentedLosing}, which is inside it. That will be cleared, and instructions go back to the folder farseer itself was started in.`
     : "";
   return confirm(
-    `Stop farseer working in ${root}?
+    `Stop farseer working in ${presentedRoot}?
 
 The folder and everything in it stays exactly where it is.${aftermath}`,
   );

@@ -182,7 +182,12 @@ export function ProjectsWidget({ bridge }: { bridge: Bridge }) {
    */
   const withdraw = (root: Root) => {
     const losing = selected && isInside(root.path, selected) ? selected : null;
-    if (!confirmGrantWithdrawal(root.path, losing)) return;
+    if (!confirmGrantWithdrawal(
+      root.path,
+      losing,
+      mask(root.path, "path", privacy),
+      losing ? mask(losing, "path", privacy) : null,
+    )) return;
     if (losing) setProject(null);
     // A withdrawn root leaves nothing behind in the arrangement either, so
     // re-authorizing it later starts where a new root starts rather than in a
@@ -265,7 +270,7 @@ export function ProjectsWidget({ bridge }: { bridge: Bridge }) {
               >
                 {folded ? "▸" : "▾"}
               </button>
-              <b className="mono root-path" title={root.path}>
+              <b className="mono root-path" title={mask(root.path, "path", privacy)}>
                 {mask(root.path, "path", privacy)}
               </b>
               {folded && root.projects.length > 0 && (
@@ -286,7 +291,7 @@ export function ProjectsWidget({ bridge }: { bridge: Bridge }) {
               <button
                 className="chip move"
                 disabled={place === 0}
-                aria-label={`move ${root.path} up`}
+                aria-label={`move ${mask(root.path, "path", privacy)} up`}
                 title="move this folder up"
                 onClick={() => move(paths, root.path, -1)}
               >
@@ -295,7 +300,7 @@ export function ProjectsWidget({ bridge }: { bridge: Bridge }) {
               <button
                 className="chip move"
                 disabled={place === paths.length - 1}
-                aria-label={`move ${root.path} down`}
+                aria-label={`move ${mask(root.path, "path", privacy)} down`}
                 title="move this folder down"
                 onClick={() => move(paths, root.path, 1)}
               >
@@ -374,7 +379,7 @@ export function ProjectsWidget({ bridge }: { bridge: Bridge }) {
             {!folded && root.projects.length > FILTER_AT && (
               <div className="row project-filter">
                 <input
-                  aria-label={`filter projects in ${root.path}`}
+                  aria-label={`filter projects in ${mask(root.path, "path", privacy)}`}
                   placeholder={`filter ${root.projects.length} projects`}
                   value={filter}
                   onChange={(e) => setFilter(e.currentTarget.value)}
@@ -403,7 +408,7 @@ export function ProjectsWidget({ bridge }: { bridge: Bridge }) {
                       tabIndex={index === Math.min(stop, shown.length - 1) ? 0 : -1}
                       onFocus={() => setCursor((current) => ({ ...current, [root.path]: index }))}
                       onClick={() => setProject(on ? null : project.path)}
-                      title={project.path}
+                      title={mask(project.path, "path", privacy)}
                     >
                       <span className="project-name">{project.name}</span>
                       {project.profile?.valid && project.profile.cell && (
@@ -412,7 +417,7 @@ export function ProjectsWidget({ bridge }: { bridge: Bridge }) {
                         </span>
                       )}
                       {project.profile && !project.profile.valid && (
-                        <span className="dim small bad" title={project.profile.error}>
+                        <span className="dim small bad" title={project.profile.error ? mask(project.profile.error, "diagnostic", privacy) : "profile needs repair"}>
                           profile needs repair
                         </span>
                       )}

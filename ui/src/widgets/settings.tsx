@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import type { Bridge } from "../bridge";
 import { ReadFailure } from "../ReadFailure";
+import { mask, usePrivacy } from "../privacy";
 
 /**
  * Which harness stands in front of farseer.
@@ -34,6 +35,7 @@ type RuntimeStatus = { resource_monitor_enabled: boolean };
 type Skill = { name: string; declared_by: string[] };
 
 export function SettingsWidget({ bridge }: { bridge: Bridge }) {
+  const privacy = usePrivacy();
   const [runners, setRunners] = useState<Runner[] | null>(null);
   const [skills, setSkills] = useState<Skill[]>([]);
   const [current, setCurrent] = useState<TopManager | null>(null);
@@ -254,9 +256,9 @@ export function SettingsWidget({ bridge }: { bridge: Bridge }) {
         </>
       )}
       <p className="dim small" style={{ marginBottom: 0 }}>
-        {note ?? (
+        {note ? mask(note, "diagnostic", privacy) : (
           <>
-            Written to <span className="mono">{current.file}</span> and reloaded. A change here is a
+            Written to <span className="mono">{mask(current.file, "path", privacy)}</span> and reloaded. A change here is a
             git diff, not a hidden setting.
           </>
         )}

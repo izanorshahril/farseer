@@ -24,10 +24,12 @@ Masking defaults to on for account identities and sensitive paths in screenshot 
 - [ ] Copy, export, notification, and screenshot surfaces use the masked representation unless explicitly authorized.
 - [ ] Tests prove that masking changes presentation only and does not change routing, accounting, or stored record values.
 
-**Evidence:** `ui/src/privacy.ts` defaults presentation masking on and leaves source values untouched.
-First-party widgets classify account, path, session, and diagnostic display fields through `mask`.
+**Evidence:** `ui/src/privacy.tsx` defaults presentation masking on and leaves source values untouched.
+First-party widgets classify account, path, session, and diagnostic display fields through `mask`, including tooltip text, accessible labels, confirmation prompts, and graph/run identifiers.
 `RevealField` exposes one field for ten seconds with accessible state, and visibility changes or privacy re-enable clear all reveals.
-Explicit copy/export authorization remains open.
+`copyPresentation` and `exportPresentation` keep masked output as the default and accept raw values only when the caller supplies explicit authorization.
+The notification plane now correlates finished events by record sequence and never exports a run/session identifier to an external sink.
+The remaining acceptance evidence is a browser screenshot/copy/export pass over representative first-party views.
 
 **Exclusions:** No encryption redesign, credential rotation, irreversible scrubbing, or privacy inference from arbitrary event payloads.
 

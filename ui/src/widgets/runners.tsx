@@ -314,7 +314,7 @@ export function RunnersWidget({ bridge }: { bridge: Bridge }) {
                         className="chip danger"
                         disabled={busy !== null}
                         onClick={() => {
-                          if (confirmVerb("cancel", run.title ?? run.run_id.slice(0, 8))) {
+                          if (confirmVerb("cancel", run.title ? mask(run.title, "diagnostic", privacy) : mask(run.run_id.slice(0, 8), "session", privacy))) {
                             void cancel(run);
                           }
                         }}

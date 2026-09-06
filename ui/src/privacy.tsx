@@ -92,8 +92,42 @@ export function mask(value: string, kind: SensitiveKind, active = enabled): stri
 }
 
 /** Copy/export callers use the same presentation policy as visible text. */
-export function presentationValue(value: string, kind: SensitiveKind, active = enabled): string {
-  return mask(value, kind, active);
+export function presentationValue(
+  value: string,
+  kind: SensitiveKind,
+  active = enabled,
+  authorized = false,
+): string {
+  return authorized ? value : mask(value, kind, active);
+}
+
+/** Copy a field only after the caller has applied the same reveal policy as the view. */
+export async function copyPresentation(
+  value: string,
+  kind: SensitiveKind,
+  active = enabled,
+  authorized = false,
+): Promise<void> {
+  const write = globalThis.navigator?.clipboard?.writeText;
+  if (write) await write.call(globalThis.navigator.clipboard, presentationValue(value, kind, active, authorized));
+}
+
+/** Serialize a small presentation payload without mutating the source fields. */
+export function exportPresentation(
+  fields: Record<string, { value: string; kind: SensitiveKind }>,
+  active = enabled,
+  authorized = false,
+): string {
+  return JSON.stringify(
+    Object.fromEntries(
+      Object.entries(fields).map(([name, field]) => [
+        name,
+        presentationValue(field.value, field.kind, active, authorized),
+      ]),
+    ),
+    null,
+    2,
+  );
 }
 
 export function RevealField({
@@ -109,7 +143,6 @@ export function RevealField({
 }): ReactNode {
   const visible = useRevealed(fieldKey);
   const display = visible ? value : mask(value, kind);
-  const copyValue = visible ? value : presentationValue(value, kind);
   if (!privacyEnabled() || !value) return <span>{display}</span>;
   return (
     <span className="reveal-field">
@@ -118,7 +151,7 @@ export function RevealField({
         type="button"
         className="chip"
         aria-label={`Copy ${label}`}
-        onClick={() => void navigator.clipboard?.writeText(copyValue)}
+        onClick={() => void copyPresentation(value, kind, privacyEnabled(), visible)}
       >
         copy
       </button>
