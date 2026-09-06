@@ -16,6 +16,9 @@ use std::path::{Path, PathBuf};
 pub const PROPOSAL_FORMAT_VERSION: u32 = 1;
 pub const PROMOTION_FORMAT_VERSION: u32 = 1;
 pub const MAX_PROPOSAL_ATTEMPTS: usize = 1;
+pub const MAX_PROPOSAL_SCOPE: usize = 32;
+pub const MAX_PROPOSAL_FIELD_BYTES: usize = 4 * 1024;
+pub const MAX_VALIDATION_EVIDENCE: usize = 32;
 
 #[derive(Debug, thiserror::Error)]
 pub enum MaintenanceError {
@@ -33,6 +36,10 @@ pub enum MaintenanceError {
     ProposalNotOpen(String),
     #[error("maintenance proposal `{0}` already has a task")]
     TaskAlreadyLinked(String),
+    #[error("maintenance field `{field}` exceeds {limit} bytes")]
+    FieldTooLarge { field: &'static str, limit: usize },
+    #[error("maintenance validation evidence exceeds {0} rows")]
+    EvidenceTooLarge(usize),
     #[error("successful proposal requires a candidate and validation evidence")]
     MissingEvidence,
     #[error("invalid promotion transition from `{from}` to `{to}`")]
@@ -229,6 +236,7 @@ impl ProposalLedger {
         if attempt.number != proposal.attempts.len() + 1 {
             return Err(MaintenanceError::AttemptLimit);
         }
+        validate_evidence(&attempt.evidence)?;
         proposal.attempts.push(attempt);
         Ok(())
     }
@@ -241,6 +249,14 @@ impl ProposalLedger {
         if candidate.artifact.trim().is_empty() {
             return Err(MaintenanceError::EmptyField("candidate.artifact"));
         }
+        check_field("candidate.artifact", &candidate.artifact)?;
+        if let Some(branch) = &candidate.branch {
+            check_field("candidate.branch", branch)?;
+        }
+        if let Some(reproducer) = &candidate.reproducer {
+            check_field("candidate.reproducer", reproducer)?;
+        }
+        validate_evidence(&candidate.validation)?;
         let proposal = self
             .proposals
             .iter_mut()
@@ -303,6 +319,40 @@ fn validate_request(request: &ProposalRequest) -> Result<()> {
     ] {
         if value.trim().is_empty() {
             return Err(MaintenanceError::EmptyField(name));
+        }
+        check_field(name, value)?;
+    }
+    if request.scope.len() > MAX_PROPOSAL_SCOPE {
+        return Err(MaintenanceError::FieldTooLarge {
+            field: "scope",
+            limit: MAX_PROPOSAL_SCOPE,
+        });
+    }
+    for scope in &request.scope {
+        check_field("scope entry", scope)?;
+    }
+    Ok(())
+}
+
+fn check_field(field: &'static str, value: &str) -> Result<()> {
+    if value.len() > MAX_PROPOSAL_FIELD_BYTES {
+        return Err(MaintenanceError::FieldTooLarge {
+            field,
+            limit: MAX_PROPOSAL_FIELD_BYTES,
+        });
+    }
+    Ok(())
+}
+
+fn validate_evidence(evidence: &[ValidationEvidence]) -> Result<()> {
+    if evidence.len() > MAX_VALIDATION_EVIDENCE {
+        return Err(MaintenanceError::EvidenceTooLarge(MAX_VALIDATION_EVIDENCE));
+    }
+    for item in evidence {
+        check_field("validation.command", &item.command)?;
+        check_field("validation.outcome", &item.outcome)?;
+        if let Some(detail) = &item.detail {
+            check_field("validation.detail", detail)?;
         }
     }
     Ok(())
