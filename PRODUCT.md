@@ -51,7 +51,7 @@ Product language uses the locked nouns cell, runner, worker contract, and cell c
 
 The implemented product behavior and decision record live in `AGENTS.md` and `.scratch/farseer/issues/`.
 The current operator surface lives in `ui/` and is the production implementation of the approved home direction.
-Earlier Farseer artboards live in `.scratch/design/` and are anti-reference for this replacement direction.
+Earlier Farseer artboards are Git-only history and are anti-reference for this replacement direction.
 Berd's public repository, product record, and design system at `block/berd` are the approved external reference.
 No customer testimonials, commercial claims, or usage benchmarks are available and none may be invented.
 

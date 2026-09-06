@@ -25,7 +25,7 @@ React to it. The point is to find which fields, states and messages are missing 
 ## Resolution
 
 Resolved 2026-08-23.
-Artifact: [one-operator-turn.md](../prototypes/one-operator-turn.md).
+Artifact: the written transcript is retained in Git-only history; the findings are captured below and in the derived tickets.
 
 ### The premise was stale
 

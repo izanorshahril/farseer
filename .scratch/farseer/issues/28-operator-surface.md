@@ -18,7 +18,7 @@ A third arrived during the session and turned out to be the load-bearing one: **
 
 ## What the prototype settled
 
-Three variants were built as one throwaway file, [prototypes/ui-command-center](../prototypes/ui-command-center/README.md), and driven by the operator.
+Three variants were built as one throwaway prototype, removed after its findings were recorded in this ticket and Git history, and driven by the operator.
 
 - **A - channel rail plus thread.** Channels down the left, one channel's conversation in the middle, runs and verbs in a right inspector, board as a tab.
 - **B - canvas of widgets.** No channel list. A tile per channel plus fleet-wide tiles, arrangeable, board as an expanding tile.

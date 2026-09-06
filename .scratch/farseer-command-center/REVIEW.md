@@ -5,7 +5,7 @@
 
 Estimated reading time: 4 minutes.
 Branch: `codex/command-center-plan`.
-State: planning complete; implementation has not started.
+State: planning complete; implementation is in progress.
 
 ## 1. My recommendation
 

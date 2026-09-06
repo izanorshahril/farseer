@@ -6,7 +6,7 @@ Blocked by: none
 
 ## Question
 
-Surfaced by [one-operator-turn.md](../prototypes/one-operator-turn.md) on 2026-08-23.
+Surfaced by the removed `one-operator-turn` prototype on 2026-08-23; its findings are retained in this ticket and Git history.
 The prototype found this by writing a single sentence that nothing on the map justifies.
 
 Cell #0 says **"I'll hand this to the social cell."**

@@ -6,7 +6,7 @@ Blocked by: none
 
 ## Question
 
-Surfaced by [one-operator-turn.md](../prototypes/one-operator-turn.md) on 2026-08-23.
+Surfaced by the removed `one-operator-turn` prototype on 2026-08-23; its findings are retained in this ticket and Git history.
 
 Three small, sharp questions that no closed ticket answers. Grouped because each is a paragraph, not a session.
 The larger gap the same prototype found went to `22 Which cells may a manager call, and does an instruction route or delegate?`.
