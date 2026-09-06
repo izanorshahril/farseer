@@ -132,3 +132,10 @@ Ticket 14 now exposes manager and roster details and refuses missing specialist 
 The follow-up review also closed the board read-state acceptance with UI loading/empty/stale behavior and corrected transcript search cursors under the byte budget.
 Project profile reads now expose their recorded transition history; the profile-switch/future-task and multi-cell demonstration remains open.
 Session detail now links the canonical run/task, parent topology, transcript custody, and indexed excerpt; the two-protocol restart demonstration remains open.
+
+## Status correction, 2026-09-06 implementation wave 3
+
+Ticket 01 now carries an optional owner process id in the authenticated discovery identity.
+Only unreachable stale endpoints are retryable during startup; an answered wrong listener or unauthorized runtime fails distinctly, and a losing launcher terminates its non-owner child before attaching.
+Ticket 18 now runs explicit bounded migration and candidate-startup commands from disposable fixtures without shell interpolation, records observations in the promotion journal, and preserves recovery metadata on failure.
+The public browser smoke demonstrations and some live supervised-run evidence remain open by design; these are evidence gaps, not reasons to retain obsolete planning drafts.
