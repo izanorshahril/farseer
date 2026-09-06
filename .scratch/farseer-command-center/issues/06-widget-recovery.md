@@ -6,7 +6,7 @@
 
 **Blocked by:** None; package approved.
 
-**Status:** in-progress.
+**Status:** complete.
 
 **Execution:** package approved; verify named blockers before implementation.
 
@@ -22,7 +22,7 @@ Diagnostics may be expanded, but raw backend traces are not the primary message.
 - [x] A failed read keeps the last successful projection when available and offers retry, scope reduction, or diagnostics.
 - [x] Errors identify the affected capability and correlation context without exposing bearer tokens or raw private paths.
 - [x] Stream disconnects show stale or reconnecting state and recover without duplicate event rows.
-- [ ] A failure and recovery demo proves the runtime continues accepting and recording work while the UI widget is broken.
+- [x] A failure and recovery demo proves the runtime continues accepting and recording work while the UI widget is broken.
 
 **Exclusions:** No retry loop inside the Rust core, silent fallback to fabricated data, or privileged bridge expansion for authored widgets.
 
@@ -40,5 +40,5 @@ First-party readers update their projection only after a successful response and
 `ui/tests/recovery.test.ts` also closes a first stream after one event, observes stale then live state, verifies the exclusive cursor on the second request, and receives the next event without duplication.
 `ui/tests/recovery.test.ts` also covers non-OK and rejected fetches, malformed SSE data followed by a valid frame, and cursor-specific followers reporting their own state instead of overwriting the shared canvas connection's status.
 `bun run --cwd ui check` and `bun run --cwd ui test` pass.
-
-The runtime-continuity demo with an injected browser failure remains a manual E2E check because the UI test harness has no browser renderer or live farseer process.
+The development-only `farseer_probe=render:work` seam drove a real browser render failure: Work showed its bounded unavailable state while Conversation, Fleet, Capacity, the composer, and shell controls stayed interactive.
+While that probe was active, a bounded maintenance proposal returned HTTP 201 and the normal canvas view observed the new task in progress, proving the runtime continued accepting and recording work through the UI failure.

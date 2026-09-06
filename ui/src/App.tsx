@@ -54,6 +54,18 @@ import { mask, onPrivacy, togglePrivacy } from "./privacy";
  */
 const bridge = createBridge();
 
+// A development-only seam for the browser recovery smoke. The packaged build
+// never reads this query flag, so it cannot turn into an operator-facing fault
+// switch. `06 widget recovery` uses it to prove one boundary can fail while
+// the canvas and the runtime stay usable.
+const DEV_RENDER_PROBE = import.meta.env.DEV
+  ? new URLSearchParams(window.location.search).get("farseer_probe")
+  : null;
+
+function RenderFailureProbe({ id }: { id: string }): null {
+  throw new Error(`synthetic render failure for ${id}`);
+}
+
 /**
  * The widgets this build knows how to render.
  *
@@ -915,7 +927,7 @@ export function App() {
               </div>
               <div className="body">
                 <WidgetBoundary id={widget.id}>
-                  {widget.agent ? (
+                  {DEV_RENDER_PROBE === `render:${widget.id}` ? <RenderFailureProbe id={widget.id} /> : widget.agent ? (
                     <SandboxWidget
                       id={widget.id}
                       title={widget.title}

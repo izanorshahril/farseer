@@ -185,3 +185,7 @@ Verified startup is complete: isolated child-exit and deadline cleanup tests, ma
 
 Widget recovery's structural render isolation and stale-projection read behavior are now accepted from the App boundary and first-party reader implementations.
 The remaining item is one browser failure/recovery demonstration that proves the runtime continues recording work while a widget is broken.
+
+## Status correction, 2026-09-06 implementation wave 13
+
+Widget recovery is complete: a development-only render probe, live browser boundary state, and a concurrent maintenance proposal proved localized failure, sibling interactivity, and continued durable work recording.
