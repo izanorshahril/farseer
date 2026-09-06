@@ -20,7 +20,7 @@ Diagnostics may be expanded, but raw backend traces are not the primary message.
 
 - [ ] A render exception in one built-in or authored widget leaves all sibling widgets and shell controls interactive.
 - [ ] A failed read keeps the last successful projection when available and offers retry, scope reduction, or diagnostics.
-- [ ] Errors identify the affected capability and correlation context without exposing bearer tokens or raw private paths.
+- [x] Errors identify the affected capability and correlation context without exposing bearer tokens or raw private paths.
 - [x] Stream disconnects show stale or reconnecting state and recover without duplicate event rows.
 - [ ] A failure and recovery demo proves the runtime continues accepting and recording work while the UI widget is broken.
 

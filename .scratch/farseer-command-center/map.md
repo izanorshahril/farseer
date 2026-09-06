@@ -96,3 +96,7 @@ The remaining unchecked acceptance items are startup child-cleanup/capability de
 ## Status correction, 2026-09-06 implementation wave 8
 
 The project-team regression now accepts two nominated specialist cell calls, records each call's autonomy cap and specialist set, and refuses a third callable cell before creating work.
+
+## Status correction, 2026-09-06 implementation wave 9
+
+The widget recovery acceptance now marks bounded error identity and redaction complete; render isolation, retained-read demonstration, and runtime-continuity E2E remain open.
