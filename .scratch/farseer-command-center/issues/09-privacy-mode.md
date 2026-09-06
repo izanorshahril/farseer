@@ -27,7 +27,8 @@ Masking defaults to on for account identities and sensitive paths in screenshot 
 **Evidence:** `ui/src/privacy.tsx` defaults presentation masking on and leaves source values untouched.
 First-party widgets classify account, path, session, and diagnostic display fields through `mask`, including tooltip text, accessible labels, confirmation prompts, and graph/run identifiers.
 `RevealField` exposes one field for ten seconds with accessible state, and visibility changes or privacy re-enable clear all reveals.
-`copyPresentation` and `exportPresentation` keep masked output as the default and accept raw values only when the caller supplies explicit authorization.
+`copyPresentation` and `exportPresentation` keep masked output as the default and raw output requires a live field reveal or privacy being explicitly disabled.
+The Run widget now exposes an export-report control that copies a bounded JSON presentation through the same masking helper.
 The notification plane now correlates finished events by record sequence and never exports a run/session identifier to an external sink.
 The remaining acceptance evidence is a browser screenshot/copy/export pass over representative first-party views.
 

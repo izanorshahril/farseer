@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import type { Bridge } from "../bridge";
 import { follow, type RecordEvent } from "../stream";
-import { mask, RevealField, usePrivacy } from "../privacy";
+import { exportPresentation, mask, RevealField, usePrivacy } from "../privacy";
 import { onSelection, selectRun, selectedRun } from "../selection";
 import { confirmVerb } from "../confirm";
 import { meaningOf } from "../meaning";
@@ -238,6 +238,21 @@ export function RunWidget({ bridge }: { bridge: Bridge }) {
     }
   };
 
+  const exportReport = async () => {
+    if (!run) return;
+    const report = exportPresentation({
+      run_id: { value: run.run_id, kind: "session" },
+      title: { value: run.title ?? "", kind: "diagnostic" },
+      goal: { value: typeof contract.goal === "string" ? contract.goal : "", kind: "diagnostic" },
+    }, privacy);
+    try {
+      await navigator.clipboard?.writeText(report);
+      setNote(privacy ? "masked report copied" : "report copied");
+    } catch (e) {
+      setNote((e as Error).message);
+    }
+  };
+
   if (!runId)
     return (
       <p className="empty">
@@ -270,6 +285,7 @@ export function RunWidget({ bridge }: { bridge: Bridge }) {
         <b>{run.title ? <RevealField value={run.title} kind="diagnostic" fieldKey={`run-title:${run.run_id}`} label="run title" /> : mask(run.run_id.slice(0, 8), "session", privacy)}</b>
         <span className="grow" />
         <span className="faint mono small">{mask(run.run_id.slice(0, 8), "session", privacy)}</span>
+        <button className="chip" onClick={() => void exportReport()} title="copy a JSON report using the current privacy presentation">export report</button>
         <button className="chip" onClick={() => selectRun(null)} title="close this run">
           close
         </button>

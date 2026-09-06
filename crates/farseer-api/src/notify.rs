@@ -256,9 +256,51 @@ mod tests {
 
     #[test]
     fn external_notifications_correlate_by_record_event_without_exporting_run_ids() {
+        let cells = tempfile::tempdir().unwrap();
+        let runs_dir = tempfile::tempdir().unwrap();
+        let repo = tempfile::tempdir().unwrap();
+        let state = AppState::new(
+            farseer_store::Store::open_in_memory().unwrap(),
+            cells.path(),
+            crate::RuntimeToken::generate(),
+            runs_dir.path(),
+            repo.path(),
+        );
         let run = RunId::new();
-        let body = format!("record event {}: ok", 42);
-        assert!(body.contains("record event 42"));
+        let task = farseer_core::TaskId::new();
+        state
+            .store()
+            .upsert_run(&farseer_store::RunRow {
+                run_id: run,
+                task_id: task,
+                cell_id: farseer_core::CellId::new("zero"),
+                runner: "pi".into(),
+                model: String::new(),
+                outcome: Some("ok".into()),
+                usd_micros: 0,
+                tokens: 0,
+                operator_touched: false,
+                started_ts: 100,
+                finished_ts: Some(200),
+            })
+            .unwrap();
+        let event_seq = state
+            .store()
+            .append(&farseer_core::NewEvent::new(
+                farseer_core::CellId::new("zero"),
+                run,
+                EventKind::new(EventKind::RUN_FINISHED),
+                farseer_core::Actor::System,
+                200,
+                serde_json::json!({ "outcome": "ok" }),
+            ))
+            .unwrap();
+        let mut cursor = 0;
+        let notifications = poll(&state, &mut cursor, &mut HashSet::new());
+        assert_eq!(notifications.len(), 1);
+        let body = &notifications[0].body;
+        assert_eq!(cursor, event_seq);
+        assert!(body.contains(&format!("record event {event_seq}")));
         assert!(!body.contains(&run.to_string()));
         assert!(!body.contains("run "));
     }

@@ -394,7 +394,7 @@ export function WorkWidget({ bridge }: { bridge: Bridge }) {
                   <h4>{stateLabel(state)} <span>{grouped[state].length}</span></h4>
                   {grouped[state].map((task) => (
                     <button key={task.task_id} className={subject.task === task.task_id ? "work-card selected" : "work-card"} onClick={() => chooseTask(task)}>
-                      <b>{task.title}</b>
+                      <b>{mask(task.title, "diagnostic", privacy)}</b>
                       <small>{task.project_path ? mask(task.project_path, "path", privacy) : "fleet"}</small>
                       <small>{task.run_summary.run_count} run{task.run_summary.run_count === 1 ? "" : "s"} · {task.run_summary.active_runs} active · {task.run_summary.latest_outcome ?? "pending"}</small>
                     </button>
@@ -416,7 +416,7 @@ export function WorkWidget({ bridge }: { bridge: Bridge }) {
             {conversations.map((conversation) => (
               <li key={conversation.conversation_id}>
                 <button className={subject.conversation === conversation.conversation_id ? "row-button selected" : "row-button"} onClick={() => selectSubject({ conversation: conversation.conversation_id, task: null, run: null, project: conversation.project_path ?? null, managerRunner: conversation.manager_runner ?? null })}>
-                  <b>{conversation.title}</b><small>{conversation.project_path ? mask(conversation.project_path, "path", privacy) : "fleet"}</small><span className="mono">{mask(short(conversation.conversation_id), "session", privacy)}</span>
+                  <b>{mask(conversation.title, "diagnostic", privacy)}</b><small>{conversation.project_path ? mask(conversation.project_path, "path", privacy) : "fleet"}</small><span className="mono">{mask(short(conversation.conversation_id), "session", privacy)}</span>
                 </button>
               </li>
             ))}
@@ -476,7 +476,7 @@ export function WorkWidget({ bridge }: { bridge: Bridge }) {
       {face === "completed" && (
         <div className="completed-work">
           {[...grouped.done, ...grouped.cancelled].map((task) => (
-            <button key={task.task_id} className="row-button" onClick={() => chooseTask(task)}><b>{task.title}</b><span className={`badge ${task.state === "cancelled" ? "bad" : ""}`}>{task.state}</span></button>
+            <button key={task.task_id} className="row-button" onClick={() => chooseTask(task)}><b>{mask(task.title, "diagnostic", privacy)}</b><span className={`badge ${task.state === "cancelled" ? "bad" : ""}`}>{task.state}</span></button>
           ))}
           {grouped.done.length + grouped.cancelled.length === 0 && <p className="empty">No completed work yet.</p>}
         </div>
@@ -493,7 +493,7 @@ export function WorkWidget({ bridge }: { bridge: Bridge }) {
 
       {detail && (
         <aside className="task-detail" aria-label="Selected task detail">
-          <div className="row"><b>{detail.task.title}</b><span className="badge">{stateLabel(detail.task.state)}</span><button className="chip" onClick={() => selectSubject({ task: null, run: null })}>close</button></div>
+          <div className="row"><b>{mask(detail.task.title, "diagnostic", privacy)}</b><span className="badge">{stateLabel(detail.task.state)}</span><button className="chip" onClick={() => selectSubject({ task: null, run: null })}>close</button></div>
           <p>{mask(detail.task.goal, "diagnostic", privacy)}</p>
           {detail.usage && <div className="meta" aria-label="task usage">
             <span><i>usage scope</i><b>task</b></span>

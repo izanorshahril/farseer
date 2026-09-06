@@ -82,3 +82,4 @@ The current implementation wave adds additive task-card run summaries, public gl
 These close the corresponding bounded read and profile acceptance items while session-detail topology, multi-cell profile switching, and browser/live demonstrations remain open.
 
 The follow-up review fixed byte-budget cursor advancement for transcript search, added explicit board loading/empty/stale states, exposed append-only project profile transition history, added a linked session-detail projection, and synchronized the README route/tree documentation.
+The session explorer now has a file-backed restart regression covering Claude-shaped and ACP-shaped sessions through the bounded public list route; browser/demo evidence and a dedicated search face remain separate follow-up work.

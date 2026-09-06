@@ -1133,7 +1133,7 @@ export function App() {
                   }}
                 >
                   <option value="">none</option>
-                  {contextConversations.map((conversation) => <option key={conversation.conversation_id} value={conversation.conversation_id}>{conversation.title}</option>)}
+                  {contextConversations.map((conversation) => <option key={conversation.conversation_id} value={conversation.conversation_id}>{mask(conversation.title, "diagnostic", privacy)}</option>)}
                   {subject.conversation && !contextConversations.some((conversation) => conversation.conversation_id === subject.conversation) && <option value={subject.conversation}>{mask(subject.conversation.slice(0, 8), "session", privacy)}</option>}
                 </select>
               </label>
@@ -1152,7 +1152,7 @@ export function App() {
                   }}
                 >
                   <option value="">none</option>
-                  {contextTasks.map((task) => <option key={task.task_id} value={task.task_id}>{task.title}</option>)}
+                  {contextTasks.map((task) => <option key={task.task_id} value={task.task_id}>{mask(task.title, "diagnostic", privacy)}</option>)}
                   {subject.task && !contextTasks.some((task) => task.task_id === subject.task) && <option value={subject.task}>{mask(subject.task.slice(0, 8), "session", privacy)}</option>}
                 </select>
               </label>
