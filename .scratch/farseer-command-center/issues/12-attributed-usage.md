@@ -6,7 +6,7 @@
 
 **Blocked by:** [Paged work board](03-paged-work-board.md)
 
-**Status:** in-progress.
+**Status:** complete.
 
 **Execution:** package approved; verify named blockers before implementation.
 
@@ -30,7 +30,10 @@ Provider windows remain source-labelled and do not derive a percentage from fars
 Run detail now exposes observed duration, cost basis (`reported`, `estimated`, or `unknown`), and run scope.
 Task detail aggregates distinct run rows with successful/failed counts, tokens, reported and estimated spend, duration, and an explicit task scope.
 `task_usage_counts_parent_and_child_runs_once_each` records one parent and one delegated child under one task and verifies each run contributes once to task totals, including the failed attempt.
-The broader two-task acceptance demo remains open.
+The public two-task acceptance demo below closes the prior evidence gap.
+
+`public_usage_pages_two_tasks_with_distinct_models_and_costs` now exercises the public task-detail and cost-page routes with two tasks, distinct models, one failed retry, stable pagination, and project scope.
+The parent and retry are counted once each in task usage, while Capacity analytics includes only successful observed cost rows and preserves the model/runner breakdown.
 
 **Exclusions:** No GPU claim, one-second process sampler, fleet-wide invented billing, or model share presented as provider quota.
 

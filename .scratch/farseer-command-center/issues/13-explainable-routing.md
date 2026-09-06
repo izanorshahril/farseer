@@ -6,7 +6,7 @@
 
 **Blocked by:** [Attributed usage](12-attributed-usage.md)
 
-**Status:** in-progress.
+**Status:** complete.
 
 **Execution:** package approved; verify named blockers before implementation.
 
@@ -30,7 +30,8 @@ Explicit unsupported pins fail instead of silently falling through; zero automat
 Delegated worker contracts emit the same bounded record before their workspace is created.
 The routing projection has a deterministic replay test covering an exhausted preferred account and an unknown fallback candidate.
 The API now has a table-driven guard test for token, wall-clock, and currency bounds, plus an end-to-end currency refusal that proves no workspace is created before the check.
-The full acceptance demo and analytics attribution read model remain open.
+`a_top_manager_routes_a_project_team_through_public_ingress` now proves the public route records `routing_sealed` before the manager begins, with the selected runner and declared candidate order.
+Together with `routing_provenance_is_bounded_and_replayable` and the public cost-page usage regression, this closes deterministic fallback, provenance, and attribution coverage.
 
 **Exclusions:** No token-level router, opaque LLM judge, arbitrary installed model picker, or vendor gateway in the core.
 

@@ -3,7 +3,7 @@
 **Parent:** [Command-center decision map](../map.md).
 **What to build:** Let Farseer maintain its own repository as an ordinary project by creating an isolated candidate change with reproduction and validation evidence.
 **Blocked by:** [Independent runtime lifecycle](02-independent-runtime.md), [Project team profiles](14-project-teams.md).
-**Status:** bounded worker implemented; promotion remains a separate ticket.
+**Status:** complete.
 **Execution:** package approved; verify named blockers before implementation.
 **Review refs:** R11; R13 applies as targeted cleanup.
 **Decision:** [Self-maintenance and domain integration](../decisions/05-maintenance.md).
@@ -47,3 +47,4 @@ The candidate edit is placed inside the first declared scope entry, and the work
 The candidate worktree remains available for review, while the active checkout and runtime revision stay unchanged.
 If an operator cancels while the worker is still running, the retained candidate worktree and branch are removed before the cancellation response completes.
 The API regression removes the branch after asserting the retained files and the unchanged active `HEAD`.
+The bounded maintenance-proposal contract is complete; Safe staged runtime promotion remains intentionally isolated in its own ticket.

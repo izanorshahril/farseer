@@ -199,3 +199,9 @@ Project team profiles now have a deterministic public-ingress regression that re
 
 The startup identity correction now pairs the owner PID with Windows process creation time and tests the legacy no-PID-only fallback.
 The shared stream regression now proves custom subscriber state survives the shared connection while the global canvas state remains intact.
+
+## Status clarification, 2026-09-06 implementation wave 16
+
+The remaining bounded slices are now complete against their contracts.
+Session explorer, attributed usage, explainable routing, project teams, terminal profiles, maintenance proposals, the noncoding manifest pipeline, and the optional resource monitor each have current acceptance evidence recorded on their ticket.
+The remaining optional probes are explicitly excluded from the core contract and do not keep a ticket in progress.

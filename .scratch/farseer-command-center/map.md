@@ -130,3 +130,9 @@ The project-team slice now has a deterministic public-ingress regression using a
 
 Startup owner identity now uses the Windows `(pid, process_creation_time)` pair when the OS can provide it, with an explicit no-PID-only fallback for legacy records.
 The shared UI stream preserves the first connection's retry seam and delivers per-subscriber state without dropping the global canvas state.
+
+## Status correction, 2026-09-06 implementation wave 16
+
+The remaining bounded tickets now have acceptance evidence: session explorer restart/detail/search coverage, two-task attributed-usage pagination, public routing provenance, multi-cell project-team ingress, terminal profile lifecycle, maintenance proposal isolation, public manifest cancellation, and Job Object resource ownership/retention.
+Session explorer, Attributed usage, Explainable routing, Project team profiles, Terminal profiles, Bounded maintenance source proposals, Noncoding artifact-manifest pipeline, and Optional supervised resource monitor are complete within their explicit exclusions.
+Optional ConPTY, runtime-restart terminal recovery, live provider sampling, and synthetic PID-reuse diagnostics remain follow-up probes rather than core ticket requirements.

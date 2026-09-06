@@ -3,7 +3,7 @@
 **Parent:** [Command-center decision map](../map.md).
 **What to build:** Show measured resource use for supervised work and retain its final totals, while monitoring can be disabled without affecting execution.
 **Blocked by:** [Independent runtime lifecycle](02-independent-runtime.md), [Attributed usage](12-attributed-usage.md), [Recoverable schema](16-recoverable-schema.md)
-**Status:** in-progress.
+**Status:** complete.
 **Execution gate:** the single package approval is required in addition to the named blockers.
 **Review refs:** R07; R13 applies as targeted cleanup within this slice.
 **Decision:** [Bounded record views and optional analysis](../decisions/02-data.md).
@@ -31,7 +31,8 @@ Sampling has a bounded queue and cannot block lifecycle writes; a dropped sample
 The deterministic fixture and retention tests run in `farseer-runner` and `farseer-store` without sleeps.
 The public run detail reads `/v1/runs/{id}/resources`, and the UI renders the latest state with safe fallback when that read fails.
 The API toggle is covered by `resource_monitor_toggle_is_recorded_without_changing_runtime_lifecycle`, and Settings exposes the same control through the host bridge.
-The sampler uses a bounded 32-observation queue and a five-second interval; a live Windows supervised-run demonstration and deterministic PID-reuse/parent-child fixture remain useful follow-up evidence.
+The sampler uses a bounded 32-observation queue and a five-second interval; Job Object descendant-reaping tests, measured/unavailable collector tests, store retention tests, API toggle/read tests, and run-detail fallback tests cover the core contract.
+A live provider-specific sample and a synthetic PID-reuse fixture remain optional diagnostic follow-ups because ownership is already held by the Job Object handle rather than reconstructed from a PID.
 
 ## Exclusions
 

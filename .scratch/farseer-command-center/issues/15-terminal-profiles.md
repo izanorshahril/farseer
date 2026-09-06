@@ -6,7 +6,7 @@
 
 **Blocked by:** [Independent runtime lifecycle](02-independent-runtime.md), [Focused workspace](10-focused-workspace.md)
 
-**Status:** in-progress.
+**Status:** complete.
 
 **Execution:** package approved; verify named blockers before implementation.
 
@@ -39,3 +39,5 @@ Deferred cleanup now attempts every ready workspace before returning the first t
 `crates/farseer-api/src/terminals.rs` exposes profile discovery, open, reconnect, input, resize, and explicit end routes with authorized project or active-run workspace checks.
 The runtime owns the in-memory session manager, so closing the desktop window leaves sessions available while the runtime remains alive.
 The first slice intentionally retains resize state at the adapter seam and does not claim ConPTY or durable recovery after a runtime process restart.
+The terminal acceptance is complete within that contract: profile resolution, bounded scrollback, resize/input, reconnect, explicit End, deferred workspace cleanup, Unicode paths, and pre-spawn authority failures are covered by the runner and API seams.
+ConPTY and recovery after a runtime restart remain explicitly optional follow-up work rather than unfinished core behavior.

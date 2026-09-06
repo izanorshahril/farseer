@@ -6,7 +6,7 @@
 
 **Blocked by:** [Bounded transcript projection](05-bounded-transcript-index.md), [Focused workspace](10-focused-workspace.md)
 
-**Status:** in-progress.
+**Status:** complete.
 
 **Execution:** package approved; verify named blockers before implementation.
 
@@ -31,6 +31,8 @@ The public session-page regression test now proves bounded paging, provider iden
 The same public fixture now opens `/v1/work/session` and verifies the originating task/run, parent topology, transcript custody, projection status, and scrubbed indexed excerpt.
 Session detail now applies the 32-row relationship and attachment cap in SQLite before decoding rows, so a large run cannot materialize its full parent or transcript archive before the API limit.
 `the_session_explorer_survives_restart_with_two_harness_protocols` writes a file-backed record with Claude and ACP-shaped sessions, drops the first API state, reopens the same record, and verifies both protocol identifiers and runners through `/v1/work/sessions`.
+
+The session explorer acceptance is complete: the public list, detail, search, filter, bounded relationship, and two-protocol restart regressions cover every contract item.
 
 **Exclusions:** No automatic transcript copying, private harness-directory guessing, external embeddings service, or raw log viewer without explicit custody.
 

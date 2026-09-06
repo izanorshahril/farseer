@@ -6,7 +6,7 @@
 
 **Blocked by:** [Explicit composer context](07-explicit-composer-context.md), [Explainable routing](13-explainable-routing.md)
 
-**Status:** in-progress.
+**Status:** complete.
 
 **Execution:** package approved; verify named blockers before implementation.
 
@@ -31,7 +31,7 @@ The project widget now expands the selected profile to show manager runners, eac
 The public profile tests cover manager/roster projection and missing specialist refusal before any work rows are created.
 The deterministic `a_project_team_records_its_specialist_set_and_refuses_other_cells` regression records two accepted specialist calls, preserves each supervised call's autonomy cap and specialist set, refuses a callable cell outside that set before creating a run, and preserves the caller's run count.
 The profile route now projects append-only transition history; the public profile-switch regression covers two future tasks, old/new cells, actor/reason, and equal global/project task projections without duplication.
-A full multi-cell delegation/cap demo remains open.
+`a_top_manager_routes_a_project_team_through_public_ingress` is the full public multi-cell proof: one task receives two declared specialist calls, each call records the reversible cap and specialist set, graph topology remains attached to the task, and global/project boards return one identical task row.
 
 **Exclusions:** No project-specific copy of cell grants, arbitrary runner discovery, direct non-zero project ingress, or promise of zero coordination cost.
 

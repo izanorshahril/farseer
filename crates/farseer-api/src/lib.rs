@@ -4531,6 +4531,21 @@ Write-Output '{"type":"agent_end","messages":[{"role":"assistant","content":[{"t
         assert_eq!(calls[0]["call"]["autonomy_ceiling"], "reversible");
         assert_eq!(calls[1]["call"]["autonomy_ceiling"], "reversible");
         assert_eq!(child_runs.len(), 2);
+        let events = h
+            .state
+            .store()
+            .scan(0, 5_000, &ScanFilter::default())
+            .unwrap();
+        let routing = events
+            .iter()
+            .find(|event| {
+                event.run_id.to_string() == root_run
+                    && event.kind == EventKind::ROUTING_SEALED.into()
+            })
+            .expect("public ingress seals routing before the manager starts");
+        assert_eq!(routing.actor.as_str(), "system");
+        assert_eq!(routing.payload["selected_runner"], "pi");
+        assert_eq!(routing.payload["candidates"][0]["runner"], "pi");
 
         let root_row = h
             .wait_for_finished(&root_run, std::time::Duration::from_secs(15))
@@ -8588,6 +8603,56 @@ runner = "{runner}"
     }
 
     #[tokio::test]
+    async fn the_public_manifest_route_cancels_a_large_fixture_without_promotion() {
+        let h = harness();
+        let root = tempfile::tempdir().unwrap();
+        let project = root.path().join("project");
+        let input = project.join("input");
+        std::fs::create_dir_all(&input).unwrap();
+        for index in 0..6_000 {
+            std::fs::write(input.join(format!("entry-{index:05}.txt")), b"fixture").unwrap();
+        }
+        let root_path = std::fs::canonicalize(root.path()).unwrap();
+        let project_path = std::fs::canonicalize(&project).unwrap();
+        let input_path = std::fs::canonicalize(&input).unwrap();
+        h.state
+            .store()
+            .authorize_root(&projects::display(&root_path), now_ms())
+            .unwrap();
+
+        let (status, response) = h
+            .post(
+                "/v1/artifacts/manifests",
+                json!({
+                    "project": projects::display(&project_path),
+                    "input": projects::display(&input_path),
+                }),
+            )
+            .await;
+        assert_eq!(status, StatusCode::ACCEPTED, "{response}");
+        let run_id = response["run_id"].as_str().unwrap().to_owned();
+        let task_id = response["task_id"].as_str().unwrap().to_owned();
+        let (status, cancelled) = h
+            .post(&format!("/v1/runs/{run_id}/cancel"), json!({}))
+            .await;
+        assert_eq!(status, StatusCode::ACCEPTED, "{cancelled}");
+
+        let row = h
+            .wait_for_finished(&run_id, std::time::Duration::from_secs(10))
+            .await;
+        assert_eq!(row["outcome"], "cancelled", "{row}");
+        let (status, detail) = h.get(&format!("/v1/tasks/{task_id}")).await;
+        assert_eq!(status, StatusCode::OK, "{detail}");
+        assert_eq!(detail["task"]["state"], "cancelled");
+        assert_eq!(detail["artifacts"][0]["status"], "cancelled");
+        assert!(detail["artifacts"][0]["final_path"].is_null());
+        let staged = detail["artifacts"][0]["staged_path"].as_str().unwrap();
+        assert!(std::path::Path::new(staged).is_file());
+        let final_candidate = staged.replace(".partial", "");
+        assert!(!std::path::Path::new(&final_candidate).exists());
+    }
+
+    #[tokio::test]
     async fn the_session_explorer_page_preserves_protocol_and_log_availability() {
         let h = harness();
         let now = now_ms();
@@ -8989,6 +9054,149 @@ runner = "claude-code"
         assert_eq!(card["run_summary"]["run_count"], 2);
         assert_eq!(card["run_summary"]["active_runs"], 0);
         assert_eq!(card["run_summary"]["latest_outcome"], "failed");
+    }
+
+    /// `12 attributed usage`: the public task and analytics projections must agree across two independent tasks, models, outcomes, and cost rows.
+    #[tokio::test]
+    async fn public_usage_pages_two_tasks_with_distinct_models_and_costs() {
+        let h = harness();
+        let now = now_ms();
+        let project_a = "C:/projects/alpha";
+        let project_b = "C:/projects/beta";
+        let mut fixtures = Vec::new();
+        for (title, project, runner, model) in [
+            ("Alpha task", project_a, "pi", "model-alpha"),
+            ("Beta task", project_b, "omp", "model-beta"),
+        ] {
+            let conversation_id = farseer_core::ConversationId::new();
+            let task_id = TaskId::new();
+            h.state
+                .store()
+                .create_conversation(&farseer_core::Conversation {
+                    conversation_id,
+                    title: title.into(),
+                    project_path: Some(project.into()),
+                    manager_runner: Some(runner.into()),
+                    created_ts: now,
+                    updated_ts: now,
+                    archived_ts: None,
+                })
+                .unwrap();
+            h.state
+                .store()
+                .create_task(&farseer_core::Task {
+                    task_id,
+                    conversation_id,
+                    goal: title.into(),
+                    title: title.into(),
+                    project_path: Some(project.into()),
+                    state: farseer_core::TaskState::Done,
+                    priority: 0,
+                    created_ts: now,
+                    updated_ts: now,
+                })
+                .unwrap();
+            fixtures.push((task_id, runner, model));
+        }
+        let (alpha, alpha_runner, alpha_model) = fixtures[0];
+        let (beta, beta_runner, beta_model) = fixtures[1];
+        let alpha_parent = RunId::new();
+        let alpha_retry = RunId::new();
+        let beta_run = RunId::new();
+        for (run_id, task_id, runner, model, outcome, tokens, usd_micros, started_ts) in [
+            (
+                alpha_parent,
+                alpha,
+                alpha_runner,
+                alpha_model,
+                Some("ok"),
+                10,
+                100,
+                now,
+            ),
+            (
+                alpha_retry,
+                alpha,
+                alpha_runner,
+                alpha_model,
+                Some("failed"),
+                2,
+                20,
+                now + 1,
+            ),
+            (
+                beta_run,
+                beta,
+                beta_runner,
+                beta_model,
+                Some("ok"),
+                5,
+                50,
+                now + 2,
+            ),
+        ] {
+            h.state
+                .store()
+                .upsert_run(&RunRow {
+                    run_id,
+                    task_id,
+                    cell_id: CellId::new("zero"),
+                    runner: runner.into(),
+                    model: model.into(),
+                    outcome: outcome.map(str::to_owned),
+                    usd_micros,
+                    tokens,
+                    operator_touched: false,
+                    started_ts,
+                    finished_ts: Some(started_ts + 10),
+                })
+                .unwrap();
+        }
+        h.state
+            .store()
+            .record_run_parent(alpha_retry, alpha_parent, "retry")
+            .unwrap();
+
+        let (status, alpha_detail) = h.get(&format!("/v1/tasks/{alpha}")).await;
+        assert_eq!(status, StatusCode::OK, "{alpha_detail}");
+        assert_eq!(alpha_detail["usage"]["runs"], 2);
+        assert_eq!(alpha_detail["usage"]["successful_runs"], 1);
+        assert_eq!(alpha_detail["usage"]["failed_runs"], 1);
+        assert_eq!(alpha_detail["usage"]["tokens"], 12);
+        assert_eq!(alpha_detail["usage"]["usd_micros"], 120);
+
+        let (status, beta_detail) = h.get(&format!("/v1/tasks/{beta}")).await;
+        assert_eq!(status, StatusCode::OK, "{beta_detail}");
+        assert_eq!(beta_detail["usage"]["runs"], 1);
+        assert_eq!(beta_detail["usage"]["tokens"], 5);
+        assert_eq!(beta_detail["usage"]["usd_micros"], 50);
+
+        let (status, first_page) = h.get("/v1/analytics/cost/page?limit=1").await;
+        assert_eq!(status, StatusCode::OK, "{first_page}");
+        assert_eq!(first_page["rows"].as_array().unwrap().len(), 1);
+        assert_eq!(first_page["rows"][0]["runner"], "pi");
+        assert_eq!(first_page["rows"][0]["model"], "model-alpha");
+        assert_eq!(first_page["rows"][0]["runs"], 1);
+        assert_eq!(first_page["rows"][0]["usd_micros"], 100);
+        assert_eq!(first_page["rows"][0]["tokens"], 10);
+        assert_eq!(first_page["next_offset"], 1);
+        assert_eq!(first_page["has_more"], true);
+
+        let (status, second_page) = h.get("/v1/analytics/cost/page?limit=1&offset=1").await;
+        assert_eq!(status, StatusCode::OK, "{second_page}");
+        assert_eq!(second_page["rows"].as_array().unwrap().len(), 1);
+        assert_eq!(second_page["rows"][0]["runner"], "omp");
+        assert_eq!(second_page["rows"][0]["model"], "model-beta");
+        assert_eq!(second_page["rows"][0]["usd_micros"], 50);
+        assert_eq!(second_page["next_offset"], serde_json::Value::Null);
+        assert_eq!(second_page["has_more"], false);
+
+        let (status, scoped) = h
+            .get("/v1/analytics/cost/page?project=C:/projects/alpha&limit=10")
+            .await;
+        assert_eq!(status, StatusCode::OK, "{scoped}");
+        assert_eq!(scoped["rows"].as_array().unwrap().len(), 1);
+        assert_eq!(scoped["rows"][0]["model"], "model-alpha");
     }
 
     #[tokio::test]
