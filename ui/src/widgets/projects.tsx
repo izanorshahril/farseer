@@ -30,6 +30,7 @@ type TeamProfile = {
   source: "file" | "default";
   coordinating_cell: string;
   specialist_cells: string[];
+  history?: { old?: string; new: string; actor: string; reason: string; ts: number }[];
   cell?: { name: string; manager: { runners: string[] }; roster: { name: string; kind: string; runner?: string }[] };
   error?: string;
 };
@@ -437,6 +438,15 @@ export function ProjectsWidget({ bridge }: { bridge: Bridge }) {
                             </li>
                           ))}
                         </ul>
+                        {project.profile.history && project.profile.history.length > 0 && (
+                          <ul className="plain-list">
+                            {project.profile.history.slice(-3).map((change) => (
+                              <li key={`${change.ts}:${change.new}`} className="dim small">
+                                profile {change.old ?? "none"} → {change.new} · {change.actor} · {change.reason}
+                              </li>
+                            ))}
+                          </ul>
+                        )}
                       </details>
                     )}
                   </li>

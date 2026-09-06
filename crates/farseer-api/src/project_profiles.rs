@@ -32,6 +32,15 @@ fn profile_version() -> u32 {
 }
 
 #[derive(Debug, Clone, Serialize)]
+pub struct ProfileTransition {
+    pub old: Option<String>,
+    pub new: String,
+    pub actor: String,
+    pub reason: String,
+    pub ts: i64,
+}
+
+#[derive(Debug, Clone, Serialize)]
 pub struct ProfileProjection {
     pub path: String,
     pub source: &'static str,
@@ -41,6 +50,7 @@ pub struct ProfileProjection {
     pub coordinating_cell: String,
     pub specialist_cells: Vec<String>,
     pub cell: Option<CellDefinition>,
+    pub history: Vec<ProfileTransition>,
     pub error: Option<String>,
 }
 
@@ -136,6 +146,7 @@ fn validate(state: &AppState, project: &Path, profile: &ProjectProfile) -> ApiRe
 
 pub(crate) fn projection(state: &AppState, project: &Path) -> ProfileProjection {
     let path = project.join(PROFILE_PATH);
+    let history = profile_history(state, &crate::projects::display(project));
     match effective(state, project) {
         Ok((profile, source)) => ProfileProjection {
             path: path.display().to_string(),
@@ -149,6 +160,7 @@ pub(crate) fn projection(state: &AppState, project: &Path) -> ProfileProjection 
                 .cells()
                 .get(&CellId::new(profile.coordinating_cell))
                 .cloned(),
+            history,
             error: None,
         },
         Err(error) => ProfileProjection {
@@ -160,9 +172,54 @@ pub(crate) fn projection(state: &AppState, project: &Path) -> ProfileProjection 
             coordinating_cell: String::new(),
             specialist_cells: Vec::new(),
             cell: None,
+            history,
             error: Some(error.to_string()),
         },
     }
+}
+
+/// Profile choices are recorded with the accepted operator instruction, so a
+/// read projection can explain which team selection a future task inherited.
+/// This keeps history in the append-only record rather than creating a second
+/// mutable profile store (`14 project team profiles`).
+pub(crate) fn profile_history(state: &AppState, project: &str) -> Vec<ProfileTransition> {
+    state
+        .store()
+        .scan(0, 5_000, &farseer_store::ScanFilter::default())
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|event| {
+            if event.kind.as_str() != farseer_core::EventKind::OPERATOR_CONTEXT
+                || event
+                    .payload
+                    .get("project")
+                    .and_then(serde_json::Value::as_str)
+                    != Some(project)
+            {
+                return None;
+            }
+            let profile = event.payload.get("project_profile")?;
+            let new = profile.get("new")?.as_str()?.to_owned();
+            Some(ProfileTransition {
+                old: profile
+                    .get("old")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_owned),
+                new,
+                actor: profile
+                    .get("actor")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_else(|| event.actor.as_str())
+                    .to_owned(),
+                reason: profile
+                    .get("reason")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("operator instruction accepted")
+                    .to_owned(),
+                ts: event.ts,
+            })
+        })
+        .collect()
 }
 
 pub(crate) async fn get(
@@ -184,23 +241,8 @@ pub(crate) async fn reload(
 /// The prior selected profile is only provenance. Runs keep their sealed cell
 /// and profile choice, so changing the file affects future tasks only.
 pub(crate) fn prior_profile(state: &AppState, project: &str) -> Option<String> {
-    state
-        .store()
-        .scan(0, 5_000, &farseer_store::ScanFilter::default())
-        .ok()?
+    profile_history(state, project)
         .into_iter()
-        .rev()
-        .find_map(|event| {
-            (event.kind.as_str() == farseer_core::EventKind::OPERATOR_CONTEXT
-                && event.payload.get("project")?.as_str()? == project)
-                .then(|| {
-                    event
-                        .payload
-                        .get("project_profile")
-                        .and_then(|value| value.get("new"))
-                        .and_then(serde_json::Value::as_str)
-                        .map(str::to_owned)
-                })
-                .flatten()
-        })
+        .next_back()
+        .map(|transition| transition.new)
 }

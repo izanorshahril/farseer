@@ -130,3 +130,4 @@ Ticket 11 now labels referenced, rotated, and unavailable logs and verifies proj
 Ticket 14 now exposes manager and roster details and refuses missing specialist cells before work creation; solo/multi-cell transition history and board demonstration remain open.
 
 The follow-up review also closed the board read-state acceptance with UI loading/empty/stale behavior and corrected transcript search cursors under the byte budget.
+Project profile reads now expose their recorded transition history; the profile-switch/future-task and multi-cell demonstration remains open.

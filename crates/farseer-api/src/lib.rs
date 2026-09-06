@@ -3935,6 +3935,34 @@ grants_shell = true
         assert_eq!(body["cell"]["manager"]["runners"], json!(["claude-code"]));
         assert_eq!(body["cell"]["roster"][0]["name"], "shell");
         assert_eq!(body["specialist_cells"], json!([]));
+        assert_eq!(body["history"], json!([]));
+
+        h.state
+            .store()
+            .append(&NewEvent::new(
+                CellId::new("zero"),
+                RunId::new(),
+                EventKind::new(EventKind::OPERATOR_CONTEXT),
+                Actor::Operator,
+                42,
+                json!({
+                    "project": projects::display(&project),
+                    "project_profile": {
+                        "old": null,
+                        "new": "zero",
+                        "actor": "operator",
+                        "reason": "profile selected"
+                    }
+                }),
+            ))
+            .unwrap();
+        let (status, body) = h
+            .get(&format!("/v1/projects/profile?path={}", project.display()))
+            .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["history"][0]["new"], "zero");
+        assert_eq!(body["history"][0]["actor"], "operator");
+        assert_eq!(body["history"][0]["reason"], "profile selected");
     }
 
     #[tokio::test]

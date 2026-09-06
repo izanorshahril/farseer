@@ -27,9 +27,9 @@ The profile supplies a validated default eligible coordinating cell; actual top-
 
 **Evidence:** Version-one `.farseer/profile.toml` files are validated against authorized project paths and existing cells, exposed through project views and `/v1/projects/profile`, and applied to future top-manager submissions.
 When a profile declares specialist cells, the existing pinned cell roster remains the grant and the profile narrows calls to the declared specialist set; each accepted cell call records the profile specialist set beside its bounded call budget.
-The project widget now expands the selected profile to show manager runners and each declared roster entry.
+The project widget now expands the selected profile to show manager runners, each declared roster entry, and the last profile transitions with old/new cell, actor, reason, and timestamp.
 The public profile tests cover manager/roster projection and missing specialist refusal before any work rows are created.
-Profile transition history and a multi-cell board demo remain open.
+The profile route now projects append-only transition history; a full profile-switch/future-task and multi-cell board demo remain open.
 
 **Exclusions:** No project-specific copy of cell grants, arbitrary runner discovery, direct non-zero project ingress, or promise of zero coordination cost.
 
