@@ -77,6 +77,8 @@ pub(super) struct EvidenceResponse {
 struct WorkerEvidence {
     candidate: CandidateSource,
     outcome: String,
+    repo: std::path::PathBuf,
+    workspace: std::path::PathBuf,
 }
 
 pub(super) async fn list(
@@ -283,10 +285,34 @@ pub(super) async fn execute(
         state.finish_maintenance_worker();
         return Err(ApiError::Policy("maintenance proposal is not open".into()));
     }
+    let task = match (|| -> ApiResult<farseer_core::Task> {
+        let task_id = proposal
+            .task_id
+            .as_deref()
+            .ok_or(ApiError::Corrupt("maintenance task id"))?
+            .parse::<TaskId>()
+            .map_err(|_| ApiError::Corrupt("maintenance task id"))?;
+        state
+            .store()
+            .task(task_id)?
+            .ok_or(ApiError::Corrupt("maintenance task"))
+    })() {
+        Ok(task) => task,
+        Err(error) => {
+            state.finish_maintenance_worker();
+            return Err(error);
+        }
+    };
+    let repo_root = match task.project_path.as_deref() {
+        Some(project) => projects::resolve(&state, project)?,
+        None => state.repo_root().to_path_buf(),
+    };
     let worker_state = Arc::clone(&state);
     let worker_proposal = proposal.clone();
+    let worker_repo = repo_root.clone();
+    let worker_goal = task.goal.clone();
     let evidence = match tokio::task::spawn_blocking(move || {
-        run_candidate_worker(&worker_state, &worker_proposal)
+        run_candidate_worker(&worker_state, &worker_proposal, &worker_repo, &worker_goal)
     })
     .await
     {
@@ -298,29 +324,33 @@ pub(super) async fn execute(
             )));
         }
     };
+    let result = (|| -> ApiResult<EvidenceResponse> {
+        let _gate = state.maintenance_gate();
+        let mut ledger = load(&state)?;
+        let proposal = ledger
+            .proposals
+            .iter()
+            .find(|proposal| proposal.proposal_id == proposal_id)
+            .cloned()
+            .ok_or(ApiError::NotFound("maintenance proposal"))?;
+        if !matches!(proposal.status, ProposalStatus::Open) {
+            cleanup_candidate(&evidence);
+            return Err(ApiError::Policy("maintenance proposal is not open".into()));
+        }
+        let response = persist_evidence(
+            &state,
+            &mut ledger,
+            &proposal,
+            evidence.candidate,
+            evidence.outcome,
+            Actor::System,
+            false,
+        )?;
+        save(&state, &ledger)?;
+        Ok(response)
+    })();
     state.finish_maintenance_worker();
-    let _gate = state.maintenance_gate();
-    let mut ledger = load(&state)?;
-    let proposal = ledger
-        .proposals
-        .iter()
-        .find(|proposal| proposal.proposal_id == proposal_id)
-        .cloned()
-        .ok_or(ApiError::NotFound("maintenance proposal"))?;
-    if !matches!(proposal.status, ProposalStatus::Open) {
-        return Err(ApiError::Policy("maintenance proposal is not open".into()));
-    }
-    let response = persist_evidence(
-        &state,
-        &mut ledger,
-        &proposal,
-        evidence.candidate,
-        evidence.outcome,
-        Actor::System,
-        false,
-    )?;
-    save(&state, &ledger)?;
-    Ok(Json(response))
+    result.map(Json)
 }
 
 fn persist_evidence(
@@ -445,11 +475,16 @@ fn persist_evidence(
     })
 }
 
-fn run_candidate_worker(state: &AppState, proposal: &ProposalMetadata) -> WorkerEvidence {
+fn run_candidate_worker(
+    state: &AppState,
+    proposal: &ProposalMetadata,
+    repo_root: &Path,
+    goal: &str,
+) -> WorkerEvidence {
     let id = safe_component(&proposal.proposal_id);
     let root = state.runs_dir().join("maintenance").join(&id);
     let workspace = root.join("workspace");
-    let artifact_path = workspace.join("farseer-maintenance-candidate.md");
+    let mut artifact_path = workspace.join(format!(".farseer-maintenance-candidate-{id}.md"));
     let reproducer_path = workspace.join("farseer-maintenance-reproducer.txt");
     let branch = format!("farseer/maintenance/{id}");
     let artifact = display_path(&artifact_path);
@@ -459,9 +494,9 @@ fn run_candidate_worker(state: &AppState, proposal: &ProposalMetadata) -> Worker
 
     let setup = (|| -> Result<(), String> {
         fs::create_dir_all(&root).map_err(|error| error.to_string())?;
-        let source_revision = resolve_revision(state.repo_root(), &proposal.source_revision)?;
+        let source_revision = resolve_revision(repo_root, &proposal.source_revision)?;
         let output = git(
-            state.repo_root(),
+            repo_root,
             &[
                 "worktree".into(),
                 "add".into(),
@@ -475,11 +510,13 @@ fn run_candidate_worker(state: &AppState, proposal: &ProposalMetadata) -> Worker
             return Err(command_detail(&output));
         }
         worktree_added = true;
+        artifact_path = scoped_candidate_path(&workspace, &proposal.scope, &id)?;
         fs::write(
             &artifact_path,
             format!(
-                "# Farseer maintenance candidate\n\nproposal: {}\nsource: {}\nscope: {}\n",
+                "# Farseer maintenance candidate\n\nproposal: {}\ngoal: {}\nsource: {}\nscope: {}\n",
                 proposal.proposal_id,
+                goal,
                 proposal.source_revision,
                 proposal.scope.join(", ")
             ),
@@ -508,21 +545,26 @@ fn run_candidate_worker(state: &AppState, proposal: &ProposalMetadata) -> Worker
             if !formatting.status.success() {
                 return Err("candidate formatting validation failed".into());
             }
-            let tests = process(
-                "cargo",
-                &workspace,
-                &[
-                    "test".into(),
-                    "-p".into(),
-                    "farseer-store".into(),
-                    "maintenance::tests::proposal_trigger_deduplicates_and_bounds_attempts".into(),
-                    "--lib".into(),
-                ],
-            )?;
-            validation.push(validation_row(
-                "cargo test -p farseer-store maintenance::tests::proposal_trigger_deduplicates_and_bounds_attempts --lib",
-                &tests,
-            ));
+            let (test_args, test_command) = if workspace.join("crates/farseer-store").is_dir() {
+                (
+                    vec![
+                        "test".into(),
+                        "-p".into(),
+                        "farseer-store".into(),
+                        "maintenance::tests::proposal_trigger_deduplicates_and_bounds_attempts"
+                            .into(),
+                        "--lib".into(),
+                    ],
+                    "cargo test -p farseer-store maintenance::tests::proposal_trigger_deduplicates_and_bounds_attempts --lib",
+                )
+            } else {
+                (
+                    vec!["test".into(), "--workspace".into(), "--lib".into()],
+                    "cargo test --workspace --lib",
+                )
+            };
+            let tests = process("cargo", &workspace, &test_args)?;
+            validation.push(validation_row(test_command, &tests));
             if !tests.status.success() {
                 return Err("candidate repository validation failed".into());
             }
@@ -568,17 +610,19 @@ fn run_candidate_worker(state: &AppState, proposal: &ProposalMetadata) -> Worker
     match setup {
         Ok(()) => WorkerEvidence {
             candidate: CandidateSource {
-                artifact,
+                artifact: display_path(&artifact_path),
                 branch: Some(branch),
                 reproducer: Some(reproducer),
                 validation,
             },
             outcome: "ok".into(),
+            repo: repo_root.to_path_buf(),
+            workspace,
         },
         Err(error) => {
             if worktree_added {
                 let _ = git(
-                    state.repo_root(),
+                    repo_root,
                     &[
                         "worktree".into(),
                         "remove".into(),
@@ -586,10 +630,7 @@ fn run_candidate_worker(state: &AppState, proposal: &ProposalMetadata) -> Worker
                         workspace.display().to_string(),
                     ],
                 );
-                let _ = git(
-                    state.repo_root(),
-                    &["branch".into(), "-D".into(), branch.clone()],
-                );
+                let _ = git(repo_root, &["branch".into(), "-D".into(), branch.clone()]);
             }
             if validation.is_empty() {
                 validation.push(ValidationEvidence {
@@ -607,6 +648,8 @@ fn run_candidate_worker(state: &AppState, proposal: &ProposalMetadata) -> Worker
                     validation,
                 },
                 outcome: error,
+                repo: repo_root.to_path_buf(),
+                workspace,
             }
         }
     }
@@ -652,6 +695,62 @@ fn resolve_revision(repo: &Path, revision: &str) -> Result<String, String> {
         return Err("source revision did not resolve to an object id".into());
     }
     Ok(resolved)
+}
+
+fn scoped_candidate_path(
+    workspace: &Path,
+    scope: &[String],
+    id: &str,
+) -> Result<std::path::PathBuf, String> {
+    let relative = scope
+        .first()
+        .map(Path::new)
+        .unwrap_or_else(|| Path::new("."));
+    if relative.is_absolute()
+        || relative.components().any(|component| {
+            matches!(
+                component,
+                std::path::Component::Prefix(_)
+                    | std::path::Component::RootDir
+                    | std::path::Component::ParentDir
+            )
+        })
+    {
+        return Err("maintenance scope must stay inside the candidate workspace".into());
+    }
+    let target = workspace.join(relative);
+    let directory = if target.is_dir() {
+        target
+    } else if target.is_file() {
+        target
+            .parent()
+            .map(Path::to_path_buf)
+            .ok_or_else(|| "maintenance scope has no parent directory".to_string())?
+    } else {
+        return Err(format!(
+            "maintenance scope does not exist: {}",
+            relative.display()
+        ));
+    };
+    Ok(directory.join(format!(".farseer-maintenance-candidate-{id}.md")))
+}
+
+fn cleanup_candidate(evidence: &WorkerEvidence) {
+    let _ = git(
+        &evidence.repo,
+        &[
+            "worktree".into(),
+            "remove".into(),
+            "--force".into(),
+            evidence.workspace.display().to_string(),
+        ],
+    );
+    if let Some(branch) = evidence.candidate.branch.as_deref() {
+        let _ = git(
+            &evidence.repo,
+            &["branch".into(), "-D".into(), branch.into()],
+        );
+    }
 }
 
 fn command_detail(output: &Output) -> String {

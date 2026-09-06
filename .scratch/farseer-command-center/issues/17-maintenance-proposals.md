@@ -43,5 +43,7 @@ Cancellation now records a cancelled maintenance run, artifact, and terminal eve
 It resolves the source revision to a commit, creates a proposal-derived `farseer/maintenance/<id>` branch with an isolated git worktree under the runtime runs directory, writes a candidate and reproducer file, and records `git diff --check`, `cargo fmt --all -- --check`, and the bounded store maintenance regression when the candidate is a Rust workspace.
 Non-Rust fixture repositories receive a structural validation row rather than a fabricated cargo result.
 Failed setup removes the partial worktree and branch, while the task/run/artifact rows retain the failure and validation detail.
+The candidate edit is placed inside the first declared scope entry, and the worker uses the ordinary task's authorized project repository when one is selected.
 The candidate worktree remains available for review, while the active checkout and runtime revision stay unchanged.
+If an operator cancels while the worker is still running, the retained candidate worktree and branch are removed before the cancellation response completes.
 The API regression removes the branch after asserting the retained files and the unchanged active `HEAD`.

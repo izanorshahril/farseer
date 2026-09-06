@@ -4588,6 +4588,92 @@ runner = "not-a-real-runner"
     }
 
     #[tokio::test]
+    async fn maintenance_worker_uses_the_authorized_project_repository() {
+        let h = harness();
+        let project = git_repo_with_a_commit();
+        let root = project.path().parent().unwrap();
+        h.state
+            .store()
+            .authorize_root(&projects::display(&root.canonicalize().unwrap()), 0)
+            .unwrap();
+        let (status, created) = h
+            .post(
+                "/v1/maintenance/proposals",
+                json!({
+                    "trigger_id": "worker-project",
+                    "lineage_id": "worker-project-lineage",
+                    "actor": "system",
+                    "source_revision": "HEAD",
+                    "previous_revision": "parent",
+                    "scope": ["README.md"],
+                    "project": project.path().display().to_string(),
+                    "goal": "create a candidate in the selected project"
+                }),
+            )
+            .await;
+        assert_eq!(status, StatusCode::CREATED);
+        let proposal_id = created["proposal"]["proposal_id"].as_str().unwrap();
+        let (status, executed) = h
+            .post(
+                &format!("/v1/maintenance/proposals/{proposal_id}/execute"),
+                json!({}),
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK, "{executed}");
+        assert_eq!(executed["proposal"]["status"], "succeeded");
+        let branch = executed["proposal"]["candidate"]["branch"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let branches = std::process::Command::new("git")
+            .args([
+                "-C",
+                project.path().to_str().unwrap(),
+                "branch",
+                "--list",
+                &branch,
+            ])
+            .output()
+            .unwrap();
+        assert!(branches.status.success());
+        assert!(!branches.stdout.is_empty());
+        let workspace = std::path::Path::new(
+            executed["proposal"]["candidate"]["artifact"]
+                .as_str()
+                .unwrap(),
+        )
+        .parent()
+        .unwrap();
+        assert!(
+            std::process::Command::new("git")
+                .args([
+                    "-C",
+                    project.path().to_str().unwrap(),
+                    "worktree",
+                    "remove",
+                    "--force",
+                    workspace.to_str().unwrap(),
+                ])
+                .status()
+                .unwrap()
+                .success()
+        );
+        assert!(
+            std::process::Command::new("git")
+                .args([
+                    "-C",
+                    project.path().to_str().unwrap(),
+                    "branch",
+                    "-D",
+                    &branch,
+                ])
+                .status()
+                .unwrap()
+                .success()
+        );
+    }
+
+    #[tokio::test]
     async fn successful_maintenance_evidence_requires_validation() {
         let h = harness();
         let (status, created) = h
