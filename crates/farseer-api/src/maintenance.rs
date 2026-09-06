@@ -73,7 +73,7 @@ pub(super) struct EvidenceResponse {
     pub artifact: Option<ArtifactRow>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct WorkerEvidence {
     candidate: CandidateSource,
     outcome: String,
@@ -340,21 +340,23 @@ pub(super) async fn execute(
             .cloned()
             .ok_or(ApiError::NotFound("maintenance proposal"))?;
         if !matches!(proposal.status, ProposalStatus::Open) {
-            cleanup_candidate(&evidence);
             return Err(ApiError::Policy("maintenance proposal is not open".into()));
         }
         let response = persist_evidence(
             &state,
             &mut ledger,
             &proposal,
-            evidence.candidate,
-            evidence.outcome,
+            evidence.candidate.clone(),
+            evidence.outcome.clone(),
             Actor::System,
             false,
         )?;
         save(&state, &ledger)?;
         Ok(response)
     })();
+    if result.is_err() {
+        cleanup_candidate(&evidence);
+    }
     state.finish_maintenance_worker();
     result.map(Json)
 }
