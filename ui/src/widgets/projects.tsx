@@ -3,6 +3,7 @@ import type { Bridge } from "../bridge";
 import { currentProject, onProject, setProject } from "../project";
 import { confirmGrantWithdrawal } from "../confirm";
 import { meaningOf } from "../meaning";
+import { mask, usePrivacy } from "../privacy";
 
 /**
  * The folders farseer may work in, and the projects inside them.
@@ -23,7 +24,15 @@ import { meaningOf } from "../meaning";
  * - Removing a root removes the **grant**, not the directory. The button says
  *   so, because "remove" beside a folder path reads like a delete.
  */
-type Project = { name: string; path: string; git: boolean };
+type TeamProfile = {
+  valid: boolean;
+  source: "file" | "default";
+  coordinating_cell: string;
+  specialist_cells: string[];
+  cell?: { name: string; manager: { runners: string[] }; roster: { name: string; kind: string }[] };
+  error?: string;
+};
+type Project = { name: string; path: string; git: boolean; profile?: TeamProfile };
 type Root = { path: string; missing: boolean; projects: Project[] };
 
 /**
@@ -62,6 +71,7 @@ function isInside(root: string, project: string): boolean {
 type Arrangement = { order: string[]; collapsed: string[] };
 
 export function ProjectsWidget({ bridge }: { bridge: Bridge }) {
+  const privacy = usePrivacy();
   const [roots, setRoots] = useState<Root[] | null>(null);
   const [note, setNote] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -248,7 +258,7 @@ export function ProjectsWidget({ bridge }: { bridge: Bridge }) {
                 {folded ? "▸" : "▾"}
               </button>
               <b className="mono root-path" title={root.path}>
-                {root.path}
+                {mask(root.path, "path", privacy)}
               </b>
               {folded && root.projects.length > 0 && (
                 <span className="dim small">
@@ -388,6 +398,19 @@ export function ProjectsWidget({ bridge }: { bridge: Bridge }) {
                       title={project.path}
                     >
                       <span className="project-name">{project.name}</span>
+                      {project.profile?.valid && project.profile.cell && (
+                        <span
+                          className="dim small"
+                          title={`manager ${project.profile.cell.manager.runners.join(", ")}`}
+                        >
+                          {project.profile.cell.name} · {project.profile.cell.roster.length} roster
+                        </span>
+                      )}
+                      {project.profile && !project.profile.valid && (
+                        <span className="dim small bad" title={project.profile.error}>
+                          profile needs repair
+                        </span>
+                      )}
                       {/* Reported, not filtered. A `worktree` cell needs a
                           repository, and a project farseer hid because it has
                           none is worse than one shown with the reason. */}
@@ -441,7 +464,7 @@ export function ProjectsWidget({ bridge }: { bridge: Bridge }) {
       <p className="dim small">
         {selected ? (
           <>
-            Work goes to <span className="mono">{selected}</span>.
+            Work goes to <span className="mono">{mask(selected, "path", privacy)}</span>.
           </>
         ) : roots.length > 0 ? (
           // Said here rather than only in the footer: an operator who has just

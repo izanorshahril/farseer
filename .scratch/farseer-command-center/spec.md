@@ -3,7 +3,7 @@
 > Current status, 2026-09-06: package approved and implementation in progress.
 > Original review-gate language below is historical; use [the ticket index](tickets.md) for remaining work.
 
-Status: `proposed-awaiting-single-review`.
+Status: `approved; implementation in progress`.
 
 This document is the consolidated specification for one review before coding.
 It turns the current [project review](../../PROJECT_REVIEW_2026-09-06.md) and local decision record into a staged implementation program.
@@ -200,8 +200,8 @@ Later operational expansion:
 
 ## Further Notes
 
-The [project review](../../PROJECT_REVIEW_2026-09-06.md) remains the evidence baseline, while the five linked decision documents become authority only after the single review adopts them.
-Those decisions must resolve daemon ownership, data/version compatibility, workspace and project authorization, deterministic routing, and staged maintenance promotion before coding tickets are opened.
+The [project review](../../PROJECT_REVIEW_2026-09-06.md) remains the evidence baseline, and the five linked decision documents are the adopted authority for this package.
+They resolve daemon ownership, data/version compatibility, workspace and project authorization, deterministic routing, and staged maintenance promotion.
 The first implementation sequence is runtime identity and shutdown, bounded read projections, explicit UI context and focused workspace, project profiles and explainable routing, then the terminal and pilot.
 The maintenance proposal path may begin after runtime and data recovery contracts exist, but installed promotion waits for migration and rollback evidence.
 If a decision conflicts with an older ticket, append a correction to that ticket and the local map rather than silently changing historical intent.
@@ -210,4 +210,3 @@ The first optional process metrics are Windows supervised-job CPU time and memor
 The selected local pilot creates an artifact manifest containing relative names, sizes, and SHA-256 digests from an authorized fixture directory, using a cancellable local worker and staged output.
 It does not alter the input files, access a network, or require Git.
 Remaining implementation choices such as a terminal renderer library must meet these contracts and dependency rules; they do not reopen the selected architecture or require another product interview.
-No implementation should start while this document retains `proposed-awaiting-single-review`.

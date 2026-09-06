@@ -6,7 +6,7 @@
 
 **Blocked by:** [Verified startup](01-verified-startup.md)
 
-**Status:** not-started.
+**Status:** implemented.
 
 **Execution:** package approved; verify named blockers before implementation.
 
@@ -20,11 +20,11 @@ The initial 30-second deadline reports remaining runs and leaves the daemon aliv
 The 30-second drain expiry keeps the runtime alive and still draining; it never auto-cancels.
 Force is a separate explicit action, records its reason, and uses existing Job Object cancellation semantics.
 
-- [ ] Closing the desktop window leaves the runtime reachable and active runs unchanged.
-- [ ] Reopening the shell reconnects to the same authenticated runtime and shows current runs and events without duplicating stream subscriptions.
-- [ ] Drain refuses new work, reports pending runs, and exits after they finish; a 30-second expiry remains in draining until force is selected.
-- [ ] Force presents the affected run count, records operator intent, and cancels process trees through the existing runtime control path.
-- [ ] A runtime started without the shell remains usable through the local API and CLI.
+- [x] Closing the desktop window leaves the runtime reachable and active runs unchanged.
+- [x] Reopening the shell reconnects to the same authenticated runtime and shows current runs and events without duplicating stream subscriptions.
+- [x] Drain refuses new work, reports pending runs, and exits after they finish; a 30-second expiry remains in draining until force is selected.
+- [x] Force presents the affected run count, records operator intent, and cancels process trees through the existing runtime control path.
+- [x] A runtime started without the shell remains usable through the local API and CLI.
 
 **Exclusions:** No Windows service, machine-wide background process, cloud daemon, or automatic force timeout.
 

@@ -20,12 +20,12 @@ The [original decision map](../farseer/map.md) remains the authority for already
 
 Use the existing local-Markdown tracker convention: each decision is one file under decisions and each implementation slice is one file under issues.
 The Parent link identifies this map; named Blocked by links are local dependencies.
-Decision status `recommendation selected` means an agent choice awaiting the package review, not a completed human interview.
-Implementation status `proposed-awaiting-review` means a reviewable ticket, not permission to code.
-After explicit package approval, record the approval and mark decisions adopted; change eligible implementation tickets to ready-for-agent while preserving native file-link blockers.
+Decision status `adopted` records the selected package decision.
+Implementation status `proposed-awaiting-review` is historical for tickets created before approval; unfinished tickets are now eligible when their named blockers are complete.
+Preserve native file-link blockers while implementing and update ticket status only after verification.
 Claim one eligible ticket before implementation; completing a blocker opens its dependent frontier.
 
-The operator explicitly requested auto-selection and one review, overriding the skills' repeated interviews, per-session decision closure restriction, and pre-draft approval loops.
+The operator explicitly requested auto-selection and one review, and approved this package on 2026-09-06.
 The selected test seams and ticket granularity are included in that one review.
 There is no remote issue publication, new tracker service, or permanent planning script.
 Existing modified files are inherited and remain untouched by this planning package.
@@ -34,8 +34,8 @@ Historical decision corrections are appended by the adopting implementation slic
 ## Implementation state after approval
 
 The package was approved for implementation on the command-center branch.
-Verified startup, paged work-board reads, and recoverable schema/backup are implemented and tested.
-Widget recovery and explicit composer context have bounded UI increments in progress; their remaining acceptance items stay open.
+Verified startup, independent runtime lifecycle, paged work-board reads, scoped graph, bounded transcript projection, recoverable schema/backup, and honest tool authority are implemented and tested.
+Widget recovery, explicit composer context, responsive canvas, privacy presentation, focused workspace, session explorer, attributed usage, explainable routing, and project team profiles have bounded increments in progress; their remaining acceptance items stay open.
 All other ticket statuses remain as written until their blockers and acceptance evidence are complete.
 
 ## Corrections after approval

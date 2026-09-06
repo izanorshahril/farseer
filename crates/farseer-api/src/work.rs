@@ -16,7 +16,10 @@ use axum::http::StatusCode;
 use farseer_core::{
     Actor, Conversation, ConversationId, RunId, Task, TaskId, TaskState, TranscriptCustody,
 };
-use farseer_store::{SimilarityEdge, TaskCursor, TaskFilter, TranscriptAttachment};
+use farseer_store::{
+    GraphEdge, GraphFilter, GraphNode, SessionRow, SimilarityEdge, TaskCursor, TaskFilter,
+    TranscriptAttachment, TranscriptProjection,
+};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -30,10 +33,13 @@ const REDACTION_VERSION: &str = "farseer-scrub-v1";
 const PROJECTION_VERSION: &str = "hash-tf-v1";
 const EMBEDDING_MODEL: &str = "farseer-hash-tf-64";
 const DIMENSIONS: usize = 64;
-const ALL_ROWS: usize = i64::MAX as usize;
 const TASK_PAGE_DEFAULT: usize = 100;
 const TASK_PAGE_MAX: usize = 500;
 const STRUCTURED_RESPONSE_MAX_BYTES: usize = 1024 * 1024;
+const GRAPH_NODE_DEFAULT: usize = 100;
+const GRAPH_NODE_MAX: usize = 500;
+const GRAPH_EDGE_DEFAULT: usize = 300;
+const GRAPH_EDGE_MAX: usize = 1_500;
 
 #[derive(Debug, Deserialize)]
 pub(super) struct ConversationQuery {
@@ -318,7 +324,51 @@ pub(super) struct TaskDetail {
     pub transitions: Vec<farseer_core::TaskTransition>,
     pub runs: Vec<crate::RunView>,
     pub sessions: Vec<farseer_core::HarnessSession>,
-    pub attachments: Vec<TranscriptAttachment>,
+    pub attachments: Vec<TranscriptAttachmentView>,
+}
+
+#[derive(Debug, Serialize)]
+pub(super) struct TranscriptAttachmentView {
+    #[serde(flatten)]
+    pub attachment: TranscriptAttachment,
+    pub projection: Option<TranscriptProjection>,
+}
+
+pub(crate) struct ProjectionRequest {
+    attachment: TranscriptAttachment,
+}
+
+#[derive(Debug, Default, Deserialize)]
+pub(super) struct SessionsQuery {
+    pub project: Option<String>,
+    pub limit: Option<usize>,
+    pub offset: Option<usize>,
+}
+
+#[derive(Debug, Serialize)]
+pub(super) struct SessionPage {
+    pub rows: Vec<SessionRow>,
+    pub next_offset: Option<usize>,
+}
+
+/// Bounded session explorer projection from `40 work model and session explorer`.
+/// A missing log pointer is an honest unavailable state; farseer never guesses private harness paths.
+pub(super) async fn list_sessions(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<SessionsQuery>,
+) -> ApiResult<Json<SessionPage>> {
+    let project = query
+        .project
+        .as_deref()
+        .map(|path| crate::projects::resolve(&state, path))
+        .transpose()?
+        .map(|path| crate::projects::display(&path));
+    let (rows, next_offset) = state.store().harness_session_page(
+        query.limit.unwrap_or(100).min(500),
+        query.offset.unwrap_or(0),
+        project.as_deref(),
+    )?;
+    Ok(Json(SessionPage { rows, next_offset }))
 }
 
 pub(super) async fn get_task(
@@ -333,7 +383,20 @@ pub(super) async fn get_task(
     let mut attachments = Vec::new();
     for row in &rows {
         sessions.extend(store.harness_sessions(Some(row.run_id))?);
-        attachments.extend(store.transcript_attachments(Some(row.run_id))?);
+        attachments.extend(
+            store
+                .transcript_attachments(Some(row.run_id))?
+                .into_iter()
+                .map(|attachment| {
+                    let projection =
+                        store.transcript_projection(&attachment.digest, attachment.run_id)?;
+                    Ok(TranscriptAttachmentView {
+                        attachment,
+                        projection,
+                    })
+                })
+                .collect::<farseer_store::Result<Vec<_>>>()?,
+        );
     }
     let transitions = store.task_transitions(task_id)?;
     let allowed_transitions = TaskState::ALL
@@ -395,7 +458,7 @@ pub(super) async fn add_transcript(
     State(state): State<Arc<AppState>>,
     UrlPath(run_id): UrlPath<String>,
     Json(body): Json<TranscriptBody>,
-) -> ApiResult<(StatusCode, Json<TranscriptAttachment>)> {
+) -> ApiResult<(StatusCode, Json<TranscriptAttachmentView>)> {
     let run_id = parse_run(&run_id)?;
     if state.store().run(run_id)?.is_none() {
         return Err(ApiError::NotFound("run"));
@@ -408,17 +471,11 @@ pub(super) async fn add_transcript(
         return Err(ApiError::BadRequest("transcript path must not be empty"));
     }
     let source = body.path;
-    let (digest, stored_path, indexed) = match custody {
-        TranscriptCustody::Reference => (
-            sha256(format!("reference\0{source}").as_bytes()),
-            None,
-            None,
-        ),
-        TranscriptCustody::Copy | TranscriptCustody::CopyPlusIndex => copy_transcript(
-            &state,
-            Path::new(&source),
-            custody == TranscriptCustody::CopyPlusIndex,
-        )?,
+    let (digest, stored_path) = match custody {
+        TranscriptCustody::Reference => (sha256(format!("reference\0{source}").as_bytes()), None),
+        TranscriptCustody::Copy | TranscriptCustody::CopyPlusIndex => {
+            copy_transcript(&state, Path::new(&source))?
+        }
     };
     let attachment = TranscriptAttachment {
         digest: digest.clone(),
@@ -430,74 +487,246 @@ pub(super) async fn add_transcript(
     };
     let store = state.store();
     store.record_transcript_attachment(&attachment)?;
+    if custody == TranscriptCustody::CopyPlusIndex {
+        store.queue_transcript_projection(&attachment, now_ms())?;
+    }
     drop(store);
-    if let Some(body) = indexed {
-        let scrubbed = farseer_core::scrub(&body);
-        let documents = state.store().indexed_transcripts_bounded(
-            TRANSCRIPT_CANDIDATE_CAP,
-            TRANSCRIPT_TEXT_CAP_BYTES.saturating_sub(scrubbed.len()),
-        )?;
-        let current = vector(&scrubbed);
-        let edges = documents
-            .into_iter()
-            .filter(|(other, _)| other != &digest)
-            .filter_map(|(other, body)| {
-                let (left, right) = if digest < other {
-                    (digest.clone(), other.clone())
-                } else {
-                    (other.clone(), digest.clone())
-                };
-                let edge = SimilarityEdge {
-                    left_digest: left,
-                    right_digest: right,
-                    score: cosine(&current, &vector(&body)),
-                    embedding_model: EMBEDDING_MODEL.into(),
-                    dimensions: DIMENSIONS as u32,
-                    distance_metric: "cosine".into(),
-                    redaction_version: REDACTION_VERSION.into(),
-                    projection_version: PROJECTION_VERSION.into(),
-                    source_digest: digest.clone(),
-                    evidence: vec![digest.clone(), other],
-                };
-                (edge.score > 0.0).then_some(edge)
+    if custody == TranscriptCustody::CopyPlusIndex {
+        enqueue_projection(&state, attachment.clone());
+    }
+    let projection = state.store().transcript_projection(&digest, run_id)?;
+    Ok((
+        StatusCode::CREATED,
+        Json(TranscriptAttachmentView {
+            attachment,
+            projection,
+        }),
+    ))
+}
+
+fn enqueue_projection(state: &Arc<AppState>, attachment: TranscriptAttachment) {
+    let Some(sender) = state.transcript_queue.get() else {
+        return;
+    };
+    if sender
+        .try_send(ProjectionRequest {
+            attachment: attachment.clone(),
+        })
+        .is_err()
+    {
+        let _ = state.store().set_transcript_projection_status(
+            &attachment,
+            "failed",
+            Some("transcript analysis queue is full"),
+            "restricted",
+            now_ms(),
+        );
+    }
+}
+
+pub(crate) fn spawn_projection_worker(state: Arc<AppState>) {
+    let (sender, mut receiver) = tokio::sync::mpsc::channel(32);
+    if state.transcript_queue.set(sender.clone()).is_err() {
+        return;
+    }
+    if let Ok(pending) = state.store().pending_transcript_projections() {
+        for (index, attachment) in pending.into_iter().enumerate() {
+            if index >= 32 {
+                let _ = state.store().set_transcript_projection_status(
+                    &attachment,
+                    "failed",
+                    Some("transcript analysis queue is full"),
+                    "restricted",
+                    now_ms(),
+                );
+                continue;
+            }
+            let _ = sender.try_send(ProjectionRequest { attachment });
+        }
+    }
+    tokio::spawn(async move {
+        while let Some(request) = receiver.recv().await {
+            let worker_state = Arc::clone(&state);
+            let attachment = request.attachment;
+            let job_attachment = attachment.clone();
+            let result = tokio::task::spawn_blocking(move || {
+                project_transcript(&worker_state, &job_attachment)
             })
-            .collect::<Vec<_>>();
-        let mut edges = edges;
-        edges.sort_by(|left, right| right.score.total_cmp(&left.score));
-        edges.truncate(TRANSCRIPT_EDGE_CAP);
-        if let Some(stored_path) = &attachment.stored_path {
-            let stored = read_bounded(Path::new(stored_path))?;
-            if sha256(&stored) != digest {
-                return Err(ApiError::Transcript(
-                    "copied transcript changed before indexing".into(),
-                ));
+            .await
+            .unwrap_or_else(|error| Err(format!("transcript analysis worker stopped: {error}")));
+            if let Err(error) = result {
+                let _ = state.store().set_transcript_projection_status(
+                    &attachment,
+                    "failed",
+                    Some(&error),
+                    "restricted",
+                    now_ms(),
+                );
             }
         }
-        state.store().commit_transcript_projection(
-            &attachment,
+    });
+}
+
+fn project_transcript(
+    state: &AppState,
+    attachment: &TranscriptAttachment,
+) -> std::result::Result<(), String> {
+    if attachment.custody != TranscriptCustody::CopyPlusIndex {
+        return Ok(());
+    }
+    let projection = state
+        .store()
+        .transcript_projection(&attachment.digest, attachment.run_id)
+        .map_err(|error| error.to_string())?;
+    if projection.as_ref().map(|value| value.status.as_str()) != Some("pending") {
+        return Ok(());
+    }
+    let path = attachment
+        .stored_path
+        .as_deref()
+        .ok_or_else(|| "copy-plus-index has no stored transcript".to_owned())?;
+    let bytes = read_bounded(Path::new(path)).map_err(|error| error.to_string())?;
+    if sha256(&bytes) != attachment.digest {
+        return Err("copied transcript changed before indexing; retry".into());
+    }
+    let text = String::from_utf8(bytes)
+        .map_err(|_| "copy-plus-index requires UTF-8 transcript text".to_owned())?;
+    let scrubbed = farseer_core::scrub(&text);
+    let documents = state
+        .store()
+        .indexed_transcripts_bounded(
+            TRANSCRIPT_CANDIDATE_CAP,
+            TRANSCRIPT_TEXT_CAP_BYTES.saturating_sub(scrubbed.len()),
+        )
+        .map_err(|error| error.to_string())?;
+    let coverage = if documents.len() == TRANSCRIPT_CANDIDATE_CAP {
+        "truncated"
+    } else {
+        "restricted"
+    };
+    let current = vector(&scrubbed);
+    let mut edges = documents
+        .into_iter()
+        .filter(|(other, _)| other != &attachment.digest)
+        .filter_map(|(other, body)| {
+            let (left, right) = if attachment.digest < other {
+                (attachment.digest.clone(), other.clone())
+            } else {
+                (other.clone(), attachment.digest.clone())
+            };
+            let edge = SimilarityEdge {
+                left_digest: left,
+                right_digest: right,
+                score: cosine(&current, &vector(&body)),
+                embedding_model: EMBEDDING_MODEL.into(),
+                dimensions: DIMENSIONS as u32,
+                distance_metric: "cosine".into(),
+                redaction_version: REDACTION_VERSION.into(),
+                projection_version: PROJECTION_VERSION.into(),
+                source_digest: attachment.digest.clone(),
+                evidence: vec![attachment.digest.clone(), other],
+            };
+            (edge.score > 0.0).then_some(edge)
+        })
+        .collect::<Vec<_>>();
+    edges.sort_by(|left, right| right.score.total_cmp(&left.score));
+    edges.truncate(TRANSCRIPT_EDGE_CAP);
+    state
+        .store()
+        .commit_transcript_projection_with_coverage(
+            attachment,
             &scrubbed,
             REDACTION_VERSION,
             PROJECTION_VERSION,
+            coverage,
             &edges,
-        )?;
+        )
+        .map_err(|error| error.to_string())
+}
+
+pub(super) async fn retry_transcript(
+    State(state): State<Arc<AppState>>,
+    UrlPath((run_id, digest)): UrlPath<(String, String)>,
+) -> ApiResult<Json<TranscriptAttachmentView>> {
+    let run_id = parse_run(&run_id)?;
+    let attachment = state
+        .store()
+        .transcript_attachments(Some(run_id))?
+        .into_iter()
+        .find(|attachment| attachment.digest == digest)
+        .ok_or(ApiError::NotFound("transcript"))?;
+    if attachment.custody != TranscriptCustody::CopyPlusIndex {
+        return Err(ApiError::BadRequest(
+            "transcript analysis was not requested",
+        ));
     }
-    Ok((StatusCode::CREATED, Json(attachment)))
+    state
+        .store()
+        .queue_transcript_projection(&attachment, now_ms())?;
+    enqueue_projection(&state, attachment.clone());
+    let projection = state.store().transcript_projection(&digest, run_id)?;
+    Ok(Json(TranscriptAttachmentView {
+        attachment,
+        projection,
+    }))
+}
+
+pub(super) async fn cancel_transcript(
+    State(state): State<Arc<AppState>>,
+    UrlPath((run_id, digest)): UrlPath<(String, String)>,
+) -> ApiResult<Json<TranscriptAttachmentView>> {
+    let run_id = parse_run(&run_id)?;
+    let attachment = state
+        .store()
+        .transcript_attachments(Some(run_id))?
+        .into_iter()
+        .find(|attachment| attachment.digest == digest)
+        .ok_or(ApiError::NotFound("transcript"))?;
+    let projection = state
+        .store()
+        .transcript_projection(&digest, run_id)?
+        .ok_or(ApiError::NotFound("transcript analysis"))?;
+    if projection.status != "pending" {
+        return Err(ApiError::BadRequest("transcript analysis is not pending"));
+    }
+    state.store().set_transcript_projection_status(
+        &attachment,
+        "cancelled",
+        None,
+        &projection.coverage,
+        now_ms(),
+    )?;
+    let projection = state.store().transcript_projection(&digest, run_id)?;
+    Ok(Json(TranscriptAttachmentView {
+        attachment,
+        projection,
+    }))
 }
 
 pub(super) async fn list_transcripts(
     State(state): State<Arc<AppState>>,
     UrlPath(run_id): UrlPath<String>,
-) -> ApiResult<Json<Vec<TranscriptAttachment>>> {
-    Ok(Json(
-        state
-            .store()
-            .transcript_attachments(Some(parse_run(&run_id)?))?,
-    ))
+) -> ApiResult<Json<Vec<TranscriptAttachmentView>>> {
+    let store = state.store();
+    let attachments = store
+        .transcript_attachments(Some(parse_run(&run_id)?))?
+        .into_iter()
+        .map(|attachment| {
+            let projection = store.transcript_projection(&attachment.digest, attachment.run_id)?;
+            Ok(TranscriptAttachmentView {
+                attachment,
+                projection,
+            })
+        })
+        .collect::<farseer_store::Result<Vec<_>>>()?;
+    Ok(Json(attachments))
 }
 
 #[derive(Debug, Deserialize)]
 pub(super) struct SearchQuery {
     pub q: String,
+    pub limit: Option<usize>,
+    pub offset: Option<usize>,
 }
 
 #[derive(Debug, Serialize)]
@@ -505,6 +734,14 @@ pub(super) struct SearchHit {
     pub digest: String,
     pub excerpt: String,
     pub coverage: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub projection_version: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub(super) struct SearchPage {
+    pub rows: Vec<SearchHit>,
+    pub next_offset: Option<usize>,
 }
 
 pub(super) async fn search_transcripts(
@@ -524,6 +761,7 @@ pub(super) async fn search_transcripts(
                 digest,
                 excerpt: body.chars().take(160).collect(),
                 coverage: "restricted",
+                projection_version: None,
             })
         })
         .take(50)
@@ -531,69 +769,239 @@ pub(super) async fn search_transcripts(
     Ok(Json(hits))
 }
 
-#[derive(Debug, Serialize)]
-pub(super) struct WorkGraph {
-    pub projects: Vec<String>,
-    pub conversations: Vec<Conversation>,
-    pub tasks: Vec<Task>,
-    pub runs: Vec<GraphRun>,
-    pub sessions: Vec<farseer_core::HarnessSession>,
-    pub attachments: Vec<TranscriptAttachment>,
-    pub parents: Vec<farseer_store::RunParent>,
-    pub similarities: Vec<SimilarityEdge>,
-}
-
-#[derive(Debug, Serialize)]
-pub(super) struct GraphRun {
-    pub run_id: RunId,
-    pub task_id: TaskId,
-    pub cell_id: farseer_core::CellId,
-    pub runner: String,
-    pub outcome: Option<String>,
-}
-
-pub(super) async fn graph(State(state): State<Arc<AppState>>) -> ApiResult<Json<WorkGraph>> {
-    let store = state.store();
-    let conversations = store.conversations(ALL_ROWS)?;
-    let tasks = store.tasks(&TaskFilter {
-        limit: ALL_ROWS,
-        ..Default::default()
-    })?;
-    let projects = conversations
-        .iter()
-        .filter_map(|conversation| conversation.project_path.clone())
-        .chain(tasks.iter().filter_map(|task| task.project_path.clone()))
-        .collect::<std::collections::BTreeSet<_>>()
+pub(super) async fn search_transcript_page(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<SearchQuery>,
+) -> ApiResult<Json<SearchPage>> {
+    let needle = query.q.trim().to_lowercase();
+    if needle.is_empty() {
+        return Ok(Json(SearchPage {
+            rows: Vec::new(),
+            next_offset: None,
+        }));
+    }
+    let limit = query.limit.unwrap_or(50).clamp(1, 100);
+    let offset = query.offset.unwrap_or(0);
+    let (documents, next_offset) =
+        state
+            .store()
+            .indexed_transcript_page(limit, offset, TRANSCRIPT_TEXT_CAP_BYTES)?;
+    let hits = documents
         .into_iter()
-        .collect();
-    let runs = store
-        .recent_runs(ALL_ROWS)?
-        .into_iter()
-        .map(|row| GraphRun {
-            run_id: row.run_id,
-            task_id: row.task_id,
-            cell_id: row.cell_id,
-            runner: row.runner,
-            outcome: row.outcome,
+        .filter_map(|document| {
+            let farseer_store::IndexedTranscript {
+                digest,
+                body,
+                projection_version,
+            } = document;
+            body.to_lowercase().contains(&needle).then(|| SearchHit {
+                digest,
+                excerpt: body.chars().take(160).collect(),
+                coverage: "restricted",
+                projection_version: Some(projection_version),
+            })
         })
         .collect();
-    Ok(Json(WorkGraph {
-        projects,
-        conversations,
-        tasks,
-        runs,
-        sessions: store.harness_sessions(None)?,
-        attachments: store.transcript_attachments(None)?,
-        parents: store.run_parents()?,
-        similarities: store.similarity_edges()?,
+    Ok(Json(SearchPage {
+        rows: hits,
+        next_offset,
     }))
 }
 
-fn copy_transcript(
-    state: &AppState,
-    source: &Path,
-    index: bool,
-) -> ApiResult<(String, Option<String>, Option<String>)> {
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct GraphScope {
+    project_path: Option<String>,
+    runner: Option<String>,
+    from_ts: Option<i64>,
+    to_ts: Option<i64>,
+    kinds: Vec<String>,
+    node_limit: usize,
+    edge_limit: usize,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct GraphCursor {
+    version: u8,
+    scope: GraphScope,
+    offset: usize,
+}
+
+#[derive(Debug, Default, Deserialize)]
+pub(super) struct GraphQuery {
+    pub project: Option<String>,
+    pub runner: Option<String>,
+    #[serde(alias = "from")]
+    pub from_ts: Option<i64>,
+    #[serde(alias = "to")]
+    pub to_ts: Option<i64>,
+    #[serde(alias = "entity_kind")]
+    pub kind: Option<String>,
+    #[serde(alias = "node_limit")]
+    pub limit: Option<usize>,
+    #[serde(alias = "edge_budget")]
+    pub edge_limit: Option<usize>,
+    pub cursor: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub(super) struct WorkGraph {
+    pub nodes: Vec<GraphNode>,
+    pub observed_edges: Vec<GraphEdge>,
+    pub derived_edges: Vec<GraphEdge>,
+    pub next_cursor: Option<String>,
+    pub has_more: bool,
+    pub freshness: &'static str,
+    pub generated_ts: i64,
+}
+
+pub(super) async fn graph(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<GraphQuery>,
+) -> ApiResult<Json<WorkGraph>> {
+    if let (Some(from_ts), Some(to_ts)) = (query.from_ts, query.to_ts)
+        && from_ts > to_ts
+    {
+        return Err(ApiError::BadRequest("from_ts must not exceed to_ts"));
+    }
+    let project_path = query
+        .project
+        .as_deref()
+        .map(|path| crate::projects::resolve(&state, path))
+        .transpose()?
+        .map(|path| crate::projects::display(&path));
+    let mut kinds = query
+        .kind
+        .as_deref()
+        .unwrap_or("")
+        .split(',')
+        .filter(|kind| !kind.trim().is_empty())
+        .map(|kind| kind.trim().to_owned())
+        .collect::<Vec<_>>();
+    kinds.sort();
+    kinds.dedup();
+    if kinds.iter().any(|kind| {
+        !matches!(
+            kind.as_str(),
+            "project" | "conversation" | "task" | "run" | "session" | "attachment"
+        )
+    }) {
+        return Err(ApiError::BadRequest("unknown graph entity kind"));
+    }
+    let scope = GraphScope {
+        project_path,
+        runner: query.runner.filter(|runner| !runner.trim().is_empty()),
+        from_ts: query.from_ts,
+        to_ts: query.to_ts,
+        kinds,
+        node_limit: query
+            .limit
+            .unwrap_or(GRAPH_NODE_DEFAULT)
+            .clamp(1, GRAPH_NODE_MAX),
+        edge_limit: query
+            .edge_limit
+            .unwrap_or(GRAPH_EDGE_DEFAULT)
+            .clamp(1, GRAPH_EDGE_MAX),
+    };
+    let offset = query
+        .cursor
+        .as_deref()
+        .map(decode_graph_cursor)
+        .transpose()?
+        .map(|cursor| {
+            if cursor.version != 1 || cursor.scope != scope {
+                return Err(ApiError::BadRequest(
+                    "graph cursor does not match this scope",
+                ));
+            }
+            Ok(cursor.offset)
+        })
+        .transpose()?
+        .unwrap_or(0);
+    let mut page = state.store().graph_page(&GraphFilter {
+        project_path: scope.project_path.clone(),
+        runner: scope.runner.clone(),
+        from_ts: scope.from_ts,
+        to_ts: scope.to_ts,
+        kinds: scope.kinds.clone(),
+        offset,
+        node_limit: scope.node_limit,
+        edge_limit: scope.edge_limit,
+    })?;
+    for node in &mut page.nodes {
+        if let Some(target) = node.target.as_mut()
+            && let Some(formatted) = format_compact_uuid(target)
+        {
+            *target = formatted;
+        }
+    }
+    let next_cursor = page.has_more.then(|| {
+        encode_graph_cursor(&GraphCursor {
+            version: 1,
+            scope: scope.clone(),
+            offset: offset.saturating_add(page.nodes.len()),
+        })
+    });
+    let mut response = WorkGraph {
+        nodes: page.nodes,
+        observed_edges: page.observed_edges,
+        derived_edges: page.derived_edges,
+        next_cursor,
+        has_more: page.has_more,
+        freshness: "eventual",
+        generated_ts: now_ms(),
+    };
+    while serde_json::to_vec(&response)
+        .expect("graph response is serializable")
+        .len()
+        > STRUCTURED_RESPONSE_MAX_BYTES
+    {
+        if response.derived_edges.pop().is_some() || response.observed_edges.pop().is_some() {
+            response.has_more = true;
+            continue;
+        }
+        return Err(ApiError::BadRequest(
+            "graph node is too large for the structured response limit",
+        ));
+    }
+    Ok(Json(response))
+}
+
+fn encode_graph_cursor(cursor: &GraphCursor) -> String {
+    let bytes = serde_json::to_vec(cursor).expect("graph cursor is serializable");
+    let mut encoded = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        write!(encoded, "{byte:02x}").expect("writing to a string cannot fail");
+    }
+    encoded
+}
+
+fn decode_graph_cursor(value: &str) -> ApiResult<GraphCursor> {
+    if value.is_empty() || value.len() > 4096 || !value.len().is_multiple_of(2) {
+        return Err(ApiError::BadRequest("invalid graph cursor"));
+    }
+    let bytes = (0..value.len())
+        .step_by(2)
+        .map(|index| u8::from_str_radix(&value[index..index + 2], 16))
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|_| ApiError::BadRequest("invalid graph cursor"))?;
+    serde_json::from_slice(&bytes).map_err(|_| ApiError::BadRequest("invalid graph cursor"))
+}
+
+fn format_compact_uuid(value: &str) -> Option<String> {
+    if value.len() != 32 || !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return None;
+    }
+    Some(format!(
+        "{}-{}-{}-{}-{}",
+        &value[0..8],
+        &value[8..12],
+        &value[12..16],
+        &value[16..20],
+        &value[20..32]
+    ))
+}
+
+fn copy_transcript(state: &AppState, source: &Path) -> ApiResult<(String, Option<String>)> {
     let bytes = read_bounded(source)?;
     let digest = sha256(&bytes);
     std::fs::create_dir_all(&state.transcript_dir)
@@ -602,15 +1010,7 @@ fn copy_transcript(
     if !target.exists() {
         std::fs::write(&target, &bytes).map_err(|error| ApiError::Transcript(error.to_string()))?;
     }
-    let text =
-        if index {
-            Some(String::from_utf8(bytes).map_err(|_| {
-                ApiError::BadRequest("copy-plus-index requires UTF-8 transcript text")
-            })?)
-        } else {
-            None
-        };
-    Ok((digest, Some(target.display().to_string()), text))
+    Ok((digest, Some(target.display().to_string())))
 }
 
 fn read_bounded(source: &Path) -> ApiResult<Vec<u8>> {

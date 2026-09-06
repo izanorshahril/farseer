@@ -80,6 +80,13 @@ impl EventKind {
     pub const OPERATOR_INTERVENED: &'static str = "operator_intervened";
     pub const MANAGER_STEERED: &'static str = "manager_steered";
 
+    /// The explicit UI context accepted with an operator instruction.
+    ///
+    /// The request still enters through the top manager, but the operator's
+    /// project, conversation, task, widget anchor, and selected runner are
+    /// durable provenance rather than prose hidden in the goal.
+    pub const OPERATOR_CONTEXT: &'static str = "operator_context";
+
     /// A manager finished a turn and said something.
     ///
     /// Not the same as the run finishing. `10 runner inventory` observed that a
@@ -178,6 +185,10 @@ impl EventKind {
     /// forward over this one does remove it, which is the honest behaviour: it
     /// is a record entry like any other, and purge is defined over the record.
     pub const CELL_PURGED: &'static str = "cell_purged";
+
+    /// The operator changed the runtime's admission or shutdown mode, per
+    /// `02 independent runtime lifecycle`.
+    pub const RUNTIME_LIFECYCLE: &'static str = "runtime_lifecycle";
 
     /// A permanent hole, per `17 cell lifecycle` section 5.
     ///

@@ -6,7 +6,7 @@
 
 **Blocked by:** [Attributed usage](12-attributed-usage.md)
 
-**Status:** not-started.
+**Status:** in-progress.
 
 **Execution:** package approved; verify named blockers before implementation.
 
@@ -24,6 +24,9 @@ Explicit unsupported pins fail instead of silently falling through; zero automat
 - [ ] Every fallback records preferred candidate, selected candidate, observed pressure, actor, and estimated or reported cost basis.
 - [ ] Each requested bounded dimension retains its existing enforceability check; post-run accounting never substitutes for verified pre-spend enforcement.
 - [ ] Replaying the same input and observations produces the same selection and provenance.
+
+**Evidence:** New instructions honor explicit and conversation runner pins, select the first non-exhausted declared candidate, and record a preferred-runner fallback event.
+The sealed pre-spawn routing record, full candidate pressure reasons, model policy, and replay fixture remain open.
 
 **Exclusions:** No token-level router, opaque LLM judge, arbitrary installed model picker, or vendor gateway in the core.
 

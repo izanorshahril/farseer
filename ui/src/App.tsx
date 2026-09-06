@@ -20,7 +20,7 @@ import {
   type Span,
   type WidgetUnit,
 } from "./layout";
-import { onSelection, onSubjectSelection, selectedSubject, type SubjectSelection } from "./selection";
+import { onSelection, onSubjectSelection, selectSubject, selectedSubject, type SubjectSelection } from "./selection";
 import { restoreProject } from "./project";
 import { QuotaWidget } from "./widgets/quota";
 import { ClockWidget } from "./widgets/clock";
@@ -37,6 +37,7 @@ import { RunWidget } from "./widgets/run";
 import { SandboxWidget } from "./SandboxWidget";
 import { GateBar } from "./GateBar";
 import { WidgetBoundary } from "./WidgetBoundary";
+import { mask, onPrivacy, togglePrivacy } from "./privacy";
 
 /**
  * The canvas.
@@ -336,6 +337,10 @@ export function App() {
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [privacy, setPrivacy] = useState(true);
+  const [focusedId, setFocusedId] = useState<WidgetId | null>(null);
+  const [focusPane, setFocusPane] = useState<"navigation" | "inspector">("inspector");
+  const focusReturn = useRef<HTMLButtonElement | null>(null);
   // Pointer capture works in both Chromium and the desktop WebView2. Native
   // HTML drag-and-drop did not: WebView2 emitted dragover but no drop for the
   // same grip gesture that completed in the browser.
@@ -355,6 +360,22 @@ export function App() {
     y: number;
   } | null>(null);
 
+  const pinContext = useCallback((widget: string, subjectName?: string) => {
+    setAnchor({
+      widget,
+      subject: subjectName,
+      project: subject.project,
+      conversation: subject.conversation,
+      task: subject.task,
+      managerRunner: subject.managerRunner,
+    });
+  }, [subject]);
+
+  const clearContext = useCallback(() => {
+    setAnchor({ widget: "canvas" });
+    selectSubject({ conversation: null, task: null, run: null, project: null, managerRunner: null });
+  }, []);
+
   const gridStep = useCallback(() => {
     const element = board.current;
     const unit = layoutRef.current?.unit ?? DEFAULT_WIDGET_UNIT;
@@ -373,6 +394,9 @@ export function App() {
         const next = normalizeLayout(stored, DEFAULT_LAYOUT);
         layoutRef.current = next;
         setLayout(next);
+        setSidebarCollapsed(next.sidebarCollapsed ?? false);
+        setFocusedId(next.focused ?? null);
+        setFocusPane(next.focusPane ?? "inspector");
       })
       .catch(() => {
         layoutRef.current = DEFAULT_LAYOUT;
@@ -391,26 +415,7 @@ export function App() {
   }, []);
 
   useEffect(() => onSubjectSelection(setSubject), []);
-
-  useEffect(() => {
-    const closeOverlays = (event: KeyboardEvent) => {
-      if (event.key !== "Escape") return;
-      setSidebarOpen(false);
-      setContextMenu(null);
-      setSettingsOpen(false);
-    };
-    const closeContextMenu = (event: PointerEvent) => {
-      if (!(event.target instanceof Element) || !event.target.closest(".widget-context-menu")) {
-        setContextMenu(null);
-      }
-    };
-    document.addEventListener("keydown", closeOverlays);
-    document.addEventListener("pointerdown", closeContextMenu);
-    return () => {
-      document.removeEventListener("keydown", closeOverlays);
-      document.removeEventListener("pointerdown", closeContextMenu);
-    };
-  }, []);
+  useEffect(() => onPrivacy(setPrivacy), []);
 
   /**
    * Compose layout edits synchronously, then serialize their opaque PUTs.
@@ -430,6 +435,41 @@ export function App() {
       .then(() => bridge.saveState("canvas", next))
       .catch((e: Error) => setError(e.message));
   }, []);
+
+  const leaveFocus = useCallback(() => {
+    setFocusedId(null);
+    persist((current) => current.focused == null ? current : { ...current, focused: null });
+    const target = focusReturn.current;
+    requestAnimationFrame(() => target?.focus());
+  }, [persist]);
+
+  useEffect(() => {
+    const closeOverlays = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      setSidebarOpen(false);
+      setContextMenu(null);
+      setSettingsOpen(false);
+      leaveFocus();
+    };
+    const closeContextMenu = (event: PointerEvent) => {
+      if (!(event.target instanceof Element) || !event.target.closest(".widget-context-menu")) {
+        setContextMenu(null);
+      }
+    };
+    document.addEventListener("keydown", closeOverlays);
+    document.addEventListener("pointerdown", closeContextMenu);
+    return () => {
+      document.removeEventListener("keydown", closeOverlays);
+      document.removeEventListener("pointerdown", closeContextMenu);
+    };
+  }, [leaveFocus]);
+
+  // A removed or failed authored face must never leave the canvas in a blank
+  // focused route. Return to the last valid face and preserve execution state.
+  useEffect(() => {
+    const known = new Set([...Object.keys(REGISTRY), ...agentWidgets.map((widget) => widget.id)]);
+    if (focusedId && (!known.has(focusedId) || !layoutRef.current?.mounted.includes(focusedId))) leaveFocus();
+  }, [focusedId, agentWidgets, layout, leaveFocus]);
 
   // Selecting a run has to *show* one. A click that opens a widget the operator
   // has unmounted looks like a click that did nothing, which is the same class
@@ -473,6 +513,7 @@ export function App() {
   const authored = agentWidgets.map((widget) => ({ ...widget, agent: true as const }));
   const available = [...built, ...authored];
   const contextIndex = contextMenu ? layout.mounted.indexOf(contextMenu.id) : -1;
+  const focusedWidget = focusedId ? available.find((candidate) => candidate.id === focusedId) : null;
 
   return (
     <div
@@ -480,6 +521,7 @@ export function App() {
         "app",
         sidebarOpen ? "sidebar-open" : "",
         sidebarCollapsed ? "sidebar-collapsed" : "",
+        focusedId ? "focus-mode" : "",
       ]
         .filter(Boolean)
         .join(" ")}
@@ -501,7 +543,11 @@ export function App() {
           <button
             className="icon-button collapse-sidebar"
             aria-label={sidebarCollapsed ? "Expand sidebar" : "Collapse sidebar"}
-            onClick={() => setSidebarCollapsed((current) => !current)}
+            onClick={() => {
+              const next = !sidebarCollapsed;
+              setSidebarCollapsed(next);
+              persist((current) => ({ ...current, sidebarCollapsed: next }));
+            }}
           >
             <svg viewBox="0 0 24 24" aria-hidden>
               <path d={sidebarCollapsed ? "m9.5 6 6 6-6 6" : "m14.5 6-6 6 6 6"} />
@@ -573,10 +619,24 @@ export function App() {
           </button>
           <div className="crumb">
             <b>Home</b>
-            <span>live canvas</span>
+            <span>{focusedWidget ? `canvas / ${focusedWidget.title}` : "live canvas"}</span>
           </div>
+          {focusedWidget && (
+            <button className="chip focus-back" onClick={leaveFocus} aria-label="Back to canvas">
+              back to canvas
+            </button>
+          )}
           <div className="top-actions">
             <span className="saved-state"><span className="status-orb" aria-hidden />arrangement saved</span>
+            <button
+              className="icon-button"
+              aria-pressed={privacy}
+              aria-label={privacy ? "Disable presentation privacy mode" : "Enable presentation privacy mode"}
+              title={privacy ? "Disable privacy mode" : "Enable privacy mode"}
+              onClick={togglePrivacy}
+            >
+              {privacy ? "••" : "◌"}
+            </button>
             <button
               className="icon-button"
               aria-pressed={layout.mounted.includes("clock")}
@@ -622,7 +682,7 @@ export function App() {
         <GateBar />
 
         <main
-          className="canvas"
+          className={focusedId ? "canvas focus-mode" : "canvas"}
           ref={board}
           style={
             {
@@ -643,6 +703,7 @@ export function App() {
               className={[
                 "widget",
                 `widget-${id}`,
+                focusedId === id ? "focused" : "",
                 dragging === id ? "dragging" : "",
                 over === id && dragging !== id ? "drop-target" : "",
               ]
@@ -658,10 +719,10 @@ export function App() {
               }
               // Hover and focus never retarget a request. Context changes only
               // on an explicit click or context-menu action.
-              onClick={() => setAnchor({ widget: widget.title })}
+              onClick={() => pinContext(widget.title)}
               onContextMenu={(event) => {
                 event.preventDefault();
-                setAnchor({ widget: widget.title });
+                pinContext(widget.title);
                 setContextMenu({
                   id,
                   title: widget.title,
@@ -760,6 +821,21 @@ export function App() {
                   </span>
                 )}
                 <span className="grow" />
+                <button
+                  type="button"
+                  className="chip focus-open"
+                  aria-label={`Open ${widget.title} in focused workspace`}
+                  title={`Open ${widget.title} in focused workspace`}
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    focusReturn.current = event.currentTarget;
+                    setFocusedId(id);
+                    setFocusPane("inspector");
+                    persist((current) => ({ ...current, focused: id, focusPane: "inspector" }));
+                  }}
+                >
+                  focus
+                </button>
                 <select
                   className="badge size"
                   aria-label={`Size of ${widget.title} widget`}
@@ -812,6 +888,33 @@ export function App() {
         })}
         {layout.mounted.length === 0 && (
           <p className="empty">Nothing is visible. Show a widget from the sidebar.</p>
+        )}
+        {focusedWidget && (
+          <aside className="focus-pane" aria-label={`${focusedWidget.title} focused workspace pane`}>
+            <div className="row focus-pane-tabs">
+              <button className={focusPane === "navigation" ? "chip active" : "chip"} onClick={() => { setFocusPane("navigation"); persist((current) => ({ ...current, focusPane: "navigation" })); }}>navigation</button>
+              <button className={focusPane === "inspector" ? "chip active" : "chip"} onClick={() => { setFocusPane("inspector"); persist((current) => ({ ...current, focusPane: "inspector" })); }}>inspector</button>
+            </div>
+            {focusPane === "navigation" ? (
+              <nav aria-label="Focused widget navigation">
+                {layout.mounted.map((id) => {
+                  const item = available.find((candidate) => candidate.id === id);
+                  return item ? <button key={id} className={id === focusedId ? "focus-nav-item active" : "focus-nav-item"} onClick={() => { setFocusedId(id); persist((current) => ({ ...current, focused: id })); }}>{item.title}</button> : null;
+                })}
+              </nav>
+            ) : (
+              <div className="focus-inspector">
+                <b>{focusedWidget.title}</b>
+                <p className="dim small">The focused view uses the same widget, subject, and runtime commands as the canvas.</p>
+                <dl>
+                  <dt>project</dt><dd>{subject.project ? mask(subject.project, "path", privacy) : "global"}</dd>
+                  <dt>conversation</dt><dd>{subject.conversation ? mask(subject.conversation, "session", privacy) : "none"}</dd>
+                  <dt>task</dt><dd>{subject.task ? mask(subject.task, "session", privacy) : "none"}</dd>
+                  <dt>anchor</dt><dd>{anchor.widget ?? "canvas"}</dd>
+                </dl>
+              </div>
+            )}
+          </aside>
         )}
       </main>
         {contextMenu && (
@@ -905,10 +1008,10 @@ export function App() {
               <button
                 type="button"
                 className="anchor-chip"
-                title="reset the request context to the canvas"
-                onClick={() => setAnchor({ widget: "canvas" })}
+                title="clear the pinned request context"
+                onClick={clearContext}
               >
-                about {anchor.widget}
+                {anchor.widget === "canvas" ? "global context" : `clear ${anchor.widget}`}
               </button>
             </div>
             <textarea

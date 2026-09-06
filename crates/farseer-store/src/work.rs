@@ -6,6 +6,8 @@
 
 use rusqlite::OptionalExtension;
 use serde::Serialize;
+use std::collections::HashSet;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use farseer_core::{
     Actor, Conversation, ConversationId, HarnessSession, RunId, Task, TaskId, TaskState,
@@ -13,6 +15,14 @@ use farseer_core::{
 };
 
 use crate::{Result, Store, StoreError, uuid_bytes};
+
+fn now_ms() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |duration| {
+            duration.as_millis().min(i64::MAX as u128) as i64
+        })
+}
 
 #[derive(Debug, Clone, Default)]
 pub struct TaskFilter<'a> {
@@ -48,6 +58,32 @@ pub struct TranscriptAttachment {
     pub created_ts: i64,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct TranscriptProjection {
+    pub status: String,
+    pub error: Option<String>,
+    pub coverage: String,
+    pub updated_ts: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IndexedTranscript {
+    pub digest: String,
+    pub body: String,
+    pub projection_version: String,
+}
+
+/// One bounded explorer row from `40 work model and session explorer`, joining
+/// provider-owned session identity to the run and project it came from.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct SessionRow {
+    pub session: HarnessSession,
+    pub runner: String,
+    pub model: String,
+    pub project_path: Option<String>,
+    pub log_available: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct SimilarityEdge {
     pub left_digest: String,
@@ -60,6 +96,51 @@ pub struct SimilarityEdge {
     pub projection_version: String,
     pub source_digest: String,
     pub evidence: Vec<String>,
+}
+
+/// `04 scoped orchestration graph` keeps this projection bounded and additive.
+/// The key is stable within the record and
+/// `target` points at the existing operator subject when one exists.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct GraphNode {
+    pub id: String,
+    pub kind: String,
+    pub label: String,
+    pub project_path: Option<String>,
+    pub runner: Option<String>,
+    pub target: Option<String>,
+    pub parent: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct GraphEdge {
+    pub from: String,
+    pub to: String,
+    pub kind: String,
+    pub source: Option<String>,
+    pub projection: Option<String>,
+    pub score: Option<f64>,
+    pub evidence: Vec<String>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct GraphFilter {
+    pub project_path: Option<String>,
+    pub runner: Option<String>,
+    pub from_ts: Option<i64>,
+    pub to_ts: Option<i64>,
+    pub kinds: Vec<String>,
+    pub offset: usize,
+    pub node_limit: usize,
+    pub edge_limit: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct GraphPage {
+    pub nodes: Vec<GraphNode>,
+    pub observed_edges: Vec<GraphEdge>,
+    pub derived_edges: Vec<GraphEdge>,
+    pub has_more: bool,
 }
 
 impl Store {
@@ -422,6 +503,266 @@ impl Store {
         .collect()
     }
 
+    /// Read a bounded graph page from the canonical work rows, per `04 scoped
+    /// orchestration graph`.
+    ///
+    /// The union is ordered before the limit so the caller can continue with
+    /// an opaque offset without loading the archive into memory.  Edges are
+    /// assembled only for the returned nodes and are split by provenance.
+    pub fn graph_page(&self, filter: &GraphFilter) -> Result<GraphPage> {
+        let mut sql = String::from(
+            r#"WITH nodes(kind, id, label, project_path, runner, ts, target, parent) AS (
+             SELECT 'project', 'project:' || project_path, project_path, project_path, NULL, MAX(updated_ts), NULL, NULL
+               FROM (SELECT project_path, updated_ts FROM conversations WHERE project_path IS NOT NULL
+                     UNION ALL SELECT project_path, updated_ts FROM tasks WHERE project_path IS NOT NULL)
+              GROUP BY project_path
+             UNION ALL
+             SELECT 'conversation', 'conversation:' || lower(hex(conversation_id)), title, project_path, manager_runner, updated_ts, lower(hex(conversation_id)), NULL
+               FROM conversations
+             UNION ALL
+             SELECT 'task', 'task:' || lower(hex(task_id)), title, project_path, NULL, updated_ts, lower(hex(task_id)), 'conversation:' || lower(hex(conversation_id))
+               FROM tasks
+             UNION ALL
+             SELECT 'run', 'run:' || lower(hex(runs.run_id)), runs.runner, tasks.project_path, runs.runner, runs.started_ts, lower(hex(runs.run_id)), 'task:' || lower(hex(runs.task_id))
+               FROM runs JOIN tasks ON tasks.task_id = runs.task_id
+             UNION ALL
+             SELECT 'session', 'session:' || lower(hex(harness_sessions.run_id)) || ':' || identifier_kind || ':' || identifier, identifier_kind || ' ' || identifier, tasks.project_path, runs.runner, observed_ts, lower(hex(harness_sessions.run_id)), 'run:' || lower(hex(harness_sessions.run_id))
+               FROM harness_sessions JOIN runs ON runs.run_id = harness_sessions.run_id JOIN tasks ON tasks.task_id = runs.task_id
+             UNION ALL
+             SELECT 'attachment', 'transcript:' || digest, digest, tasks.project_path, runs.runner, transcript_attachments.created_ts, lower(hex(transcript_attachments.run_id)), 'run:' || lower(hex(transcript_attachments.run_id))
+               FROM transcript_attachments JOIN runs ON runs.run_id = transcript_attachments.run_id JOIN tasks ON tasks.task_id = runs.task_id
+            ) SELECT kind, id, label, project_path, runner, ts, target, parent FROM nodes WHERE 1 = 1"#,
+        );
+        let mut values: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
+        if let Some(project) = &filter.project_path {
+            values.push(Box::new(project.clone()));
+            sql.push_str(&format!(" AND project_path = ?{}", values.len()));
+        }
+        if let Some(runner) = &filter.runner {
+            values.push(Box::new(runner.clone()));
+            sql.push_str(&format!(" AND runner = ?{}", values.len()));
+        }
+        if let Some(from_ts) = filter.from_ts {
+            values.push(Box::new(from_ts));
+            sql.push_str(&format!(" AND ts >= ?{}", values.len()));
+        }
+        if let Some(to_ts) = filter.to_ts {
+            values.push(Box::new(to_ts));
+            sql.push_str(&format!(" AND ts <= ?{}", values.len()));
+        }
+        if !filter.kinds.is_empty() {
+            sql.push_str(" AND kind IN (");
+            for (index, kind) in filter.kinds.iter().enumerate() {
+                values.push(Box::new(kind.clone()));
+                if index > 0 {
+                    sql.push_str(", ");
+                }
+                sql.push_str(&format!("?{}", values.len()));
+            }
+            sql.push(')');
+        }
+        let limit = filter.node_limit.max(1).saturating_add(1);
+        values.push(Box::new(limit.min(i64::MAX as usize) as i64));
+        let limit_param = values.len();
+        values.push(Box::new(filter.offset.min(i64::MAX as usize) as i64));
+        let offset_param = values.len();
+        sql.push_str(&format!(
+            " ORDER BY ts DESC, kind, id LIMIT ?{} OFFSET ?{}",
+            limit_param, offset_param
+        ));
+        let mut statement = self.conn().prepare(&sql)?;
+        let rows = statement
+            .query_map(
+                rusqlite::params_from_iter(values.iter().map(|value| value.as_ref())),
+                |row| {
+                    Ok(GraphNode {
+                        id: row.get(1)?,
+                        kind: row.get(0)?,
+                        label: row.get::<_, String>(2)?.chars().take(256).collect(),
+                        project_path: row.get(3)?,
+                        runner: row.get(4)?,
+                        target: row.get(6)?,
+                        parent: row.get(7)?,
+                    })
+                },
+            )?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        let has_more = rows.len() > filter.node_limit;
+        let nodes = rows.into_iter().take(filter.node_limit).collect::<Vec<_>>();
+        let visible: HashSet<_> = nodes.iter().map(|node| node.id.as_str()).collect();
+        let mut observed_edges = Vec::new();
+        for node in &nodes {
+            if let Some(parent) = &node.parent
+                && visible.contains(parent.as_str())
+            {
+                observed_edges.push(GraphEdge {
+                    from: parent.clone(),
+                    to: node.id.clone(),
+                    kind: match node.kind.as_str() {
+                        "task" => "task",
+                        "run" => "run",
+                        "session" => "session",
+                        "attachment" => "attachment",
+                        _ => "contains",
+                    }
+                    .to_owned(),
+                    source: Some(node.id.clone()),
+                    projection: None,
+                    score: None,
+                    evidence: Vec::new(),
+                });
+            }
+            if matches!(node.kind.as_str(), "conversation" | "task")
+                && let Some(project) = &node.project_path
+            {
+                let project_id = format!("project:{project}");
+                if visible.contains(project_id.as_str()) {
+                    observed_edges.push(GraphEdge {
+                        from: project_id,
+                        to: node.id.clone(),
+                        kind: "project".into(),
+                        source: Some(node.id.clone()),
+                        projection: None,
+                        score: None,
+                        evidence: Vec::new(),
+                    });
+                }
+            }
+        }
+
+        let run_ids = nodes
+            .iter()
+            .filter_map(|node| node.id.strip_prefix("run:"))
+            .collect::<Vec<_>>();
+        if !run_ids.is_empty() {
+            let mut query = String::from(
+                "SELECT lower(hex(run_id)), lower(hex(parent)), kind FROM run_parents WHERE run_id IN (",
+            );
+            let mut run_values: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
+            for (index, id) in run_ids.iter().enumerate() {
+                let bytes = decode_hex(id).ok_or_else(|| StoreError::Corrupt {
+                    field: "run_parent.run_id",
+                    value: (*id).to_owned(),
+                })?;
+                run_values.push(Box::new(bytes));
+                if index > 0 {
+                    query.push_str(", ");
+                }
+                query.push_str(&format!("?{}", run_values.len()));
+            }
+            query.push(')');
+            let mut statement = self.conn().prepare(&query)?;
+            let parents = statement
+                .query_map(
+                    rusqlite::params_from_iter(run_values.iter().map(|value| value.as_ref())),
+                    |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, String>(1)?,
+                            row.get::<_, String>(2)?,
+                        ))
+                    },
+                )?
+                .collect::<std::result::Result<Vec<_>, _>>()?;
+            for (run, parent, kind) in parents {
+                let from = format!("run:{parent}");
+                let to = format!("run:{run}");
+                if visible.contains(from.as_str()) && visible.contains(to.as_str()) {
+                    observed_edges.push(GraphEdge {
+                        from,
+                        to,
+                        kind,
+                        source: Some(format!("run:{run}")),
+                        projection: None,
+                        score: None,
+                        evidence: Vec::new(),
+                    });
+                }
+            }
+        }
+
+        let digests = nodes
+            .iter()
+            .filter_map(|node| node.id.strip_prefix("transcript:"))
+            .collect::<Vec<_>>();
+        let mut derived_edges = Vec::new();
+        if !digests.is_empty() {
+            let mut query = String::from(
+                "SELECT left_digest, right_digest, score, projection_version, source_digest, evidence FROM similarity_edges WHERE left_digest IN (",
+            );
+            let mut edge_values: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
+            for (index, digest) in digests.iter().enumerate() {
+                edge_values.push(Box::new((*digest).to_owned()));
+                if index > 0 {
+                    query.push_str(", ");
+                }
+                query.push_str(&format!("?{}", edge_values.len()));
+            }
+            query.push_str(") OR right_digest IN (");
+            for (index, digest) in digests.iter().enumerate() {
+                edge_values.push(Box::new((*digest).to_owned()));
+                if index > 0 {
+                    query.push_str(", ");
+                }
+                query.push_str(&format!("?{}", edge_values.len()));
+            }
+            edge_values.push(Box::new(
+                filter.edge_limit.max(1).min(i64::MAX as usize) as i64
+            ));
+            query.push_str(&format!(
+                " ORDER BY score DESC LIMIT ?{}",
+                edge_values.len()
+            ));
+            let mut statement = self.conn().prepare(&query)?;
+            let rows = statement
+                .query_map(
+                    rusqlite::params_from_iter(edge_values.iter().map(|value| value.as_ref())),
+                    |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, String>(1)?,
+                            row.get::<_, f64>(2)?,
+                            row.get::<_, String>(3)?,
+                            row.get::<_, String>(4)?,
+                            row.get::<_, String>(5)?,
+                        ))
+                    },
+                )?
+                .collect::<std::result::Result<Vec<_>, _>>()?;
+            for (left, right, score, projection, source, evidence) in rows {
+                let from = format!("transcript:{left}");
+                let to = format!("transcript:{right}");
+                if visible.contains(from.as_str()) && visible.contains(to.as_str()) {
+                    derived_edges.push(GraphEdge {
+                        from,
+                        to,
+                        kind: "similarity".into(),
+                        source: Some(source),
+                        projection: Some(projection),
+                        score: Some(score),
+                        evidence: serde_json::from_str::<Vec<String>>(&evidence)?
+                            .into_iter()
+                            .take(8)
+                            .collect(),
+                    });
+                }
+            }
+        }
+        let total_edges = observed_edges.len().saturating_add(derived_edges.len());
+        if total_edges > filter.edge_limit {
+            let mut remaining = filter.edge_limit;
+            observed_edges.truncate(remaining);
+            remaining = remaining.saturating_sub(observed_edges.len());
+            derived_edges.truncate(remaining);
+        }
+        Ok(GraphPage {
+            nodes,
+            observed_edges,
+            derived_edges,
+            has_more: has_more || total_edges > filter.edge_limit,
+        })
+    }
+
     pub fn observe_harness_session(&self, session: &HarnessSession) -> Result<()> {
         self.conn().execute(
             "INSERT INTO harness_sessions
@@ -482,6 +823,69 @@ impl Store {
             .collect()
     }
 
+    /// Bounded session explorer rows from `40 work model and session explorer`.
+    /// Missing log pointers remain visible and are labelled unavailable rather than guessed from private directories.
+    pub fn harness_session_page(
+        &self,
+        limit: usize,
+        offset: usize,
+        project_path: Option<&str>,
+    ) -> Result<(Vec<SessionRow>, Option<usize>)> {
+        let limit = limit.clamp(1, 500);
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT h.run_id, h.identifier_kind, h.identifier, h.log_pointer, h.observed_ts,
+                    r.runner, r.model, t.project_path
+             FROM harness_sessions h
+             JOIN runs r ON r.run_id = h.run_id
+             JOIN tasks t ON t.task_id = r.task_id
+             WHERE (?1 IS NULL OR t.project_path = ?1)
+             ORDER BY h.observed_ts DESC, h.run_id DESC
+             LIMIT ?2 OFFSET ?3",
+        )?;
+        let raw = stmt
+            .query_map(
+                rusqlite::params![project_path, (limit + 1) as i64, offset as i64],
+                |row| {
+                    Ok((
+                        row.get::<_, Vec<u8>>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, Option<String>>(3)?,
+                        row.get::<_, i64>(4)?,
+                        row.get::<_, String>(5)?,
+                        row.get::<_, String>(6)?,
+                        row.get::<_, Option<String>>(7)?,
+                    ))
+                },
+            )?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        let rows = raw
+            .into_iter()
+            .map(|row| {
+                let log_available = row.3.is_some();
+                Ok(SessionRow {
+                    session: HarnessSession {
+                        run_id: RunId::from_bytes(uuid_bytes(&row.0, "session.run_id")?),
+                        identifier_kind: row.1,
+                        identifier: row.2,
+                        log_pointer: row.3,
+                        observed_ts: row.4,
+                    },
+                    runner: row.5,
+                    model: row.6,
+                    project_path: row.7,
+                    log_available,
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let next = (rows.len() > limit).then_some(offset + limit);
+        let mut rows = rows;
+        if next.is_some() {
+            rows.truncate(limit);
+        }
+        Ok((rows, next))
+    }
+
     pub fn record_transcript_attachment(&self, attachment: &TranscriptAttachment) -> Result<()> {
         self.conn().execute(
             "INSERT INTO transcript_attachments
@@ -501,7 +905,123 @@ impl Store {
                 attachment.created_ts
             ],
         )?;
+        if attachment.custody != TranscriptCustody::CopyPlusIndex {
+            self.conn().execute(
+                "DELETE FROM transcript_projection_jobs WHERE digest = ?1 AND run_id = ?2",
+                rusqlite::params![attachment.digest, &attachment.run_id.as_bytes()[..]],
+            )?;
+        }
         Ok(())
+    }
+
+    pub fn queue_transcript_projection(
+        &self,
+        attachment: &TranscriptAttachment,
+        updated_ts: i64,
+    ) -> Result<()> {
+        self.conn().execute(
+            "INSERT INTO transcript_projection_jobs
+                (digest, run_id, status, error, coverage, updated_ts)
+             VALUES (?1, ?2, 'pending', NULL, 'restricted', ?3)
+             ON CONFLICT(digest, run_id) DO UPDATE SET
+                status = 'pending', error = NULL, coverage = 'restricted', updated_ts = excluded.updated_ts",
+            rusqlite::params![attachment.digest, &attachment.run_id.as_bytes()[..], updated_ts],
+        )?;
+        Ok(())
+    }
+
+    pub fn transcript_projection(
+        &self,
+        digest: &str,
+        run_id: RunId,
+    ) -> Result<Option<TranscriptProjection>> {
+        self.conn()
+            .query_row(
+                "SELECT status, error, coverage, updated_ts
+                 FROM transcript_projection_jobs WHERE digest = ?1 AND run_id = ?2",
+                rusqlite::params![digest, &run_id.as_bytes()[..]],
+                |row| {
+                    Ok(TranscriptProjection {
+                        status: row.get(0)?,
+                        error: row.get(1)?,
+                        coverage: row.get(2)?,
+                        updated_ts: row.get(3)?,
+                    })
+                },
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+
+    pub fn pending_transcript_projections(&self) -> Result<Vec<TranscriptAttachment>> {
+        let mut statement = self.conn().prepare(
+            "SELECT a.digest, a.run_id, a.custody, a.source, a.stored_path, a.created_ts
+             FROM transcript_projection_jobs j
+             JOIN transcript_attachments a ON a.digest = j.digest AND a.run_id = j.run_id
+             WHERE j.status = 'pending' ORDER BY j.updated_ts, a.created_ts",
+        )?;
+        let rows = statement
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, Vec<u8>>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, Option<String>>(4)?,
+                    row.get::<_, i64>(5)?,
+                ))
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        rows.into_iter()
+            .map(|row| {
+                Ok(TranscriptAttachment {
+                    digest: row.0,
+                    run_id: RunId::from_bytes(uuid_bytes(&row.1, "transcript_attachment.run_id")?),
+                    custody: row.2.parse().map_err(
+                        |error: farseer_core::UnknownTranscriptCustody| StoreError::Corrupt {
+                            field: "transcript_attachment.custody",
+                            value: error.0,
+                        },
+                    )?,
+                    source: row.3,
+                    stored_path: row.4,
+                    created_ts: row.5,
+                })
+            })
+            .collect()
+    }
+
+    pub fn set_transcript_projection_status(
+        &self,
+        attachment: &TranscriptAttachment,
+        status: &str,
+        error: Option<&str>,
+        coverage: &str,
+        updated_ts: i64,
+    ) -> Result<bool> {
+        let changed = self.conn().execute(
+            "UPDATE transcript_projection_jobs
+             SET status = ?3, error = ?4, coverage = ?5, updated_ts = ?6
+             WHERE digest = ?1 AND run_id = ?2
+               AND EXISTS (
+                 SELECT 1 FROM transcript_attachments a
+                 WHERE a.digest = ?1 AND a.run_id = ?2
+                   AND a.custody = ?7 AND a.source = ?8
+                   AND (a.stored_path = ?9 OR (a.stored_path IS NULL AND ?9 IS NULL))
+               )",
+            rusqlite::params![
+                attachment.digest,
+                &attachment.run_id.as_bytes()[..],
+                status,
+                error,
+                coverage,
+                updated_ts,
+                attachment.custody.as_str(),
+                attachment.source,
+                attachment.stored_path
+            ],
+        )?;
+        Ok(changed == 1)
     }
 
     pub fn transcript_attachments(
@@ -613,6 +1133,52 @@ impl Store {
         Ok(documents)
     }
 
+    /// Read one bounded page of scrubbed transcript projections with the
+    /// version that produced each row.
+    pub fn indexed_transcript_page(
+        &self,
+        limit: usize,
+        offset: usize,
+        byte_limit: usize,
+    ) -> Result<(Vec<IndexedTranscript>, Option<usize>)> {
+        if limit == 0 || byte_limit == 0 {
+            return Ok((Vec::new(), None));
+        }
+        let limit = limit.min(500);
+        let mut statement = self.conn().prepare_cached(
+            "SELECT digest, projection_version
+             FROM transcript_index ORDER BY digest LIMIT ?1 OFFSET ?2",
+        )?;
+        let rows = statement
+            .query_map(
+                rusqlite::params![(limit + 1) as i64, offset as i64],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+            )?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        let has_more = rows.len() > limit;
+        let mut documents = Vec::with_capacity(rows.len().min(limit));
+        let mut used = 0usize;
+        for (digest, projection) in rows.into_iter().take(limit) {
+            let remaining = byte_limit.saturating_sub(used);
+            if remaining == 0 {
+                break;
+            }
+            let bytes = self.conn().query_row(
+                "SELECT substr(CAST(body AS BLOB), 1, ?2) FROM transcript_index WHERE digest = ?1",
+                rusqlite::params![digest, remaining.min(i64::MAX as usize) as i64],
+                |row| row.get::<_, Vec<u8>>(0),
+            )?;
+            let body = valid_utf8_prefix(bytes);
+            used = used.saturating_add(body.len());
+            documents.push(IndexedTranscript {
+                digest,
+                body,
+                projection_version: projection,
+            });
+        }
+        Ok((documents, has_more.then_some(offset + limit)))
+    }
+
     /// Commit one projection and its edges only if its attachment is still the
     /// same row that was read before analysis.
     pub fn commit_transcript_projection(
@@ -623,28 +1189,54 @@ impl Store {
         projection: &str,
         edges: &[SimilarityEdge],
     ) -> Result<()> {
+        self.commit_transcript_projection_with_coverage(
+            attachment,
+            body,
+            redaction,
+            projection,
+            "restricted",
+            edges,
+        )
+    }
+
+    pub fn commit_transcript_projection_with_coverage(
+        &self,
+        attachment: &TranscriptAttachment,
+        body: &str,
+        redaction: &str,
+        projection: &str,
+        coverage: &str,
+        edges: &[SimilarityEdge],
+    ) -> Result<()> {
         let transaction = self.conn().unchecked_transaction()?;
         let current = transaction
             .query_row(
-                "SELECT custody, source, stored_path FROM transcript_attachments
-                 WHERE digest = ?1 AND run_id = ?2",
+                "SELECT a.custody, a.source, a.stored_path, j.status
+                 FROM transcript_attachments a
+                 LEFT JOIN transcript_projection_jobs j
+                   ON j.digest = a.digest AND j.run_id = a.run_id
+                 WHERE a.digest = ?1 AND a.run_id = ?2",
                 rusqlite::params![attachment.digest, &attachment.run_id.as_bytes()[..]],
                 |row| {
                     Ok((
                         row.get::<_, String>(0)?,
                         row.get::<_, String>(1)?,
                         row.get::<_, Option<String>>(2)?,
+                        row.get::<_, Option<String>>(3)?,
                     ))
                 },
             )
             .optional()?;
-        let Some((custody, source, stored_path)) = current else {
+        let Some((custody, source, stored_path, status)) = current else {
             return Err(StoreError::StaleTranscriptProjection);
         };
         if custody != attachment.custody.as_str()
             || source != attachment.source
             || stored_path != attachment.stored_path
         {
+            return Err(StoreError::StaleTranscriptProjection);
+        }
+        if status.as_deref() != Some("pending") {
             return Err(StoreError::StaleTranscriptProjection);
         }
         transaction.execute(
@@ -677,6 +1269,18 @@ impl Store {
                 ],
             )?;
         }
+        transaction.execute(
+            "UPDATE transcript_projection_jobs
+             SET status = CASE WHEN ?3 = 'truncated' THEN 'truncated' ELSE 'complete' END,
+                 error = NULL, coverage = ?3, updated_ts = ?4
+             WHERE digest = ?1 AND run_id = ?2 AND status = 'pending'",
+            rusqlite::params![
+                attachment.digest,
+                &attachment.run_id.as_bytes()[..],
+                coverage,
+                now_ms()
+            ],
+        )?;
         transaction.commit()?;
         Ok(())
     }
@@ -757,6 +1361,16 @@ impl Store {
         })
         .collect()
     }
+}
+
+fn decode_hex(value: &str) -> Option<Vec<u8>> {
+    if !value.len().is_multiple_of(2) {
+        return None;
+    }
+    (0..value.len())
+        .step_by(2)
+        .map(|index| u8::from_str_radix(&value[index..index + 2], 16).ok())
+        .collect()
 }
 
 fn valid_utf8_prefix(bytes: Vec<u8>) -> String {
@@ -876,6 +1490,49 @@ mod tests {
     }
 
     #[test]
+    fn graph_pages_bound_nodes_and_keep_observed_edges_separate() {
+        let store = Store::open_in_memory().unwrap();
+        let conversation = conversation();
+        let task = task(conversation.conversation_id);
+        store.create_conversation(&conversation).unwrap();
+        store.create_task(&task).unwrap();
+        let parent = RunId::new();
+        let child = RunId::new();
+        for run_id in [parent, child] {
+            store
+                .upsert_run(&crate::RunRow {
+                    run_id,
+                    task_id: task.task_id,
+                    cell_id: farseer_core::CellId::new("zero"),
+                    runner: "pi".into(),
+                    model: "model".into(),
+                    outcome: Some("ok".into()),
+                    usd_micros: 0,
+                    tokens: 1,
+                    operator_touched: false,
+                    started_ts: 2,
+                    finished_ts: Some(3),
+                })
+                .unwrap();
+        }
+        store
+            .record_run_parent(child, parent, "delegation")
+            .unwrap();
+        let page = store
+            .graph_page(&GraphFilter {
+                project_path: Some("D:/Dev/farseer".into()),
+                node_limit: 3,
+                edge_limit: 1,
+                ..Default::default()
+            })
+            .unwrap();
+        assert!(page.nodes.len() <= 3);
+        assert!(page.has_more);
+        assert!(page.derived_edges.is_empty());
+        assert!(page.observed_edges.iter().all(|edge| edge.source.is_some()));
+    }
+
+    #[test]
     fn transitions_validate_and_retain_actor_and_reason() {
         let store = Store::open_in_memory().unwrap();
         let conversation = conversation();
@@ -958,6 +1615,54 @@ mod tests {
         let rows = store.indexed_transcripts_bounded(2, 7).unwrap();
         assert!(rows.len() <= 2);
         assert!(rows.iter().map(|(_, body)| body.len()).sum::<usize>() <= 7);
+    }
+
+    #[test]
+    fn transcript_projection_status_is_recoverable_and_cancelled_jobs_cannot_commit() {
+        let store = Store::open_in_memory().unwrap();
+        let attachment = TranscriptAttachment {
+            digest: "digest".into(),
+            run_id: RunId::new(),
+            custody: TranscriptCustody::CopyPlusIndex,
+            source: "transcript.jsonl".into(),
+            stored_path: Some("stored".into()),
+            created_ts: 1,
+        };
+        store.record_transcript_attachment(&attachment).unwrap();
+        store.queue_transcript_projection(&attachment, 2).unwrap();
+        assert_eq!(
+            store
+                .transcript_projection(&attachment.digest, attachment.run_id)
+                .unwrap()
+                .unwrap()
+                .status,
+            "pending"
+        );
+        store
+            .set_transcript_projection_status(&attachment, "cancelled", None, "restricted", 3)
+            .unwrap();
+        assert!(matches!(
+            store.commit_transcript_projection(&attachment, "safe", "redaction", "projection", &[]),
+            Err(StoreError::StaleTranscriptProjection)
+        ));
+        assert!(store.indexed_transcripts().unwrap().is_empty());
+    }
+
+    #[test]
+    fn indexed_transcript_page_keeps_projection_version_and_cursor_bounded() {
+        let store = Store::open_in_memory().unwrap();
+        store
+            .index_transcript("a", "alpha", "redact-v1", "hash-tf-v1")
+            .unwrap();
+        store
+            .index_transcript("b", "beta", "redact-v1", "hash-tf-v2")
+            .unwrap();
+        let (rows, next) = store.indexed_transcript_page(1, 0, 64).unwrap();
+        assert_eq!(rows[0].projection_version, "hash-tf-v1");
+        assert_eq!(next, Some(1));
+        let (rows, next) = store.indexed_transcript_page(1, 1, 64).unwrap();
+        assert_eq!(rows[0].digest, "b");
+        assert_eq!(next, None);
     }
 
     #[test]

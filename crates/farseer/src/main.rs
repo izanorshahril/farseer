@@ -55,6 +55,16 @@ enum Command {
         #[arg(long, default_value_t = 0)]
         port: u16,
     },
+    /// Stop admitting new work and finish active runs.
+    Drain,
+    /// Cancel active runs and stop the runtime after supervised cleanup.
+    Force {
+        /// Why the operator chose force.
+        #[arg(long)]
+        reason: Option<String>,
+    },
+    /// Show the runtime lifecycle state and active run count.
+    Status,
     /// Parse and check every definition, then exit non-zero if any is broken.
     Validate,
     /// Print where the runtime writes its port and token.
@@ -122,6 +132,11 @@ fn main() -> Result<()> {
                 .build()?
                 .block_on(acp_server::serve_stdio(runtime))
         }
+        Command::Drain => control_runtime("drain", serde_json::json!({})),
+        Command::Force { reason } => {
+            control_runtime("force", serde_json::json!({ "reason": reason }))
+        }
+        Command::Status => control_runtime("", serde_json::Value::Null),
         Command::Serve { port } => {
             let record = cli.record.map(Ok).unwrap_or_else(default_record_path)?;
             let repo_root = cli.repo.map(Ok).unwrap_or_else(|| {
@@ -133,6 +148,43 @@ fn main() -> Result<()> {
                 .block_on(run(cli.cells, cli.runners, record, repo_root, port))
         }
     }
+}
+
+fn control_runtime(action: &str, body: serde_json::Value) -> Result<()> {
+    let runtime = acp_server::Runtime::attach()?;
+    let path = if action.is_empty() {
+        "/v1/runtime".to_string()
+    } else {
+        format!("/v1/runtime/{action}")
+    };
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?
+        .block_on(async move {
+            let client = reqwest::Client::new();
+            let url = format!("{}{path}", runtime.base);
+            let request = if action.is_empty() {
+                client.get(url)
+            } else {
+                client.post(url).json(&body)
+            };
+            let response = request
+                .bearer_auth(runtime.token)
+                .send()
+                .await
+                .context("calling the farseer runtime")?;
+            let status = response.status();
+            let text = response
+                .text()
+                .await
+                .context("reading the runtime response")?;
+            println!("{text}");
+            if status.is_success() {
+                Ok(())
+            } else {
+                Err(anyhow::anyhow!("runtime returned HTTP {status}"))
+            }
+        })
 }
 
 fn validate(cells: &std::path::Path) -> Result<()> {

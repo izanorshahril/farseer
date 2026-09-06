@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import type { Bridge } from "../bridge";
+import { mask, usePrivacy } from "../privacy";
 
 /**
  * `27 quota accounting`'s utilisation surface, as a widget.
@@ -38,6 +39,11 @@ type Window = {
   provider?: string;
   /** The provider's own name for the window - `5 hours`, `Usage (Google)`. */
   label?: string;
+};
+type CostPage = {
+  rows: { runner: string; model: string; runs: number; usd_micros: number; tokens: number; usd_micros_per_run: number }[];
+  next_offset?: number;
+  has_more: boolean;
 };
 
 /**
@@ -209,6 +215,7 @@ const DEFAULT_INTERVAL = 30;
 type Prefs = { intervalSecs: number };
 
 export function QuotaWidget({ bridge }: { bridge: Bridge }) {
+  const privacy = usePrivacy();
   const [windows, setWindows] = useState<Window[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [now, setNow] = useState(Date.now());
@@ -219,18 +226,21 @@ export function QuotaWidget({ bridge }: { bridge: Bridge }) {
   const [sources, setSources] = useState<string[]>([]);
   const [source, setSource] = useState<string | null>(null);
   const [polling, setPolling] = useState(false);
+  const [cost, setCost] = useState<CostPage | null>(null);
 
   const load = useCallback(
     () =>
-      bridge
-        .read<{ windows: Window[]; sources: string[]; source: string | null }>("/quota")
-        .then((body) => {
+      Promise.all([
+        bridge.read<{ windows: Window[]; sources: string[]; source: string | null }>("/quota"),
+        bridge.read<CostPage>("/analytics/cost/page?limit=20"),
+      ]).then(([body, costs]) => {
           setWindows(body.windows);
           // Listed by the runtime, never hard-coded here: a surface that names
           // its own sources offers one the day the runtime drops it, which is
           // `13 harness build kit`'s menu rule.
           setSources(body.sources ?? []);
           setSource(body.source ?? null);
+          setCost(costs);
           setReadAt(Date.now());
           setError(null);
         })
@@ -348,10 +358,10 @@ export function QuotaWidget({ bridge }: { bridge: Bridge }) {
     else
       groups.push({
         key,
-        title: w.provider ? providerName(w.provider) : w.account,
+        title: w.provider ? providerName(w.provider) : mask(w.account, "account", privacy),
         // The login underneath, which is the thing two providers can share and
         // the reason the heading is no longer allowed to be it.
-        under: w.provider ? w.account : w.runners.join(", "),
+        under: mask(w.account, "account", privacy),
         windows: [w],
       });
   }
@@ -384,6 +394,21 @@ export function QuotaWidget({ bridge }: { bridge: Bridge }) {
         </li>
       ))}
       </ul>
+      {cost && cost.rows.length > 0 && (
+        <section className="usage-breakdown" aria-label="bounded usage breakdown">
+          <div className="row"><b>observed spend</b><span className="dim small">successful runs, first 20 groups</span></div>
+          <ul className="plain-list">
+            {cost.rows.map((row) => (
+              <li key={`${row.runner}:${row.model}`} className="row small">
+                <span>{row.runner} · {row.model || "model not reported"}</span>
+                <span className="grow" />
+                <span className="mono">{row.tokens.toLocaleString()} tok · {usd(row.usd_micros)}</span>
+              </li>
+            ))}
+          </ul>
+          {cost.has_more && <span className="dim small">More groups available through the paged analytics endpoint.</span>}
+        </section>
+      )}
     </>
   );
 }

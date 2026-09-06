@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import type { Bridge } from "../bridge";
 import { follow, type RecordEvent } from "../stream";
+import { mask, usePrivacy } from "../privacy";
 import { onSelection, selectRun, selectedRun } from "../selection";
 import { confirmVerb } from "../confirm";
 import { meaningOf } from "../meaning";
@@ -137,6 +138,7 @@ function Fact({ label, value }: { label: string; value: string | undefined }) {
 }
 
 export function RunWidget({ bridge }: { bridge: Bridge }) {
+  const privacy = usePrivacy();
   const [runId, setRunId] = useState<string | null>(selectedRun());
   const [run, setRun] = useState<Run | null>(null);
   const [events, setEvents] = useState<RecordEvent[]>([]);
@@ -220,7 +222,7 @@ export function RunWidget({ bridge }: { bridge: Bridge }) {
         contract, everything it did, and the verbs that need both on screen.
       </p>
     );
-  if (error) return <p className="empty bad">{error}</p>;
+  if (error && !run) return <p className="empty bad">{error}</p>;
   if (!run) return <p className="empty">reading the run...</p>;
 
   const queued = events.find((event) => event.kind === "run_queued");
@@ -230,10 +232,11 @@ export function RunWidget({ bridge }: { bridge: Bridge }) {
 
   return (
     <>
+      {error && <p className="empty bad" role="alert">{error} - showing the last successful run projection.</p>}
       <div className="row" style={{ marginBottom: 8 }}>
         <b>{run.title ?? run.run_id.slice(0, 8)}</b>
         <span className="grow" />
-        <span className="faint mono small">{run.run_id.slice(0, 8)}</span>
+        <span className="faint mono small">{mask(run.run_id.slice(0, 8), "session", privacy)}</span>
         <button className="chip" onClick={() => selectRun(null)} title="close this run">
           close
         </button>
@@ -265,7 +268,7 @@ export function RunWidget({ bridge }: { bridge: Bridge }) {
       </h4>
       {queued ? (
         <>
-          <p className="asked">{contract.goal ?? "no goal recorded"}</p>
+          <p className="asked">{mask(contract.goal ?? "no goal recorded", "diagnostic", privacy)}</p>
           <div className="meta">
             <Fact label="tool level" value={contract.tool_level} />
             <Fact label="ceiling" value={contract.autonomy_ceiling} />
@@ -289,7 +292,10 @@ export function RunWidget({ bridge }: { bridge: Bridge }) {
                   : undefined
               }
             />
-            <Fact label="done when" value={contract.definition_of_done || undefined} />
+            <Fact
+              label="done when"
+              value={contract.definition_of_done ? mask(contract.definition_of_done, "diagnostic", privacy) : undefined}
+            />
           </div>
         </>
       ) : (
@@ -307,7 +313,7 @@ export function RunWidget({ bridge }: { bridge: Bridge }) {
           <li key={event.event_id}>
             <span className="mono faint">{time(event.ts)}</span>
             <span className={`kind ${TONE[event.kind] ?? ""}`}>{event.kind}</span>
-            <span className="summary">{summarise(event)}</span>
+            <span className="summary">{mask(summarise(event), "diagnostic", privacy)}</span>
             {took.has(event.event_id) && (
               <span className="mono faint">{(took.get(event.event_id)! / 1000).toFixed(1)}s</span>
             )}

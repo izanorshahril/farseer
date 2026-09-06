@@ -14,7 +14,7 @@ Keep runtime implementation detail in [the optional reference](farseer/runtime-r
 Keep .git, .github, .gitignore, .claude/launch.json, and CLAUDE.md: they support versioning, CI, generated-file exclusions, local UI launch, and instruction discovery.
 Keep source, lockfiles, runner configuration, and current PRODUCT.md, DESIGN.md, and HARNESS.md.
 Generated target, node_modules, and UI build output are ignored; retain them to avoid unnecessary rebuilds or downloads.
-feedback.txt and the operator's reference list remain user source material, not an implementation backlog.
+feedback.txt remains private user source material, not an implementation backlog.
 
 ## Git-only history
 
@@ -29,5 +29,5 @@ For example, read the old architecture draft:
 git show df90320b0e7215d2ec82df5d285e5d731c8537ed:ARCHITECTURE.md
 ```
 
-Keep future temporary exports and captures out of the tracked workspace unless a ticket needs them as evidence.
+Keep future temporary exports, generated spike targets, PID captures, and tool metadata out of the workspace.
 Remove superseded snapshots after their useful findings are recorded in tickets; use Git for recovery instead of maintaining another archive tree.

@@ -46,6 +46,22 @@ describe("canvas layout", () => {
     });
   });
 
+  test("keeps presentation state in the opaque canvas document", () => {
+    expect(normalizeLayout({
+      v: 8,
+      mounted: ["conversation"],
+      span: { conversation: { w: 1, h: 1 } },
+      unit: DEFAULT_WIDGET_UNIT,
+      sidebarCollapsed: true,
+      focused: "conversation",
+      focusPane: "navigation",
+    }, fallback)).toMatchObject({
+      sidebarCollapsed: true,
+      focused: "conversation",
+      focusPane: "navigation",
+    });
+  });
+
   test("resets stale or structurally invalid blobs", () => {
     expect(normalizeLayout({ v: 7, mounted: [], span: {} }, fallback)).toBe(fallback);
     expect(normalizeLayout({ v: 8, mounted: [7], span: {} }, fallback)).toBe(fallback);

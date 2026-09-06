@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import type { Bridge } from "../bridge";
 import { follow, type RecordEvent } from "../stream";
 import { confirmVerb } from "../confirm";
+import { mask, usePrivacy } from "../privacy";
 
 /**
  * Every runner process farseer has alive right now.
@@ -80,6 +81,7 @@ const time = (ts: number) => new Date(ts).toLocaleTimeString(undefined, { hour12
  * a payload with no text shows its shape instead of being dropped.
  */
 function Thread({ bridge, run, onBack }: { bridge: Bridge; run: Run; onBack: () => void }) {
+  const privacy = usePrivacy();
   const [events, setEvents] = useState<RecordEvent[] | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -115,7 +117,7 @@ function Thread({ bridge, run, onBack }: { bridge: Bridge; run: Run; onBack: () 
         <span className="dim small">{run.model || "model not reported"}</span>
         {run.role && <span className="badge">{run.role}</span>}
         <span className="grow" />
-        <span className="mono faint small">{run.run_id.slice(0, 8)}</span>
+        <span className="mono faint small">{mask(run.run_id.slice(0, 8), "session", privacy)}</span>
       </div>
       {error && <p className="empty bad">{error}</p>}
       {!events && !error && <p className="empty">reading the thread...</p>}
@@ -154,6 +156,7 @@ function Thread({ bridge, run, onBack }: { bridge: Bridge; run: Run; onBack: () 
 }
 
 export function RunnersWidget({ bridge }: { bridge: Bridge }) {
+  const privacy = usePrivacy();
   const [runs, setRuns] = useState<Run[] | null>(null);
   const [facts, setFacts] = useState<Record<string, RunnerFacts>>({});
   const [note, setNote] = useState<string | null>(null);
@@ -254,7 +257,7 @@ export function RunnersWidget({ bridge }: { bridge: Bridge }) {
                   asked for one thing, and everything under it is how. */}
               <b className="task-title">{task.runs[0]?.title ?? "untitled"}</b>
               <span className="grow" />
-              <span className="mono faint">{task.task_id.slice(0, 8)}</span>
+              <span className="mono faint">{mask(task.task_id.slice(0, 8), "session", privacy)}</span>
               <span>
                 {task.runs.length} process{task.runs.length === 1 ? "" : "es"}
               </span>

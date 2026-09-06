@@ -6,7 +6,7 @@
 
 **Blocked by:** [Bounded transcript projection](05-bounded-transcript-index.md), [Focused workspace](10-focused-workspace.md)
 
-**Status:** not-started.
+**Status:** in-progress.
 
 **Execution:** package approved; verify named blockers before implementation.
 
@@ -23,6 +23,10 @@ Use event replay as the reliable fallback when harness logs are absent.
 - [ ] Missing, rotated, and unavailable logs are labelled distinctly and do not break the session explorer.
 - [ ] Search returns paged scrubbed excerpts with source digest and projection version.
 - [ ] A session explorer demo works after runtime restart and with two sessions from different harness protocols.
+
+**Evidence:** The API exposes a bounded `/v1/work/sessions` projection, the Work widget has a paged Sessions face, and task detail includes session and transcript-projection references.
+The additive `/v1/work/search/page` route now returns bounded scrubbed excerpts, source digests, projection versions, and cursors.
+The two-protocol restart demo and a dedicated search face remain open.
 
 **Exclusions:** No automatic transcript copying, private harness-directory guessing, external embeddings service, or raw log viewer without explicit custody.
 

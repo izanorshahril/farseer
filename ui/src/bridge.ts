@@ -24,6 +24,10 @@ export type Anchor = {
   widget: string;
   /** What it was showing, if anything - a cell, a run, an account. */
   subject?: string;
+  project?: string | null;
+  conversation?: string | null;
+  task?: string | null;
+  managerRunner?: string | null;
 };
 
 export type Bridge = {
@@ -77,6 +81,7 @@ export function createBridge(): Bridge {
       // `runners.toml`; the runtime refuses it when they have not.
       const allowed = [
         /^\/runs\/[0-9a-f-]+\/(steer|cancel|rerun|rescope|observe|take-over|release|intervene|transcripts)$/,
+        /^\/runs\/[0-9a-f-]+\/transcripts\/[0-9a-f]+\/(retry|cancel)$/,
         /^\/tasks\/[0-9a-f-]+\/transition$/,
         /^\/conversations$/,
         /^\/quota\/refresh$/,
@@ -143,7 +148,16 @@ export function createBridge(): Bridge {
             goal: `[from the ${where} widget]\n${text}`,
             project: subject.project ?? currentProject(),
             conversation_id: subject.conversation,
-            manager_runner: subject.managerRunner,
+            task_id: anchor.task ?? subject.task,
+            manager_runner: anchor.managerRunner ?? subject.managerRunner,
+            anchor: {
+              widget: anchor.widget,
+              subject: anchor.subject,
+              project: anchor.project ?? subject.project ?? currentProject(),
+              conversation: anchor.conversation ?? subject.conversation,
+              task: anchor.task ?? subject.task,
+              manager_runner: anchor.managerRunner ?? subject.managerRunner,
+            },
           }),
         },
       );

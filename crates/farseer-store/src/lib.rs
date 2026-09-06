@@ -40,13 +40,16 @@ const BACKUP_FORMAT_VERSION: u32 = 1;
 const BACKUP_DATABASE: &str = "record.sqlite3";
 const BACKUP_MANIFEST: &str = "manifest.json";
 
-pub use analytics::{CostRow, InterventionRow, LessonRow, ReworkRow};
+pub use analytics::{CostPage, CostRow, InterventionRow, LessonRow, ReworkRow};
 pub use farseer_core::MemoryId;
 pub use lifecycle::{Lifecycle, Purged};
 pub use memory::{MemoryCaps, MemoryClaim, MemoryScope, NewMemory, Promotion};
 pub use quota::WindowRow;
 pub use ui_state::{UI_STATE_CAP_BYTES, UI_STATE_KEY_CAP_BYTES};
-pub use work::{RunParent, SimilarityEdge, TaskCursor, TaskFilter, TranscriptAttachment};
+pub use work::{
+    GraphEdge, GraphFilter, GraphNode, GraphPage, IndexedTranscript, RunParent, SessionRow,
+    SimilarityEdge, TaskCursor, TaskFilter, TranscriptAttachment, TranscriptProjection,
+};
 
 #[derive(Debug, thiserror::Error)]
 pub enum StoreError {

@@ -209,6 +209,15 @@ impl Store {
             rusqlite::params![cell_id.as_str(), from, to],
         )?;
         tx.execute(
+            "DELETE FROM transcript_projection_jobs
+             WHERE NOT EXISTS (
+                 SELECT 1 FROM transcript_attachments
+                 WHERE transcript_attachments.digest = transcript_projection_jobs.digest
+                   AND transcript_attachments.run_id = transcript_projection_jobs.run_id
+             )",
+            [],
+        )?;
+        tx.execute(
             "DELETE FROM transcript_index
              WHERE NOT EXISTS (
                  SELECT 1 FROM transcript_attachments

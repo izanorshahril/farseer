@@ -217,6 +217,11 @@ fn move_to(state: &Arc<AppState>, cell_id: &str, to: Lifecycle) -> ApiResult<Jso
 /// delegation verbs - because `17`'s pause is only real if it is checked where
 /// runs begin rather than where the operator happens to be looking.
 pub(crate) fn ensure_accepts_work(state: &AppState, cell_id: &CellId) -> ApiResult<()> {
+    if state.runtime_status().state != "running" {
+        return Err(ApiError::Policy(
+            "runtime is draining and accepts no new work".into(),
+        ));
+    }
     let state_of = state.store().cell_state(cell_id)?;
     if state_of.accepts_work() {
         return Ok(());

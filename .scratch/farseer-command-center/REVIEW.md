@@ -1,9 +1,8 @@
-# Review once: Farseer's next build
+# Approval record: Farseer's next build
 
-> Current status, 2026-09-06: package approved and implementation in progress.
-> Original review-gate language below is historical; use [the ticket index](tickets.md) for remaining work.
+> Approved 2026-09-06; implementation is in progress.
+> This page records the selected nominees and tradeoffs; use [the ticket index](tickets.md) for current work.
 
-**Read this page, then reply `Approve plan` or name the decisions you want changed.**
 Estimated reading time: 4 minutes.
 Branch: `codex/command-center-plan`.
 State: planning complete; implementation has not started.
@@ -66,5 +65,4 @@ The original decision records and your inherited working-tree changes are preser
 Corrections to old decisions are appended by the relevant implementation ticket after approval.
 Documentation checks validate local links, ticket dependencies, and acceptance coverage; no product code or new live harness probes were needed in this planning turn.
 
-**Done:** branch, decisions, spec, and 21 draft tickets saved.
-**Next:** reply `Approve plan` to adopt this package and proceed with Verified startup, or name one decision to change.
+**Recorded:** branch, decisions, specification, and 21 tickets were accepted as the implementation package.

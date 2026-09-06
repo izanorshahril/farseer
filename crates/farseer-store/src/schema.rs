@@ -150,6 +150,21 @@ CREATE TABLE IF NOT EXISTS transcript_index (
     projection_version TEXT NOT NULL
 );
 
+-- Durable state for the optional single-worker transcript projection.
+-- The attachment remains the source of truth for custody; this row is
+-- recoverable operator state and may be rebuilt or cancelled.
+CREATE TABLE IF NOT EXISTS transcript_projection_jobs (
+    digest        TEXT NOT NULL,
+    run_id        BLOB NOT NULL,
+    status        TEXT NOT NULL,
+    error         TEXT,
+    coverage      TEXT NOT NULL,
+    updated_ts    INTEGER NOT NULL,
+    PRIMARY KEY (digest, run_id)
+);
+CREATE INDEX IF NOT EXISTS transcript_projection_jobs_status
+    ON transcript_projection_jobs(status, updated_ts);
+
 CREATE TABLE IF NOT EXISTS similarity_edges (
     left_digest        TEXT NOT NULL,
     right_digest       TEXT NOT NULL,

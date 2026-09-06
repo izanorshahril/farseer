@@ -6,7 +6,7 @@
 
 **Blocked by:** [Paged work board](03-paged-work-board.md)
 
-**Status:** not-started.
+**Status:** in-progress.
 
 **Execution:** package approved; verify named blockers before implementation.
 
@@ -24,6 +24,9 @@ Process CPU and memory sampling remains a later bounded extension.
 - [ ] Task and run views show tokens, reported cost, estimated cost, duration, runner, model, outcome, and denominator scope.
 - [ ] A parent aggregate and its child observations are not counted twice; a task with retries includes coordination and failed-attempt cost while naming its acceptance/outcome criterion.
 - [ ] A bounded read returns stable page or cursor metadata and never loads all historical usage by default.
+
+**Evidence:** The API exposes bounded attributed cost pages and the Capacity widget renders observed spend groups.
+Provider windows, context denominators, full task/run attribution, and aggregate de-duplication remain open.
 
 **Exclusions:** No GPU claim, one-second process sampler, fleet-wide invented billing, or model share presented as provider quota.
 

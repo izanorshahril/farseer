@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import type { Bridge } from "../bridge";
 import { follow, onStreamState, type RecordEvent, type StreamState } from "../stream";
+import { mask, usePrivacy } from "../privacy";
 
 /**
  * What the fleet is doing, live.
@@ -90,6 +91,7 @@ function summarise(event: RecordEvent): string {
 }
 
 export function ActivityWidget({ bridge: _bridge }: { bridge: Bridge }) {
+  const privacy = usePrivacy();
   const [events, setEvents] = useState<RecordEvent[]>([]);
   const [live, setLive] = useState(false);
   const [stream, setStream] = useState<StreamState>("connecting");
@@ -125,8 +127,8 @@ export function ActivityWidget({ bridge: _bridge }: { bridge: Bridge }) {
               <span className="mono faint">{time(event.ts)}</span>
               <span className={`kind ${TONE[event.kind] ?? ""}`}>{event.kind}</span>
               <span className="dim">{event.cell_id}</span>
-              <span className="mono faint">{event.run_id.slice(0, 8)}</span>
-              <span className="summary">{summarise(event)}</span>
+              <span className="mono faint">{mask(event.run_id.slice(0, 8), "session", privacy)}</span>
+              <span className="summary">{mask(summarise(event), "diagnostic", privacy)}</span>
               {took.has(event.event_id) && <Capsule ms={took.get(event.event_id)!} />}
             </li>
           ))}

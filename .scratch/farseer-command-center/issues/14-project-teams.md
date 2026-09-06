@@ -6,7 +6,7 @@
 
 **Blocked by:** [Explicit composer context](07-explicit-composer-context.md), [Explainable routing](13-explainable-routing.md)
 
-**Status:** not-started.
+**Status:** in-progress.
 
 **Execution:** package approved; verify named blockers before implementation.
 
@@ -24,6 +24,9 @@ The profile supplies a validated default eligible coordinating cell; actual top-
 - [ ] An invalid, missing, or unauthorized cell reference blocks submission with a repair path and no partial run.
 - [ ] Switching a project profile affects future tasks only and records old profile, new profile, actor, and reason.
 - [ ] Global and project boards show the same task under the selected project team without duplicating it.
+
+**Evidence:** Version-one `.farseer/profile.toml` files are validated against authorized project paths and existing cells, exposed through project views and `/v1/projects/profile`, and applied to future top-manager submissions.
+Specialist delegation provenance, profile transition history, and a multi-cell board demo remain open.
 
 **Exclusions:** No project-specific copy of cell grants, arbitrary runner discovery, direct non-zero project ingress, or promise of zero coordination cost.
 

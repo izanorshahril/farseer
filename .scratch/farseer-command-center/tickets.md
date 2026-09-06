@@ -89,14 +89,16 @@ No paid or external action is inferred from a deterministic test requirement.
 New dependencies must be checked, exact-pinned, and optional where this plan says they are optional.
 
 Done: 21 approved slices linked to all 15 review packets; implementation remains partial.
-Next: finish [Bounded transcript projection](issues/05-bounded-transcript-index.md), including its background queue and visible analysis states.
+The current implementation has completed tickets 01, 02, 03, 04, 05, 16, and 19.
+Tickets 06, 07, 08, 09, 10, 11, 12, 13, and 14 have bounded work in progress and are not complete until their acceptance evidence is recorded.
+Tickets 15, 17, 18, 20, and 21 have no implementation in this branch.
+Next: finish the in-progress operator, session, routing, and team slices before starting terminal, maintenance, promotion, manifest, or resource work.
 
 
 ## Status clarification, 2026-09-06
 
 Approval is complete; earlier proposal and execution-gate wording is historical.
-Four tickets are recorded implemented: Verified startup, Paged work board, Recoverable schema and backup, and Honest tool authority.
-Bounded transcript projection is partial: bounded reads and projection exist, but the background queue and pending/complete/failed UI contract remain open.
-Widget recovery and Explicit composer context are in progress.
-The other fourteen tickets are not started; dependency completion still governs eligibility.
-These are the prior implementation audit results, not a new code verification performed during document cleanup.
+The implementation snapshot now records tickets 01, 02, 03, 04, 05, 16, and 19 as implemented.
+Widget recovery and Explicit composer context remain in progress, with focused workspace, privacy, session, usage, routing, and project-team increments also present but incomplete.
+Tickets 15, 17, 18, 20, and 21 remain not started; dependency completion still governs eligibility.
+This is the current branch status, not a claim that every acceptance item is complete.

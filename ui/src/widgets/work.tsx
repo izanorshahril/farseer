@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { Bridge } from "../bridge";
 import { onSubjectSelection, selectSubject, selectedSubject } from "../selection";
 import { follow } from "../stream";
+import { mask, usePrivacy } from "../privacy";
 
 type TaskState = "inbox" | "planned" | "in_progress" | "blocked" | "review" | "done" | "cancelled";
 type Task = {
@@ -31,20 +32,24 @@ type Conversation = {
 };
 type Run = { run_id: string; runner: string; outcome?: string };
 type Session = { run_id: string; identifier_kind: string; identifier: string; log_pointer?: string };
-type Attachment = { digest: string; run_id: string; custody: string; source: string };
+type SessionRow = { session: Session & { observed_ts: number }; runner: string; model: string; project_path?: string; log_available: boolean };
+type SessionPage = { rows: SessionRow[]; next_offset?: number };
+type Projection = { status: "pending" | "complete" | "truncated" | "failed" | "cancelled"; error?: string; coverage: string; updated_ts: number };
+type Attachment = { digest: string; run_id: string; custody: string; source: string; projection?: Projection };
 type TaskDetail = { task: Task; allowed_transitions: TaskState[]; runs: Run[]; sessions: Session[]; attachments: Attachment[]; transitions: { from: TaskState; to: TaskState; actor: string; reason: string; ts: number }[] };
+type GraphNode = { id: string; kind: string; label: string; project_path?: string; runner?: string; target?: string; parent?: string };
+type GraphEdge = { from: string; to: string; kind: string; source?: string; projection?: string; score?: number; evidence: string[] };
 type Graph = {
-  projects: string[];
-  conversations: Conversation[];
-  tasks: Task[];
-  runs: { run_id: string; task_id: string; cell_id: string; runner: string }[];
-  sessions: Session[];
-  attachments: Attachment[];
-  parents: { run_id: string; parent_run_id: string; kind: string }[];
-  similarities: { left_digest: string; right_digest: string; score: number; projection_version: string }[];
+  nodes: GraphNode[];
+  observed_edges: GraphEdge[];
+  derived_edges: GraphEdge[];
+  next_cursor?: string;
+  has_more: boolean;
+  freshness: "eventual";
+  generated_ts: number;
 };
 type Cell = { manager: { runners: string[] } };
-type Face = "board" | "conversations" | "graph" | "completed";
+type Face = "board" | "conversations" | "sessions" | "graph" | "completed";
 
 const STATES: TaskState[] = ["inbox", "planned", "in_progress", "blocked", "review", "done", "cancelled"];
 
@@ -52,6 +57,7 @@ const short = (value: string) => value.slice(0, 8);
 const stateLabel = (state: TaskState) => state.replace("_", " ");
 
 export function WorkWidget({ bridge }: { bridge: Bridge }) {
+  const privacy = usePrivacy();
   const [face, setFace] = useState<Face>("board");
   const [expanded, setExpanded] = useState(false);
   const [tasks, setTasks] = useState<Task[]>([]);
@@ -60,7 +66,13 @@ export function WorkWidget({ bridge }: { bridge: Bridge }) {
   const loadVersion = useRef(0);
   const [projectScope, setProjectScope] = useState("");
   const [conversations, setConversations] = useState<Conversation[]>([]);
+  const [sessions, setSessions] = useState<SessionRow[]>([]);
+  const [sessionOffset, setSessionOffset] = useState<number | undefined>();
+  const [sessionsLoading, setSessionsLoading] = useState(false);
   const [graph, setGraph] = useState<Graph | null>(null);
+  const [graphProject, setGraphProject] = useState("");
+  const [graphRunner, setGraphRunner] = useState("");
+  const [graphLoading, setGraphLoading] = useState(false);
   const [subject, setSubject] = useState(selectedSubject());
   const [detail, setDetail] = useState<TaskDetail | null>(null);
   const [runners, setRunners] = useState<string[]>([]);
@@ -120,10 +132,51 @@ export function WorkWidget({ bridge }: { bridge: Bridge }) {
     };
   }, [load]);
 
+  const loadGraph = useCallback(async (cursor?: string) => {
+    setGraphLoading(true);
+    try {
+      const params = new URLSearchParams({ limit: "100", edge_limit: "300" });
+      if (graphProject) params.set("project", graphProject);
+      if (graphRunner) params.set("runner", graphRunner);
+      if (cursor) params.set("cursor", cursor);
+      const next = await bridge.read<Graph>(`/work/graph?${params}`);
+      setGraph((current) => cursor && current ? { ...next, nodes: [...current.nodes, ...next.nodes], observed_edges: [...current.observed_edges, ...next.observed_edges], derived_edges: [...current.derived_edges, ...next.derived_edges] } : next);
+      setError(null);
+    } catch (failure) {
+      setError((failure as Error).message);
+    } finally {
+      setGraphLoading(false);
+    }
+  }, [bridge, graphProject, graphRunner]);
+
+  const loadSessions = useCallback(async (offset = 0) => {
+    setSessionsLoading(true);
+    try {
+      const params = new URLSearchParams({ limit: "100", offset: String(offset) });
+      if (projectScope) params.set("project", projectScope);
+      const page = await bridge.read<SessionPage>(`/work/sessions?${params}`);
+      setSessions((current) => offset ? [...current, ...page.rows] : page.rows);
+      setSessionOffset(page.next_offset);
+      setError(null);
+    } catch (failure) {
+      setError((failure as Error).message);
+    } finally {
+      setSessionsLoading(false);
+    }
+  }, [bridge, projectScope]);
+
   useEffect(() => {
-    if (face !== "graph" || graph) return;
-    bridge.read<Graph>("/work/graph").then(setGraph).catch((failure: Error) => setError(failure.message));
-  }, [bridge, face, graph]);
+    if (face !== "graph") return;
+    setGraph(null);
+    loadGraph().catch(() => undefined);
+  }, [face, graphProject, graphRunner, loadGraph]);
+
+  useEffect(() => {
+    if (face !== "sessions") return;
+    setSessions([]);
+    setSessionOffset(undefined);
+    void loadSessions();
+  }, [face, projectScope, loadSessions]);
 
   useEffect(() => onSubjectSelection(setSubject), []);
   useEffect(() => {
@@ -175,6 +228,12 @@ export function WorkWidget({ bridge }: { bridge: Bridge }) {
     await load();
   };
 
+  const updateTranscript = async (attachment: Attachment, action: "retry" | "cancel") => {
+    await bridge.post(`/runs/${attachment.run_id}/transcripts/${attachment.digest}/${action}`, {});
+    const taskId = detail?.task.task_id;
+    if (taskId && selectedSubject().task === taskId) setDetail(await bridge.read<TaskDetail>(`/tasks/${taskId}`));
+  };
+
   const createConversation = async () => {
     if (!newTitle.trim()) return;
     const conversation = (await bridge.post("/conversations", {
@@ -191,7 +250,7 @@ export function WorkWidget({ bridge }: { bridge: Bridge }) {
     <div className={`work-panel${expanded ? " expanded" : ""}`}>
       <div className="work-toolbar">
         <div role="tablist" aria-label="Work faces">
-          {(["board", "conversations", "graph", "completed"] as Face[]).map((name) => (
+          {(["board", "conversations", "sessions", "graph", "completed"] as Face[]).map((name) => (
             <button key={name} className={face === name ? "chip on" : "chip"} role="tab" aria-selected={face === name} onClick={() => setFace(name)}>
               {name}
             </button>
@@ -207,9 +266,22 @@ export function WorkWidget({ bridge }: { bridge: Bridge }) {
             {projectPaths.map((project) => <option key={project} value={project}>{project}</option>)}
           </select>
         )}
+        {face === "graph" && (
+          <>
+            <select aria-label="graph project" value={graphProject} onChange={(event) => setGraphProject(event.currentTarget.value)}>
+              <option value="">all projects</option>
+              {projectPaths.map((project) => <option key={project} value={project}>{mask(project, "path", privacy)}</option>)}
+            </select>
+            <select aria-label="graph runner" value={graphRunner} onChange={(event) => setGraphRunner(event.currentTarget.value)}>
+              <option value="">all runners</option>
+              {runners.map((runner) => <option key={runner}>{runner}</option>)}
+            </select>
+          </>
+        )}
         <button className="chip" aria-pressed={expanded} onClick={() => setExpanded((current) => !current)}>{expanded ? "restore" : "expand"}</button>
       </div>
       {error && <p className="empty bad" role="alert">{error}</p>}
+      {face === "graph" && error && <button className="chip" onClick={() => loadGraph().catch(() => undefined)} disabled={graphLoading}>retry graph</button>}
 
       {face === "board" && (
         <>
@@ -219,7 +291,7 @@ export function WorkWidget({ bridge }: { bridge: Bridge }) {
                 <h4>{stateLabel(state)} <span>{grouped[state].length}</span></h4>
                 {grouped[state].map((task) => (
                   <button key={task.task_id} className={subject.task === task.task_id ? "work-card selected" : "work-card"} onClick={() => chooseTask(task)}>
-                    <b>{task.title}</b><small>{task.project_path ?? "fleet"}</small>
+                    <b>{task.title}</b><small>{task.project_path ? mask(task.project_path, "path", privacy) : "fleet"}</small>
                   </button>
                 ))}
               </section>
@@ -239,7 +311,7 @@ export function WorkWidget({ bridge }: { bridge: Bridge }) {
             {conversations.map((conversation) => (
               <li key={conversation.conversation_id}>
                 <button className={subject.conversation === conversation.conversation_id ? "row-button selected" : "row-button"} onClick={() => selectSubject({ conversation: conversation.conversation_id, task: null, run: null, project: conversation.project_path ?? null, managerRunner: conversation.manager_runner ?? null })}>
-                  <b>{conversation.title}</b><small>{conversation.project_path ?? "fleet"}</small><span className="mono">{short(conversation.conversation_id)}</span>
+                  <b>{conversation.title}</b><small>{conversation.project_path ? mask(conversation.project_path, "path", privacy) : "fleet"}</small><span className="mono">{mask(short(conversation.conversation_id), "session", privacy)}</span>
                 </button>
               </li>
             ))}
@@ -254,6 +326,24 @@ export function WorkWidget({ bridge }: { bridge: Bridge }) {
         </div>
       )}
 
+      {face === "sessions" && (
+        <div className="work-sessions">
+          {sessions.length === 0 && !sessionsLoading && <p className="empty">No harness sessions observed.</p>}
+          <ul className="plain-list">
+            {sessions.map((row) => (
+              <li key={`${row.session.identifier_kind}:${row.session.identifier}:${row.session.run_id}`}>
+                <button className="row-button" onClick={() => selectSubject({ run: row.session.run_id, project: row.project_path ?? null })}>
+                  <b>{mask(row.session.identifier, "session", privacy)}</b>
+                  <small>{row.runner} · {row.model || "model unavailable"} · {row.log_available ? "log available" : "log unavailable"}</small>
+                  <span className="mono">{row.session.identifier_kind} · {new Date(row.session.observed_ts).toLocaleString()}</span>
+                </button>
+              </li>
+            ))}
+          </ul>
+          {sessionOffset !== undefined && <button className="chip" onClick={() => void loadSessions(sessionOffset)} disabled={sessionsLoading}>{sessionsLoading ? "loading..." : "load more sessions"}</button>}
+        </div>
+      )}
+
       {face === "completed" && (
         <div className="completed-work">
           {[...grouped.done, ...grouped.cancelled].map((task) => (
@@ -263,7 +353,14 @@ export function WorkWidget({ bridge }: { bridge: Bridge }) {
         </div>
       )}
 
-      {face === "graph" && graph && <WorkGraph graph={graph} />}
+      {face === "graph" && graphLoading && !graph && <p className="empty">Loading bounded graph...</p>}
+      {face === "graph" && graph && <WorkGraph graph={graph} privacy={privacy} onSelect={(node) => {
+        if (!node.target) return;
+        if (node.kind === "conversation") selectSubject({ conversation: node.target, task: null, run: null });
+        if (node.kind === "task") selectSubject({ task: node.target });
+        if (node.kind === "run" || node.kind === "session" || node.kind === "attachment") selectSubject({ run: node.target });
+      }} />}
+      {face === "graph" && graph?.next_cursor && <button className="chip" onClick={() => loadGraph(graph.next_cursor)} disabled={graphLoading}>{graphLoading ? "loading..." : "load more graph"}</button>}
 
       {detail && (
         <aside className="task-detail" aria-label="Selected task detail">
@@ -271,71 +368,42 @@ export function WorkWidget({ bridge }: { bridge: Bridge }) {
           <p>{detail.task.goal}</p>
           <div className="task-actions">{detail.allowed_transitions.map((state) => <button key={state} className="chip" onClick={() => transition(state).catch((failure: Error) => setError(failure.message))}>{stateLabel(state)}</button>)}</div>
           <div className="task-runs">{detail.runs.map((run) => <button key={run.run_id} className="chip" onClick={() => selectSubject({ run: run.run_id })}>{short(run.run_id)} · {run.runner} · {run.outcome ?? "running"}</button>)}</div>
-          {detail.sessions.map((session) => <p key={`${session.identifier_kind}:${session.identifier}`} className="mono small">{session.identifier_kind} {session.identifier}{session.log_pointer ? ` · ${session.log_pointer}` : ""}</p>)}
+          {detail.sessions.map((session) => <p key={`${session.identifier_kind}:${session.identifier}`} className="mono small">{session.identifier_kind} {mask(session.identifier, "session", privacy)}{session.log_pointer ? ` · ${mask(session.log_pointer, "path", privacy)}` : ""}</p>)}
           <form className="transcript-form" onSubmit={(event) => { event.preventDefault(); addTranscript().catch((failure: Error) => setError(failure.message)); }}>
             <select aria-label="transcript custody" value={transcriptMode} onChange={(event) => setTranscriptMode(event.currentTarget.value)}><option>reference</option><option>copy</option><option>copy-plus-index</option></select>
             <input aria-label="transcript file path" value={transcriptPath} onChange={(event) => setTranscriptPath(event.currentTarget.value)} placeholder="harness transcript path" />
             <button className="chip" disabled={!detail.runs.length || !transcriptPath.trim()}>attach</button>
           </form>
-          {detail.attachments.map((attachment) => <p key={attachment.digest} className="mono small">{attachment.custody} · {short(attachment.digest)} · {attachment.source}</p>)}
+          {detail.attachments.map((attachment) => <p key={attachment.digest} className="mono small">
+            {attachment.custody} · {mask(short(attachment.digest), "session", privacy)} · {mask(attachment.source, "path", privacy)}
+            {attachment.projection && <> · {attachment.projection.status}{attachment.projection.error ? `: ${attachment.projection.error}` : ""}
+              {attachment.projection.status === "pending" && <button className="chip" onClick={() => updateTranscript(attachment, "cancel").catch((failure: Error) => setError(failure.message))}>cancel analysis</button>}
+              {(attachment.projection.status === "failed" || attachment.projection.status === "cancelled") && <button className="chip" onClick={() => updateTranscript(attachment, "retry").catch((failure: Error) => setError(failure.message))}>retry analysis</button>}
+            </>}
+          </p>)}
         </aside>
       )}
     </div>
   );
 }
 
-function WorkGraph({ graph }: { graph: Graph }) {
-  const transcripts = [...new Map(graph.attachments.map((attachment) => [attachment.digest, attachment])).values()];
-  const nodes = [
-    ...graph.projects.map((project) => ({
-      id: `project:${project}`,
-      label: project.split(/[\\/]/).at(-1) ?? project,
-      kind: "project",
-    })),
-    ...graph.conversations.map((conversation) => ({ id: conversation.conversation_id, label: conversation.title, kind: "conversation" })),
-    ...graph.tasks.map((task) => ({ id: task.task_id, label: task.title, kind: "task" })),
-    ...graph.runs.map((run) => ({ id: run.run_id, label: run.runner, kind: "run" })),
-    ...graph.sessions.map((session) => ({ id: `${session.identifier_kind}:${session.identifier}`, label: `${session.identifier_kind} ${short(session.identifier)}`, kind: "session" })),
-    ...transcripts.map((attachment) => ({ id: `transcript:${attachment.digest}`, label: `transcript ${short(attachment.digest)}`, kind: "transcript" })),
-  ];
+function WorkGraph({ graph, privacy, onSelect }: { graph: Graph; privacy: boolean; onSelect: (node: GraphNode) => void }) {
+  const [zoom, setZoom] = useState(1);
+  const nodes = graph.nodes;
   const rows = Math.max(2, Math.ceil(nodes.length / 6));
   const height = 100 + rows * 90;
   const at = new Map(nodes.map((node, index) => [node.id, { x: 90 + (index % 6) * 150, y: 50 + Math.floor(index / 6) * 90 }]));
-  const observed = [
-    ...graph.conversations
-      .filter((conversation) => conversation.project_path)
-      .map((conversation) => ({
-        from: `project:${conversation.project_path}`,
-        to: conversation.conversation_id,
-        label: "conversation",
-      })),
-    ...graph.tasks
-      .filter((task) => task.project_path)
-      .map((task) => ({
-        from: `project:${task.project_path}`,
-        to: task.task_id,
-        label: "project snapshot",
-      })),
-    ...graph.tasks.map((task) => ({ from: task.conversation_id, to: task.task_id, label: "task" })),
-    ...graph.runs.map((run) => ({ from: run.task_id, to: run.run_id, label: "run" })),
-    ...graph.sessions.map((session) => ({ from: session.run_id, to: `${session.identifier_kind}:${session.identifier}`, label: "session" })),
-    ...graph.attachments.map((attachment) => ({ from: attachment.run_id, to: `transcript:${attachment.digest}`, label: attachment.custody })),
-    ...graph.parents.map((parent) => ({ from: parent.parent_run_id, to: parent.run_id, label: parent.kind })),
-  ];
-  const derived = graph.similarities.map((edge) => ({
-    from: `transcript:${edge.left_digest}`,
-    to: `transcript:${edge.right_digest}`,
-    label: `${edge.score.toFixed(2)} ${edge.projection_version}`,
-  }));
+  const observed = graph.observed_edges;
+  const derived = graph.derived_edges;
   return (
     <div className="work-graph">
-      <div className="graph-legend"><span>observed topology</span><span className="derived">derived similarity</span></div>
-      <svg viewBox={`0 0 950 ${height}`} role="img" aria-label="Conversation, task, run, harness session, transcript, delegation, cell call, rescope, continuation, and similarity graph">
-        {derived.map((edge, index) => { const from = at.get(edge.from); const to = at.get(edge.to); return from && to ? <line key={`${edge.from}:${edge.to}:${index}`} x1={from.x} y1={from.y} x2={to.x} y2={to.y} className="derived-edge"><title>{edge.label}</title></line> : null; })}
-        {observed.map((edge, index) => { const from = at.get(edge.from); const to = at.get(edge.to); return from && to ? <line key={`${edge.from}:${edge.to}:${index}`} x1={from.x} y1={from.y} x2={to.x} y2={to.y} className="observed-edge"><title>{edge.label}</title></line> : null; })}
-        {nodes.map((node) => { const point = at.get(node.id)!; return <g key={node.id} transform={`translate(${point.x},${point.y})`} className={`graph-node ${node.kind}`}><circle r="25"/><text y="42" textAnchor="middle">{node.label.slice(0, 18)}</text></g>; })}
+      <div className="graph-legend"><span>observed topology</span><span className="derived">derived similarity</span><span><button className="chip" onClick={() => setZoom((value) => Math.max(0.6, value - 0.2))}>-</button><button className="chip" onClick={() => setZoom((value) => Math.min(2, value + 0.2))}>+</button><button className="chip" onClick={() => setZoom(1)}>reset</button></span></div>
+      <svg viewBox={`0 0 950 ${height}`} style={{ width: `${zoom * 100}%` }} role="img" aria-label="Conversation, task, run, harness session, transcript, delegation, cell call, rescope, continuation, and similarity graph">
+        {derived.map((edge, index) => { const from = at.get(edge.from); const to = at.get(edge.to); return from && to ? <line key={`${edge.from}:${edge.to}:${index}`} x1={from.x} y1={from.y} x2={to.x} y2={to.y} className="derived-edge"><title>{`${edge.score?.toFixed(2) ?? ""} ${edge.projection ?? ""}`}</title></line> : null; })}
+        {observed.map((edge, index) => { const from = at.get(edge.from); const to = at.get(edge.to); return from && to ? <line key={`${edge.from}:${edge.to}:${index}`} x1={from.x} y1={from.y} x2={to.x} y2={to.y} className="observed-edge"><title>{edge.kind}</title></line> : null; })}
+        {nodes.map((node) => { const point = at.get(node.id)!; const label = node.kind === "project" ? mask(node.label, "path", privacy) : node.kind === "session" || node.kind === "attachment" ? mask(node.label, "session", privacy) : node.label; return <g key={node.id} transform={`translate(${point.x},${point.y})`} className={`graph-node ${node.kind}`} onClick={() => onSelect(node)} onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") onSelect(node); }} role={node.target ? "button" : undefined} tabIndex={node.target ? 0 : undefined}><circle r="25"/><text y="42" textAnchor="middle">{label.slice(0, 18)}</text></g>; })}
       </svg>
-      <ul className="similarity-list">{graph.similarities.map((edge) => <li key={`${edge.left_digest}:${edge.right_digest}`}><span className="derived">derived</span> {short(edge.left_digest)} ↔ {short(edge.right_digest)} · {edge.score.toFixed(2)} · {edge.projection_version}</li>)}</ul>
+      <ul className="similarity-list">{derived.map((edge) => <li key={`${edge.from}:${edge.to}`}><span className="derived">derived</span> {short(edge.from)} ↔ {short(edge.to)} · {edge.score?.toFixed(2) ?? ""} · {edge.projection ?? ""}</li>)}</ul>
     </div>
   );
 }

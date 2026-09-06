@@ -31,6 +31,7 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router, middleware};
 use serde::{Deserialize, Serialize};
+use tokio::sync::Notify;
 
 use farseer_core::RunnerConfig;
 use farseer_core::policy::Budget;
@@ -49,6 +50,7 @@ mod attach;
 mod lifecycle;
 mod mcp;
 mod notify;
+mod project_profiles;
 mod projects;
 pub mod security;
 mod work;
@@ -114,6 +116,8 @@ pub struct AppState {
     worker_counts: Mutex<HashMap<CellId, u32>>,
     /// Set exactly once after `serve` binds, including an OS-selected port.
     base_url: OnceLock<String>,
+    /// Bounded single-worker queue for optional transcript projections.
+    transcript_queue: OnceLock<tokio::sync::mpsc::Sender<work::ProjectionRequest>>,
     /// The last snapshot [`poll_windows`] took, or empty if nothing has polled.
     ///
     /// Cached rather than fetched per request for two reasons, and the second is
@@ -122,6 +126,120 @@ pub struct AppState {
     /// launch. Empty is the honest resting state - farseer reports what it
     /// observed, and before the first poll it has observed nothing.
     polled_windows: Mutex<Vec<farseer_core::WindowObservation>>,
+    runtime: RuntimeControl,
+}
+
+const DEFAULT_DRAIN_DEADLINE: Duration = Duration::from_secs(30);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RuntimePhase {
+    Running,
+    Draining { deadline_ts: i64 },
+    ForceRequested,
+}
+
+impl RuntimePhase {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Running => "running",
+            Self::Draining { .. } => "draining",
+            Self::ForceRequested => "forcing",
+        }
+    }
+}
+
+#[derive(Debug)]
+struct RuntimeControl {
+    phase: Mutex<RuntimePhase>,
+    active: Mutex<usize>,
+    notify: Notify,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct RuntimeStatus {
+    pub state: &'static str,
+    pub active_runs: usize,
+    pub drain_deadline_ts: Option<i64>,
+    pub drain_expired: bool,
+    /// Set on the force response to make the operator's blast radius explicit.
+    pub affected_runs: Option<usize>,
+}
+
+impl RuntimeControl {
+    fn new() -> Self {
+        Self {
+            phase: Mutex::new(RuntimePhase::Running),
+            active: Mutex::new(0),
+            notify: Notify::new(),
+        }
+    }
+
+    fn status(&self, now: i64) -> RuntimeStatus {
+        let phase = *self.phase.lock().unwrap_or_else(|e| e.into_inner());
+        let deadline = match phase {
+            RuntimePhase::Draining { deadline_ts } => Some(deadline_ts),
+            _ => None,
+        };
+        RuntimeStatus {
+            state: phase.as_str(),
+            active_runs: *self.active.lock().unwrap_or_else(|e| e.into_inner()),
+            drain_deadline_ts: deadline,
+            drain_expired: deadline.is_some_and(|deadline| now >= deadline),
+            affected_runs: None,
+        }
+    }
+
+    /// Reserve admission atomically with the running-state check.
+    fn admit(&self) -> bool {
+        let phase = self.phase.lock().unwrap_or_else(|e| e.into_inner());
+        if *phase != RuntimePhase::Running {
+            return false;
+        }
+        *self.active.lock().unwrap_or_else(|e| e.into_inner()) += 1;
+        true
+    }
+
+    fn release(&self) {
+        let mut active = self.active.lock().unwrap_or_else(|e| e.into_inner());
+        *active = active.saturating_sub(1);
+        self.notify.notify_waiters();
+    }
+
+    fn drain(&self, deadline_ts: i64) -> (RuntimePhase, bool) {
+        let mut phase = self.phase.lock().unwrap_or_else(|e| e.into_inner());
+        if *phase == RuntimePhase::Running {
+            *phase = RuntimePhase::Draining { deadline_ts };
+            self.notify.notify_waiters();
+            (*phase, true)
+        } else {
+            (*phase, false)
+        }
+    }
+
+    fn force(&self) -> (RuntimePhase, bool) {
+        let mut phase = self.phase.lock().unwrap_or_else(|e| e.into_inner());
+        if *phase == RuntimePhase::ForceRequested {
+            return (*phase, false);
+        }
+        *phase = RuntimePhase::ForceRequested;
+        self.notify.notify_waiters();
+        (*phase, true)
+    }
+
+    fn should_stop(&self) -> bool {
+        let phase = *self.phase.lock().unwrap_or_else(|e| e.into_inner());
+        phase != RuntimePhase::Running
+            && *self.active.lock().unwrap_or_else(|e| e.into_inner()) == 0
+    }
+
+    async fn wait_for_shutdown(&self) {
+        loop {
+            if self.should_stop() {
+                return;
+            }
+            self.notify.notified().await;
+        }
+    }
 }
 
 /// What `farseer_manager::run_worker`'s `on_started` callback hands back for
@@ -289,7 +407,43 @@ impl AppState {
             pending_cancellations: Mutex::new(HashMap::new()),
             worker_counts: Mutex::new(HashMap::new()),
             base_url: OnceLock::new(),
+            transcript_queue: OnceLock::new(),
+            runtime: RuntimeControl::new(),
         }
+    }
+
+    pub fn runtime_status(&self) -> RuntimeStatus {
+        self.runtime.status(now_ms())
+    }
+
+    fn admit_run(&self) -> ApiResult<()> {
+        if self.runtime.admit() {
+            Ok(())
+        } else {
+            Err(ApiError::Policy(
+                "runtime is draining and accepts no new work".into(),
+            ))
+        }
+    }
+
+    fn release_run(&self) {
+        self.runtime.release();
+    }
+
+    fn append_runtime_event(&self, action: &str, payload: serde_json::Value) -> ApiResult<()> {
+        self.store().append(&NewEvent::new(
+            CellId::new("runtime"),
+            RunId::none(),
+            farseer_core::EventKind::RUNTIME_LIFECYCLE,
+            farseer_core::Actor::Operator,
+            now_ms(),
+            serde_json::json!({
+                "action": action,
+                "state": self.runtime_status().state,
+                "details": payload,
+            }),
+        ))?;
+        Ok(())
     }
 
     /// Re-read every definition from disk.
@@ -486,6 +640,9 @@ pub struct ReloadError {
 pub fn router(state: Arc<AppState>) -> Router {
     Router::new()
         .route("/v1/health", get(health))
+        .route("/v1/runtime", get(runtime_status))
+        .route("/v1/runtime/drain", post(drain_runtime))
+        .route("/v1/runtime/force", post(force_runtime))
         .route("/v1/cells", get(list_cells))
         .route("/v1/cells/{cell_id}", get(get_cell))
         .route("/v1/cells/reload", post(reload_cells))
@@ -517,15 +674,25 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/v1/tasks", get(work::list_tasks))
         .route("/v1/tasks/page", get(work::list_task_page))
         .route("/v1/tasks/{task_id}", get(work::get_task))
+        .route("/v1/work/sessions", get(work::list_sessions))
         .route(
             "/v1/tasks/{task_id}/transition",
             post(work::transition_task),
         )
         .route("/v1/work/graph", get(work::graph))
         .route("/v1/work/search", get(work::search_transcripts))
+        .route("/v1/work/search/page", get(work::search_transcript_page))
         .route(
             "/v1/runs/{run_id}/transcripts",
             get(work::list_transcripts).post(work::add_transcript),
+        )
+        .route(
+            "/v1/runs/{run_id}/transcripts/{digest}/retry",
+            post(work::retry_transcript),
+        )
+        .route(
+            "/v1/runs/{run_id}/transcripts/{digest}/cancel",
+            post(work::cancel_transcript),
         )
         // `07 attach semantics`'s three control states. Attach is read-only by
         // default and `intervene` refuses without a takeover, because silent
@@ -545,10 +712,16 @@ pub fn router(state: Arc<AppState>) -> Router {
             "/v1/projects/roots",
             post(projects::add_root).delete(projects::remove_root),
         )
+        .route("/v1/projects/profile", get(project_profiles::get))
+        .route(
+            "/v1/projects/profile/reload",
+            post(project_profiles::reload),
+        )
         .route("/v1/skills", get(skills))
         .route("/v1/quota", get(quota))
         .route("/v1/quota/refresh", post(refresh_quota))
         .route("/v1/analytics/cost", get(analytics_cost))
+        .route("/v1/analytics/cost/page", get(analytics_cost_page))
         .route("/v1/analytics/intervention", get(analytics_intervention))
         .route("/v1/analytics/rework", get(analytics_rework))
         .route("/v1/analytics/lessons", get(analytics_lessons))
@@ -587,11 +760,17 @@ pub async fn serve(state: Arc<AppState>, port: u16) -> std::io::Result<()> {
         &state.token,
         &identity,
     )?;
+    work::spawn_projection_worker(Arc::clone(&state));
     // `35 notification plane`: off unless the operator set a URL, and never in
     // the path of anything - a failed notification must not fail a run.
     notify::spawn(Arc::clone(&state));
     spawn_window_poll(Arc::clone(&state));
-    axum::serve(listener, router(state)).await
+    let shutdown_state = Arc::clone(&state);
+    axum::serve(listener, router(state))
+        .with_graceful_shutdown(async move {
+            shutdown_state.runtime.wait_for_shutdown().await;
+        })
+        .await
 }
 
 async fn guard(
@@ -716,7 +895,79 @@ async fn health(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
         "data_dir_fingerprint": security::data_dir_fingerprint(data_dir),
         "build_provenance": format!("farseer-api/{}", env!("CARGO_PKG_VERSION")),
         "features": RUNTIME_FEATURES,
+        "lifecycle": state.runtime_status(),
     }))
+}
+
+async fn runtime_status(State(state): State<Arc<AppState>>) -> Json<RuntimeStatus> {
+    Json(state.runtime_status())
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct DrainBody {
+    /// Test and operator override; the normal deadline is 30 seconds.
+    deadline_secs: Option<u64>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct ForceBody {
+    reason: Option<String>,
+}
+
+async fn drain_runtime(
+    State(state): State<Arc<AppState>>,
+    body: Option<Json<DrainBody>>,
+) -> ApiResult<Json<RuntimeStatus>> {
+    let seconds = body
+        .and_then(|Json(body)| body.deadline_secs)
+        .unwrap_or(DEFAULT_DRAIN_DEADLINE.as_secs())
+        .min(i64::MAX as u64);
+    let deadline = now_ms().saturating_add((seconds as i64).saturating_mul(1_000));
+    let (_, changed) = state.runtime.drain(deadline);
+    if changed {
+        state.append_runtime_event(
+            "drain",
+            serde_json::json!({
+                "deadline_ts": deadline,
+                "pending_runs": state.runtime_status().active_runs,
+            }),
+        )?;
+    }
+    Ok(Json(state.runtime_status()))
+}
+
+async fn force_runtime(
+    State(state): State<Arc<AppState>>,
+    body: Option<Json<ForceBody>>,
+) -> ApiResult<Json<RuntimeStatus>> {
+    let reason = body
+        .and_then(|Json(body)| body.reason)
+        .filter(|reason| !reason.trim().is_empty())
+        .unwrap_or_else(|| "operator requested force".into());
+    let pending = state.runtime_status().active_runs;
+    let (_, changed) = state.runtime.force();
+    if changed {
+        state.append_runtime_event(
+            "force",
+            serde_json::json!({
+                "reason": reason,
+                "pending_runs": pending,
+            }),
+        )?;
+        let ids = state
+            .pending_cancellations
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .keys()
+            .copied()
+            .collect::<Vec<_>>();
+        for run_id in ids {
+            let _ = cancel_run_inner(&state, run_id).await;
+        }
+    }
+    let mut status = state.runtime_status();
+    status.affected_runs = Some(pending);
+    Ok(Json(status))
 }
 
 async fn list_cells(State(state): State<Arc<AppState>>) -> Json<Vec<CellSummary>> {
@@ -848,6 +1099,27 @@ pub struct InstructBody {
     /// One candidate declared by this cell's manager definition.
     #[serde(default)]
     pub manager_runner: Option<String>,
+    /// Explicit UI context captured at submission time, per `07 explicit composer context`.
+    #[serde(default)]
+    pub anchor: Option<OperatorAnchor>,
+    /// Existing task the operator deliberately pinned as context, per `40 work model and session explorer`.
+    #[serde(default)]
+    pub task_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OperatorAnchor {
+    pub widget: String,
+    #[serde(default)]
+    pub subject: Option<String>,
+    #[serde(default)]
+    pub project: Option<String>,
+    #[serde(default)]
+    pub conversation: Option<String>,
+    #[serde(default)]
+    pub task: Option<String>,
+    #[serde(default)]
+    pub manager_runner: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -921,16 +1193,15 @@ async fn instruct_cell(
     if goal.is_empty() {
         return Err(ApiError::BadRequest("goal must not be empty"));
     }
-    let cell = state
-        .cells()
-        .get(&CellId::new(cell_id))
-        .cloned()
-        .ok_or(ApiError::NotFound("cell"))?;
-    lifecycle::ensure_accepts_work(&state, &cell.cell_id)?;
 
     let requested_conversation = body
         .conversation_id
         .as_deref()
+        .or_else(|| {
+            body.anchor
+                .as_ref()
+                .and_then(|anchor| anchor.conversation.as_deref())
+        })
         .map(|id| {
             id.parse::<farseer_core::ConversationId>()
                 .map_err(|_| ApiError::NotFound("conversation"))
@@ -944,22 +1215,23 @@ async fn instruct_cell(
         return Err(ApiError::NotFound("conversation"));
     }
 
-    let runner = body
-        .manager_runner
+    let requested_task = body
+        .task_id
         .as_deref()
         .or_else(|| {
-            existing
+            body.anchor
                 .as_ref()
-                .and_then(|conversation| conversation.manager_runner.as_deref())
+                .and_then(|anchor| anchor.task.as_deref())
         })
-        .unwrap_or_else(|| cell.manager.runner())
-        .to_owned();
-    if !cell.manager.has_runner(&runner) {
-        return Err(ApiError::BadRequest(
-            "manager runner is not a candidate for this cell",
-        ));
+        .map(|id| id.parse::<TaskId>().map_err(|_| ApiError::NotFound("task")))
+        .transpose()?;
+    let requested_task_row = requested_task
+        .map(|id| state.store().task(id))
+        .transpose()?
+        .flatten();
+    if requested_task.is_some() && requested_task_row.is_none() {
+        return Err(ApiError::NotFound("task"));
     }
-    check_tool_level(&runner, cell.manager.tools)?;
 
     let project = match body.project.as_deref().or_else(|| {
         existing
@@ -969,7 +1241,62 @@ async fn instruct_cell(
         Some(path) => Some(projects::resolve(&state, path)?),
         None => None,
     };
+    let project_profile = if cell_id == "zero" {
+        project
+            .as_deref()
+            .map(|path| project_profiles::effective(&state, path))
+            .transpose()?
+    } else {
+        None
+    };
+    let selected_cell_id = project_profile
+        .as_ref()
+        .map(|(profile, _)| profile.coordinating_cell.as_str())
+        .unwrap_or(&cell_id);
+    let cell = state
+        .cells()
+        .get(&CellId::new(selected_cell_id))
+        .cloned()
+        .ok_or_else(|| {
+            if project_profile.is_some() {
+                ApiError::BadRequest(
+                    "project profile references an unavailable coordinating cell; repair .farseer/profile.toml",
+                )
+            } else {
+                ApiError::NotFound("cell")
+            }
+        })?;
+    lifecycle::ensure_accepts_work(&state, &cell.cell_id)?;
     let project_path = project.as_deref().map(projects::display);
+    let old_profile = project_path
+        .as_deref()
+        .and_then(|path| project_profiles::prior_profile(&state, path));
+    let requested_runner = body.manager_runner.as_deref().or_else(|| {
+        body.anchor
+            .as_ref()
+            .and_then(|anchor| anchor.manager_runner.as_deref())
+    });
+    let conversation_runner = existing
+        .as_ref()
+        .and_then(|conversation| conversation.manager_runner.as_deref());
+    let (runner, routing_fallback) = if let Some(runner) = requested_runner {
+        (runner.to_owned(), None)
+    } else if let Some(runner) = conversation_runner {
+        (runner.to_owned(), None)
+    } else {
+        let preferred = cell.manager.runner().to_owned();
+        let selected = first_available_runner(&state, &cell.manager.runners).ok_or(
+            ApiError::BadRequest("all declared manager runners are currently exhausted"),
+        )?;
+        let fallback = (selected != preferred).then(|| (preferred, selected.clone()));
+        (selected, fallback)
+    };
+    if !cell.manager.has_runner(&runner) {
+        return Err(ApiError::BadRequest(
+            "manager runner is not a candidate for this cell",
+        ));
+    }
+    check_tool_level(&runner, cell.manager.tools)?;
     let now = now_ms();
     let title = title_of(goal).unwrap_or_else(|| "Untitled task".into());
     let conversation_id = if let Some(conversation) = existing {
@@ -987,6 +1314,21 @@ async fn instruct_cell(
         state.store().create_conversation(&conversation)?;
         conversation.conversation_id
     };
+    if let Some(task) = requested_task_row.as_ref() {
+        if task.conversation_id != conversation_id {
+            return Err(ApiError::BadRequest(
+                "task does not belong to the selected conversation",
+            ));
+        }
+        if let (Some(project), Some(task_project)) =
+            (project_path.as_deref(), task.project_path.as_deref())
+            && project != task_project
+        {
+            return Err(ApiError::BadRequest(
+                "task does not belong to the selected project",
+            ));
+        }
+    }
     let previous_run = state.store().latest_run_for_conversation(conversation_id)?;
     state
         .store()
@@ -998,7 +1340,7 @@ async fn instruct_cell(
         conversation_id,
         goal: goal.to_owned(),
         title,
-        project_path,
+        project_path: project_path.clone(),
         state: farseer_core::TaskState::Inbox,
         priority: 0,
         created_ts: now,
@@ -1018,14 +1360,21 @@ async fn instruct_cell(
         cell_id: cell.cell_id.clone(),
         goal: goal.to_owned(),
         workspace: cell.workspace_strategy,
-        runner,
+        runner: runner.clone(),
         tool_grants: cell.tool_grants(),
         tool_level: cell.manager.tools,
         autonomy_ceiling: cell.policy.autonomy_ceiling,
         budget: cell.budget,
         definition_of_done: String::new(),
     });
-    let run_id = match spawn_run(&state, contract, RunRole::Manager, cell, project, None) {
+    let run_id = match spawn_run(
+        &state,
+        contract,
+        RunRole::Manager,
+        cell.clone(),
+        project,
+        None,
+    ) {
         Ok(run_id) => run_id,
         Err(error) => {
             state.store().transition_task(
@@ -1042,6 +1391,43 @@ async fn instruct_cell(
         state
             .store()
             .record_run_parent(run_id, parent, "continuation")?;
+    }
+
+    state.store().append(&farseer_core::NewEvent::new(
+        cell.cell_id.clone(),
+        run_id,
+        farseer_core::EventKind::new(farseer_core::EventKind::OPERATOR_CONTEXT),
+        farseer_core::Actor::Operator,
+        now_ms(),
+        serde_json::json!({
+            "anchor": body.anchor,
+            "project": project_path,
+            "project_profile": project_profile.as_ref().map(|(profile, _)| serde_json::json!({
+                "old": old_profile,
+                "new": profile.coordinating_cell,
+                "actor": "operator",
+                "reason": "operator instruction accepted",
+            })),
+            "conversation_id": conversation_id,
+            "context_task_id": requested_task,
+            "manager_runner": runner,
+            "accepted_run_id": run_id,
+        }),
+    ))?;
+    if let Some((preferred, chosen)) = routing_fallback {
+        state.store().append(&farseer_core::NewEvent::new(
+            cell.cell_id.clone(),
+            run_id,
+            farseer_core::EventKind::new(farseer_core::EventKind::STATUS_CHANGED),
+            farseer_core::Actor::System,
+            now_ms(),
+            serde_json::json!({
+                "routing": "preferred_runner_unavailable",
+                "preferred": preferred,
+                "chosen": chosen,
+                "candidates": cell.manager.runners,
+            }),
+        ))?;
     }
 
     Ok((
@@ -1490,8 +1876,15 @@ pub(crate) fn spawn_run(
         None
     };
     let run_id = contract.run_id;
+    state.admit_run()?;
     let (cwd, repo_for_teardown) =
-        create_workspace(state, contract.workspace, run_id, project.as_deref())?;
+        match create_workspace(state, contract.workspace, run_id, project.as_deref()) {
+            Ok(workspace) => workspace,
+            Err(error) => {
+                state.release_run();
+                return Err(error);
+            }
+        };
     let cancel_requested = Arc::new(AtomicBool::new(false));
     let manager_context = (role == RunRole::Manager).then(|| ManagerContext {
         manager_token: RuntimeToken::generate(),
@@ -1550,6 +1943,7 @@ pub(crate) fn spawn_run(
             let _ = std::fs::remove_file(security::manager_prompt_path(&run_id.to_string()));
             let _ =
                 farseer_runner::workspace::teardown_workspace(&cwd, repo_for_teardown.as_deref());
+            state.release_run();
             return Err(error);
         }
     };
@@ -1615,6 +2009,7 @@ pub(crate) fn spawn_run(
         {
             eprintln!("workspace teardown for run {run_id} did not complete: {e}");
         }
+        background_state.release_run();
     });
 
     Ok(run_id)
@@ -2913,6 +3308,33 @@ analytics_route!(
     cost_by_runner_and_model,
     farseer_store::CostRow
 );
+
+#[derive(Debug, Default, Deserialize)]
+struct CostPageQuery {
+    limit: Option<usize>,
+    offset: Option<usize>,
+    project: Option<String>,
+    from: Option<i64>,
+    to: Option<i64>,
+}
+
+async fn analytics_cost_page(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<CostPageQuery>,
+) -> ApiResult<Json<farseer_store::CostPage>> {
+    if let (Some(from), Some(to)) = (query.from, query.to)
+        && from > to
+    {
+        return Err(ApiError::BadRequest("from is after to"));
+    }
+    Ok(Json(state.store().cost_page(
+        query.limit.unwrap_or(50),
+        query.offset.unwrap_or(0),
+        query.project.as_deref(),
+        query.from,
+        query.to,
+    )?))
+}
 analytics_route!(
     analytics_intervention,
     intervention_rate_by_cell,
@@ -3147,6 +3569,80 @@ grants_shell = true
             )
             .is_err(),
             "`..` out of the root must be refused by where it lands"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_project_profile_projects_its_cell_manager_and_roster() {
+        let h = harness();
+        let root = tempfile::tempdir().unwrap();
+        let project = root.path().join("project");
+        std::fs::create_dir(&project).unwrap();
+        std::fs::create_dir(project.join(".farseer")).unwrap();
+        let project = std::fs::canonicalize(project).unwrap();
+        h.state
+            .store()
+            .authorize_root(
+                &projects::display(&std::fs::canonicalize(root.path()).unwrap()),
+                0,
+            )
+            .unwrap();
+        std::fs::write(
+            project.join(project_profiles::PROFILE_PATH),
+            format!(
+                "version = 1\nproject_path = {:?}\ncoordinating_cell = \"zero\"\n",
+                projects::display(&project)
+            ),
+        )
+        .unwrap();
+
+        let (status, body) = h
+            .get(&format!("/v1/projects/profile?path={}", project.display()))
+            .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["source"], "file");
+        assert_eq!(body["coordinating_cell"], "zero");
+        assert_eq!(body["cell"]["manager"]["runners"], json!(["claude-code"]));
+    }
+
+    #[tokio::test]
+    async fn an_unavailable_project_profile_refuses_before_creating_work() {
+        let h = harness();
+        let root = tempfile::tempdir().unwrap();
+        let project = root.path().join("project");
+        std::fs::create_dir(&project).unwrap();
+        std::fs::create_dir(project.join(".farseer")).unwrap();
+        let project = std::fs::canonicalize(project).unwrap();
+        h.state
+            .store()
+            .authorize_root(
+                &projects::display(&std::fs::canonicalize(root.path()).unwrap()),
+                0,
+            )
+            .unwrap();
+        std::fs::write(
+            project.join(project_profiles::PROFILE_PATH),
+            format!(
+                "version = 1\nproject_path = {:?}\ncoordinating_cell = \"missing\"\n",
+                projects::display(&project)
+            ),
+        )
+        .unwrap();
+
+        let (status, body) = h
+            .post(
+                "/v1/cells/zero/instruct",
+                json!({ "goal": "must be refused", "project": project.display().to_string() }),
+            )
+            .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        assert!(body["error"].as_str().unwrap().contains("repair"));
+        assert!(
+            h.state
+                .store()
+                .scan(0, 100, &ScanFilter::default())
+                .unwrap()
+                .is_empty()
         );
     }
 
@@ -3393,6 +3889,113 @@ grants_shell = true
         );
         assert_eq!(body["build_provenance"], "farseer-api/0.1.0");
         assert_eq!(body["features"], json!(["health", "sse", "commands"]));
+    }
+
+    #[tokio::test]
+    async fn draining_is_visible_recorded_and_refuses_new_work() {
+        let h = harness();
+        let (status, body) = h.get("/v1/runtime").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["state"], "running");
+        assert_eq!(body["active_runs"], 0);
+
+        let (status, body) = h
+            .post("/v1/runtime/drain", json!({ "deadline_secs": 30 }))
+            .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["state"], "draining");
+        assert_eq!(body["drain_expired"], false);
+
+        let (status, body) = h
+            .post(
+                "/v1/cells/zero/instruct",
+                json!({ "goal": "must be refused" }),
+            )
+            .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(body["error"].as_str().unwrap().contains("draining"));
+
+        let (_, events) = h.get("/v1/events?tail=10").await;
+        assert!(events.as_array().unwrap().iter().any(|event| {
+            event["kind"] == farseer_core::EventKind::RUNTIME_LIFECYCLE
+                && event["payload"]["action"] == "drain"
+        }));
+    }
+
+    #[test]
+    fn runtime_control_drain_deadline_does_not_force() {
+        let control = RuntimeControl::new();
+        assert!(control.admit());
+        let (phase, changed) = control.drain(1);
+        assert!(changed);
+        assert_eq!(phase.as_str(), "draining");
+        assert!(!control.admit());
+        assert!(!control.should_stop());
+        control.release();
+        assert!(control.should_stop());
+        assert!(control.status(2).drain_expired);
+    }
+
+    #[tokio::test]
+    async fn force_records_reason_and_cancels_owned_processes() {
+        let h = harness();
+        let run_id = RunId::new();
+        let worker = farseer_manager::StartedWorker::spawn(
+            std::path::Path::new(r"C:\Windows\System32\cmd.exe"),
+            &["/c".into(), "ping -n 30 127.0.0.1 >nul".into()],
+            &std::env::current_dir().unwrap(),
+            &[],
+            LivenessThresholds::default(),
+            farseer_runner::claude_code::parse_line,
+            farseer_manager::Channel::OneShot,
+        )
+        .unwrap();
+        let token = worker.cancel_token();
+        h.state.runtime.admit();
+        h.state.runs().insert(
+            run_id,
+            RunHandle {
+                cancel: token.clone(),
+                liveness: worker.liveness_handle(),
+                steer: None,
+            },
+        );
+        h.state
+            .pending_cancellations
+            .lock()
+            .unwrap()
+            .insert(run_id, Arc::new(AtomicBool::new(false)));
+
+        let (status, body) = h
+            .post("/v1/runtime/force", json!({ "reason": "operator test" }))
+            .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["state"], "forcing");
+        assert_eq!(body["active_runs"], 1);
+        assert_eq!(body["affected_runs"], 1);
+        assert!(token.was_cancelled());
+        assert!(
+            h.get("/v1/events?tail=10")
+                .await
+                .1
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|event| {
+                    event["kind"] == farseer_core::EventKind::RUNTIME_LIFECYCLE
+                        && event["payload"]["action"] == "force"
+                        && event["payload"]["details"]["reason"] == "operator test"
+                })
+        );
+        token.cancel();
+        drop(worker);
+        h.state.runs().remove(&run_id);
+        h.state
+            .pending_cancellations
+            .lock()
+            .unwrap()
+            .remove(&run_id);
+        h.state.release_run();
     }
 
     #[tokio::test]

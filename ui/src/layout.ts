@@ -35,6 +35,10 @@ export type CanvasLayout = {
   mounted: string[];
   span: Record<string, Span>;
   unit: WidgetUnit;
+  /** Presentation state stays in the same opaque UI-state document. */
+  sidebarCollapsed?: boolean;
+  focused?: string | null;
+  focusPane?: "navigation" | "inspector";
 };
 
 /** The first standard size is the default for every newly mounted widget. */
@@ -108,6 +112,12 @@ export function normalizeLayout(value: unknown, fallback: CanvasLayout): CanvasL
     mounted,
     span: Object.fromEntries([...ids].map((id) => [id, normalizeSpan(stored[id])])),
     unit: normalizeUnit(value.unit),
+    ...(typeof value.sidebarCollapsed === "boolean" ? { sidebarCollapsed: value.sidebarCollapsed } : {}),
+    ...(typeof value.focused === "string" ? { focused: value.focused } : {}),
+    ...(value.focused === null ? { focused: null } : {}),
+    ...(value.focusPane === "navigation" || value.focusPane === "inspector"
+      ? { focusPane: value.focusPane }
+      : {}),
   };
 }
 
