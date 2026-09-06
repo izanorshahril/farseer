@@ -116,7 +116,7 @@ No ticket is marked complete solely from source presence; acceptance checkboxes 
 ## Status correction, 2026-09-06
 
 The current branch status is the later wave plus the review fixes, not the older snapshot above.
-Ticket 01 remains partial because launch convergence and desktop smoke evidence are open.
+Ticket 01 remains partial because child-owned cleanup, recovery-state presentation, capability gating, and desktop smoke evidence are open; competing launches now converge on the verified owner.
 Ticket 03 has bounded board reads and transition coverage, but its cross-scope and UI acceptance demo remains open.
 Ticket 12 now has explicit parent/child de-duplication coverage; its broader two-task acceptance demo remains open.
 Ticket 15 now serializes terminal leases and ignores naturally exited sessions when deciding teardown; the ConPTY/manual demonstration remains open.

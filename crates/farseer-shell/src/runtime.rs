@@ -9,6 +9,7 @@ use anyhow::{Context, Result, anyhow};
 use serde::Deserialize;
 
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(20);
+const OWNER_CONVERGENCE_TIMEOUT: Duration = Duration::from_secs(2);
 const CONNECT_TIMEOUT: Duration = Duration::from_millis(300);
 const IO_TIMEOUT: Duration = Duration::from_secs(1);
 const REQUIRED_FEATURES: &[&str] = &["health", "sse", "commands"];
@@ -78,6 +79,20 @@ pub fn spawn(binary: &Path, cells: &Path, repo: &Path, record: &Path) -> Result<
             .try_wait()
             .context("checking the farseer child during startup")?
         {
+            // Two shells can observe the same missing or stale discovery file
+            // and race to start a daemon.  The data-directory lease lets one
+            // child win; give that owner a short publication window before
+            // reporting the losing child exit, then attach only after the same
+            // authenticated handshake used by the normal path.
+            if let Some(existing) = wait_for_owner(
+                || attach_existing(&expected_data_dir),
+                OWNER_CONVERGENCE_TIMEOUT,
+            )? {
+                return Ok(Attached {
+                    runtime: existing,
+                    _child: None,
+                });
+            }
             return fail_child(child, anyhow!("startup: child exited with {status}"));
         }
         if let Ok(text) = std::fs::read_to_string(&path)
@@ -116,6 +131,20 @@ fn fail_child(mut child: Child, error: anyhow::Error) -> Result<Attached> {
     let _ = child.kill();
     let _ = child.wait();
     Err(error)
+}
+
+fn wait_for_owner(
+    mut discover: impl FnMut() -> Result<Option<Runtime>>,
+    timeout: Duration,
+) -> Result<Option<Runtime>> {
+    let deadline = Instant::now() + timeout;
+    while Instant::now() < deadline {
+        if let Some(runtime) = discover()? {
+            return Ok(Some(runtime));
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    Ok(None)
 }
 
 #[cfg(test)]
@@ -394,5 +423,21 @@ mod tests {
         );
         let error = verify(&runtime, "sha256:data").unwrap_err().to_string();
         assert!(error.contains("feature"), "{error}");
+    }
+
+    #[test]
+    fn a_losing_launch_reuses_the_verified_owner_after_its_child_exits() {
+        let expected = runtime(42);
+        let mut attempts = 0;
+        let found = wait_for_owner(
+            || {
+                attempts += 1;
+                Ok((attempts >= 2).then_some(expected.clone()))
+            },
+            Duration::from_millis(250),
+        )
+        .unwrap();
+        assert_eq!(found.unwrap().runtime_id, "runtime");
+        assert!(attempts >= 2);
     }
 }
