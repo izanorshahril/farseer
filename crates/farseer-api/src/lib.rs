@@ -4148,6 +4148,120 @@ grants_shell = true
         );
     }
 
+    /// `14 project teams`: a multi-harness profile narrows the coordinating
+    /// cell's existing callable roster without copying grants or bypassing the
+    /// manager's task and budget ownership.
+    #[tokio::test]
+    async fn a_project_team_records_its_specialist_set_and_refuses_other_cells() {
+        const ZERO_WITH_TEAM: &str = r#"
+cell_id = "zero"
+name = "Cell Zero"
+workspace_strategy = "plain_directory"
+
+[manager]
+runner = "farseer-test-missing-runner"
+
+[[roster]]
+kind = "cell"
+name = "social"
+cell_id = "social"
+max_autonomy_ceiling = "reversible"
+
+[[roster]]
+kind = "cell"
+name = "abroad"
+cell_id = "abroad"
+max_autonomy_ceiling = "reversible"
+"#;
+        const SOCIAL: &str = r#"
+cell_id = "social"
+name = "Social"
+workspace_strategy = "plain_directory"
+
+[manager]
+runner = "farseer-test-missing-runner"
+"#;
+        const ABROAD: &str = r#"
+cell_id = "abroad"
+name = "Abroad"
+workspace_strategy = "plain_directory"
+
+[manager]
+runner = "farseer-test-missing-runner"
+"#;
+
+        let h = harness_with_cells(&[
+            ("zero", ZERO_WITH_TEAM),
+            ("social", SOCIAL),
+            ("abroad", ABROAD),
+        ]);
+        let root = tempfile::tempdir().unwrap();
+        let project = root.path().join("project");
+        std::fs::create_dir(&project).unwrap();
+        std::fs::create_dir(project.join(".farseer")).unwrap();
+        let project = std::fs::canonicalize(project).unwrap();
+        h.state
+            .store()
+            .authorize_root(&projects::display(&root.path().canonicalize().unwrap()), 0)
+            .unwrap();
+        std::fs::write(
+            project.join(project_profiles::PROFILE_PATH),
+            format!(
+                "version = 1\nproject_path = {:?}\ncoordinating_cell = \"zero\"\nspecialist_cells = [\"social\"]\n",
+                projects::display(&project)
+            ),
+        )
+        .unwrap();
+
+        let (manager_run_id, _, manager_token) = register_manager(&h);
+        h.state.managers().get_mut(&manager_run_id).unwrap().project = Some(project.clone());
+
+        let request = |cell: &str| {
+            Request::builder()
+                .method("POST")
+                .uri("/v1/manager/delegate/cell")
+                .header(header::HOST, "127.0.0.1:9000")
+                .header(header::AUTHORIZATION, format!("Bearer {manager_token}"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    json!({
+                        "manager_run_id": manager_run_id.to_string(),
+                        "manager_token": manager_token,
+                        "cell": cell,
+                        "goal": format!("delegate to {cell}"),
+                    })
+                    .to_string(),
+                ))
+                .unwrap()
+        };
+
+        let (status, accepted) = h.send(request("social")).await;
+        assert_eq!(status, StatusCode::OK, "{accepted}");
+        assert_eq!(accepted["to_cell"], "social");
+
+        let events = h
+            .state
+            .store()
+            .scan(0, 100, &ScanFilter::default())
+            .unwrap();
+        let called = events
+            .iter()
+            .find(|event| event.kind == EventKind::CELL_CALLED.into())
+            .expect("accepted specialist call is recorded");
+        assert_eq!(called.payload["project_specialists"], json!(["social"]));
+        let run_count = h.state.store().recent_runs(100).unwrap().len();
+
+        let (status, refused) = h.send(request("abroad")).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{refused}");
+        assert!(
+            refused["error"]
+                .as_str()
+                .unwrap()
+                .contains("not an eligible specialist")
+        );
+        assert_eq!(h.state.store().recent_runs(100).unwrap().len(), run_count);
+    }
+
     #[tokio::test]
     async fn switching_a_project_profile_records_history_and_only_affects_future_tasks() {
         const ZERO: &str = r#"

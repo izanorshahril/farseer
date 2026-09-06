@@ -29,6 +29,7 @@ The profile supplies a validated default eligible coordinating cell; actual top-
 When a profile declares specialist cells, the existing pinned cell roster remains the grant and the profile narrows calls to the declared specialist set; each accepted cell call records the profile specialist set beside its bounded call budget.
 The project widget now expands the selected profile to show manager runners, each declared roster entry, and the last profile transitions with old/new cell, actor, reason, and timestamp.
 The public profile tests cover manager/roster projection and missing specialist refusal before any work rows are created.
+The deterministic `a_project_team_records_its_specialist_set_and_refuses_other_cells` regression records the selected specialist set on an accepted cell call, refuses a callable cell outside that set before creating a run, and preserves the caller's run count.
 The profile route now projects append-only transition history; the public profile-switch regression covers two future tasks, old/new cells, actor/reason, and equal global/project task projections without duplication.
 A full multi-cell delegation/cap demo remains open.
 

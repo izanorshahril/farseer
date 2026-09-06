@@ -146,3 +146,7 @@ The public browser smoke demonstrations and some live supervised-run evidence re
 ## Status correction, 2026-09-06 implementation wave 4
 
 The Safe staged runtime promotion ticket now has a public CLI regression for a failing candidate startup, including restored active identity, quarantined candidate, command observation, and durable recovery journal evidence.
+
+## Status correction, 2026-09-06 implementation wave 5
+
+The Project team profiles ticket now has a deterministic multi-cell regression that records the project specialist set on accepted calls and refuses non-specialist calls before creating a run.
