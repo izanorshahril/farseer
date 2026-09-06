@@ -223,6 +223,11 @@ pub(super) async fn record_evidence(
     let now = now_ms();
     let outcome = body.outcome.trim().to_ascii_lowercase();
     let succeeded = matches!(outcome.as_str(), "ok" | "passed" | "success" | "succeeded");
+    if succeeded && body.validation.is_empty() {
+        return Err(ApiError::BadRequest(
+            "successful maintenance evidence requires validation",
+        ));
+    }
     let candidate = CandidateSource {
         artifact: body.artifact.clone(),
         branch: body.branch.clone(),

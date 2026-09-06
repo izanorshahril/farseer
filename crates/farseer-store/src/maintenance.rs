@@ -284,8 +284,17 @@ impl ProposalLedger {
         if !proposal.status.active() {
             return Err(MaintenanceError::ProposalNotOpen(proposal_id.into()));
         }
+        let missing_validation = proposal
+            .attempts
+            .iter()
+            .all(|attempt| attempt.evidence.is_empty())
+            || proposal
+                .candidate
+                .as_ref()
+                .map(|candidate| candidate.validation.is_empty())
+                .unwrap_or(true);
         if matches!(status, ProposalStatus::Succeeded)
-            && (proposal.candidate.is_none() || proposal.attempts.is_empty())
+            && (proposal.candidate.is_none() || proposal.attempts.is_empty() || missing_validation)
         {
             return Err(MaintenanceError::MissingEvidence);
         }

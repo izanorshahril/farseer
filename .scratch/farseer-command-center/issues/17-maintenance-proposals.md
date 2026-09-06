@@ -36,4 +36,5 @@ Duplicate triggers return the existing proposal, a different trigger is refused 
 The operator API now admits a proposal as an ordinary in-progress conversation/task, links the proposal to that task, records one candidate/reproducer/branch and validation attempt as an ordinary run/artifact, and supports explicit cancellation.
 The public regression test covers deduplication, task linkage, review transition, the artifact projection, and the task-detail proposal projection.
 The task detail now joins the bounded proposal ledger to the ordinary task view and exposes source/previous revisions, candidate metadata, and validation evidence.
+Successful evidence is refused unless it carries at least one validation result, and the store repeats that invariant before marking a proposal succeeded.
 Candidate creation by an isolated maintenance worker and validation execution remain open.

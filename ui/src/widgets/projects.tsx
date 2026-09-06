@@ -410,7 +410,7 @@ export function ProjectsWidget({ bridge }: { bridge: Bridge }) {
                       onClick={() => setProject(on ? null : project.path)}
                       title={mask(project.path, "path", privacy)}
                     >
-                      <span className="project-name">{project.name}</span>
+                      <span className="project-name">{mask(project.name, "diagnostic", privacy)}</span>
                       {project.profile?.valid && project.profile.cell && (
                         <span className="dim small" title={`manager ${project.profile.cell.manager.runners.join(", ")}`}>
                           {project.profile.cell.name} · {project.profile.cell.roster.length} roster

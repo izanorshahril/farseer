@@ -4441,6 +4441,40 @@ runner = "not-a-real-runner"
     }
 
     #[tokio::test]
+    async fn successful_maintenance_evidence_requires_validation() {
+        let h = harness();
+        let (status, created) = h
+            .post(
+                "/v1/maintenance/proposals",
+                json!({
+                    "trigger_id": "fixture-without-validation",
+                    "lineage_id": "lineage-validation",
+                    "actor": "operator",
+                    "source_revision": "HEAD",
+                    "previous_revision": "parent",
+                    "goal": "reject empty validation"
+                }),
+            )
+            .await;
+        assert_eq!(status, StatusCode::CREATED);
+        let proposal_id = created["proposal"]["proposal_id"].as_str().unwrap();
+        let (status, response) = h
+            .post(
+                &format!("/v1/maintenance/proposals/{proposal_id}/evidence"),
+                json!({
+                    "artifact": "runs/candidate",
+                    "outcome": "ok"
+                }),
+            )
+            .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(
+            response["error"],
+            "successful maintenance evidence requires validation"
+        );
+    }
+
+    #[tokio::test]
     async fn a_wrong_token_is_refused() {
         let h = harness();
         let request = Request::builder()

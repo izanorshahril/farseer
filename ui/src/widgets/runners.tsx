@@ -261,7 +261,7 @@ export function RunnersWidget({ bridge }: { bridge: Bridge }) {
             <div className="row dim small">
               {/* The task's name is its first process's goal - the operator
                   asked for one thing, and everything under it is how. */}
-              <b className="task-title">{task.runs[0]?.title ?? "untitled"}</b>
+              <b className="task-title">{task.runs[0]?.title ? mask(task.runs[0].title, "diagnostic", privacy) : "untitled"}</b>
               <span className="grow" />
               <span className="mono faint">{mask(task.task_id.slice(0, 8), "session", privacy)}</span>
               <span>

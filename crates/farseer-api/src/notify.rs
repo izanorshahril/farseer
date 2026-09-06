@@ -130,11 +130,16 @@ fn poll(state: &AppState, cursor: &mut Seq, warned: &mut HashSet<RunId>) -> Vec<
         }
         // A finished run also stops being hung, so anything held for it goes.
         warned.remove(&event.run_id);
-        let outcome = event
+        let outcome = match event
             .payload
             .get("outcome")
             .and_then(serde_json::Value::as_str)
-            .unwrap_or("finished");
+        {
+            Some("ok" | "success" | "succeeded") => "ok",
+            Some("cancelled" | "canceled") => "cancelled",
+            Some("failed" | "error") => "failed",
+            _ => "finished",
+        };
         out.push(Notification {
             title: format!("farseer: {outcome}"),
             // `09 privacy presentation` makes external notifications use the
@@ -292,7 +297,7 @@ mod tests {
                 EventKind::new(EventKind::RUN_FINISHED),
                 farseer_core::Actor::System,
                 200,
-                serde_json::json!({ "outcome": "ok" }),
+                serde_json::json!({ "outcome": "C:\\Users\\operator\\private.txt" }),
             ))
             .unwrap();
         let mut cursor = 0;
@@ -303,5 +308,7 @@ mod tests {
         assert!(body.contains(&format!("record event {event_seq}")));
         assert!(!body.contains(&run.to_string()));
         assert!(!body.contains("run "));
+        assert_eq!(notifications[0].title, "farseer: finished");
+        assert!(!body.contains("private.txt"));
     }
 }
