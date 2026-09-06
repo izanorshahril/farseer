@@ -30,7 +30,9 @@ pub struct Runtime {
 /// The daemon this shell is talking to.
 pub struct Attached {
     pub runtime: Runtime,
-    /// Keep the child handle alive, but do not tie daemon lifetime to the UI.
+    /// `02 independent runtime lifecycle`: keep the process handle alive during
+    /// shell setup, but do not tie daemon lifetime to the UI; dropping `Child`
+    /// closes the handle without stopping the independently owned runtime.
     _child: Option<Child>,
 }
 

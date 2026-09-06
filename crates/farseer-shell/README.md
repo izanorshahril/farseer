@@ -8,8 +8,8 @@ The runtime remains headless and the webview never receives the operator token.
 ## Runtime and browser boundary
 
 The shell attaches to a running daemon when its runtime file names one that answers.
-If no daemon answers, it starts one as a sidecar and the sidecar dies with the window.
-A daemon started separately outlives the shell.
+If no daemon answers, it starts one as a sidecar and leaves that daemon running when the window closes.
+The daemon lifecycle is controlled through the runtime commands, independently of whether this shell started it.
 Both paths verify that the advertised port answers before accepting the runtime file.
 
 The shell serves the built canvas from `ui/dist` and widget bundles from `ui/dist/widgets`.

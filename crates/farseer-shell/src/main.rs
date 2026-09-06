@@ -103,8 +103,9 @@ fn run() -> anyhow::Result<()> {
         })
         .run(tauri::generate_context!())?;
 
-    // Held until the window closes: dropping it reaps a daemon this shell
-    // started, and leaves alone one it merely attached to.
+    // `02 independent runtime lifecycle`: hold it until the window closes so
+    // the shell keeps its process handle while running; dropping it leaves the
+    // independently owned daemon running.
     drop(attached.owned);
     drop(tokio);
     Ok(())
