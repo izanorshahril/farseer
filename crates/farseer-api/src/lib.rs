@@ -8080,6 +8080,7 @@ runner = "claude-code"
                 .unwrap();
         }
         drop(first);
+        drop(first_state);
 
         let second_cells = tempfile::tempdir().unwrap();
         std::fs::write(
