@@ -38,8 +38,14 @@ pub struct Attached {
 
 /// Read and authenticate the runtime named by the discovery file.
 pub fn attach_existing(expected_data_dir: &str) -> Result<Option<Runtime>> {
-    let path = farseer_api::security::runtime_file_path();
-    let Some(runtime) = read_runtime_file(&path)? else {
+    attach_existing_at(
+        &farseer_api::security::runtime_file_path(),
+        expected_data_dir,
+    )
+}
+
+fn attach_existing_at(path: &Path, expected_data_dir: &str) -> Result<Option<Runtime>> {
+    let Some(runtime) = read_runtime_file(path)? else {
         return Ok(None);
     };
     match verify_classified(&runtime, expected_data_dir) {
@@ -56,7 +62,7 @@ pub fn spawn(binary: &Path, cells: &Path, repo: &Path, record: &Path) -> Result<
     let previous = read_runtime_file(&path)?;
     let expected_data_dir =
         farseer_api::security::data_dir_fingerprint(record.parent().unwrap_or(record));
-    let mut child = Command::new(binary)
+    let child = Command::new(binary)
         .arg("serve")
         .arg("--port")
         .arg("0")
@@ -69,7 +75,23 @@ pub fn spawn(binary: &Path, cells: &Path, repo: &Path, record: &Path) -> Result<
         .spawn()
         .with_context(|| format!("starting {}", binary.display()))?;
 
-    let deadline = Instant::now() + STARTUP_TIMEOUT;
+    wait_for_startup(
+        child,
+        &path,
+        &expected_data_dir,
+        previous.as_ref(),
+        STARTUP_TIMEOUT,
+    )
+}
+
+fn wait_for_startup(
+    mut child: Child,
+    path: &Path,
+    expected_data_dir: &str,
+    previous: Option<&Runtime>,
+    timeout: Duration,
+) -> Result<Attached> {
+    let deadline = Instant::now() + timeout;
     let mut last_observation = "runtime file not published".to_owned();
     while Instant::now() < deadline {
         if let Some(status) = child
@@ -82,7 +104,7 @@ pub fn spawn(binary: &Path, cells: &Path, repo: &Path, record: &Path) -> Result<
             // reporting the losing child exit, then attach only after the same
             // authenticated handshake used by the normal path.
             if let Some(existing) = wait_for_owner(
-                || attach_existing(&expected_data_dir),
+                || attach_existing_at(path, expected_data_dir),
                 OWNER_CONVERGENCE_TIMEOUT,
             )? {
                 return Ok(Attached {
@@ -92,17 +114,14 @@ pub fn spawn(binary: &Path, cells: &Path, repo: &Path, record: &Path) -> Result<
             }
             return fail_child(child, anyhow!("startup: child exited with {status}"));
         }
-        match read_runtime_file(&path) {
+        match read_runtime_file(path) {
             Ok(Some(runtime)) => {
-                if previous
-                    .as_ref()
-                    .is_some_and(|old| same_identity(old, &runtime))
-                {
+                if previous.is_some_and(|old| same_identity(old, &runtime)) {
                     last_observation = "runtime file still names the previous runtime".to_owned();
                     std::thread::sleep(Duration::from_millis(100));
                     continue;
                 }
-                match verify_classified(&runtime, &expected_data_dir) {
+                match verify_classified(&runtime, expected_data_dir) {
                     Ok(runtime) => {
                         if runtime
                             .process_id
@@ -141,7 +160,10 @@ pub fn spawn(binary: &Path, cells: &Path, repo: &Path, record: &Path) -> Result<
     }
     fail_child(
         child,
-        anyhow!("startup: timed out after 20 seconds ({last_observation})"),
+        anyhow!(
+            "startup: timed out after {} seconds ({last_observation})",
+            timeout.as_secs()
+        ),
     )
 }
 
@@ -580,5 +602,47 @@ mod tests {
         assert!(!retryable_discovery_error(&anyhow!(
             "listener returned HTTP 404"
         )));
+    }
+
+    fn command_shell(command: &str) -> Child {
+        let shell = std::env::var_os("ComSpec").unwrap_or_else(|| "cmd.exe".into());
+        Command::new(shell)
+            .args(["/C", command])
+            .spawn()
+            .expect("test command shell")
+    }
+
+    #[test]
+    fn a_child_exit_is_distinct_and_owned_child_is_cleaned_up() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("runtime.json");
+        let error = match wait_for_startup(
+            command_shell("exit 7"),
+            &path,
+            "sha256:test",
+            None,
+            Duration::from_secs(1),
+        ) {
+            Ok(_) => panic!("child exit unexpectedly attached"),
+            Err(error) => error.to_string(),
+        };
+        assert!(error.contains("startup: child exited"), "{error}");
+    }
+
+    #[test]
+    fn a_startup_deadline_is_distinct_and_cleans_up_the_owned_child() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("runtime.json");
+        let error = match wait_for_startup(
+            command_shell("ping -n 8 127.0.0.1 >NUL"),
+            &path,
+            "sha256:test",
+            None,
+            Duration::from_millis(50),
+        ) {
+            Ok(_) => panic!("startup deadline unexpectedly attached"),
+            Err(error) => error.to_string(),
+        };
+        assert!(error.contains("startup: timed out"), "{error}");
     }
 }

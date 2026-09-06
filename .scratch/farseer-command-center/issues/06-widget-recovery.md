@@ -18,8 +18,8 @@
 Each widget owns a bounded loading and error boundary.
 Diagnostics may be expanded, but raw backend traces are not the primary message.
 
-- [ ] A render exception in one built-in or authored widget leaves all sibling widgets and shell controls interactive.
-- [ ] A failed read keeps the last successful projection when available and offers retry, scope reduction, or diagnostics.
+- [x] A render exception in one built-in or authored widget leaves all sibling widgets and shell controls interactive.
+- [x] A failed read keeps the last successful projection when available and offers retry, scope reduction, or diagnostics.
 - [x] Errors identify the affected capability and correlation context without exposing bearer tokens or raw private paths.
 - [x] Stream disconnects show stale or reconnecting state and recover without duplicate event rows.
 - [ ] A failure and recovery demo proves the runtime continues accepting and recording work while the UI widget is broken.
@@ -33,6 +33,8 @@ Diagnostics may be expanded, but raw backend traces are not the primary message.
 `ui/src/WidgetBoundary.tsx` surrounds every first-party and authored widget, so a render exception is localized to that widget.
 `ui/src/ReadFailure.tsx` gives failed reads a capability label, retry action, optional scope reduction, and a bounded incident/status diagnostic without rendering backend messages.
 Conversation, run detail, runner thread, delegation, fleet, projects, quota, work, settings, and list widgets retain prior projections where available and use the shared recovery surface.
+The card body is rendered inside one `WidgetBoundary` per mounted widget in `ui/src/App.tsx`, so the shell controls and sibling cards do not share the failure boundary.
+First-party readers update their projection only after a successful response and render `ReadFailure` with `stale` when a prior projection exists, preserving the last usable data while retry and diagnostics remain available.
 `ui/src/stream.ts` marks EOF and transport errors stale, reconnects from the exclusive cursor, and drops replayed sequence numbers before dispatch.
 `ui/tests/recovery.test.ts` covers diagnostic redaction and duplicate stream-frame suppression.
 `ui/tests/recovery.test.ts` also closes a first stream after one event, observes stale then live state, verifies the exclusive cursor on the second request, and receives the next event without duplication.

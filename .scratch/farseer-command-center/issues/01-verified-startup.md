@@ -6,7 +6,7 @@
 
 **Blocked by:** None; package approved.
 
-**Status:** in-progress; handshake verification and distinct answered-listener errors are implemented, while child-owned cleanup and desktop smoke evidence remain open.
+**Status:** complete.
 
 **Execution:** package approved; verify named blockers before implementation.
 
@@ -18,11 +18,11 @@
 Use an OS-held exclusive per-data-directory ownership lease with an authenticated startup feature handshake.
 Keep unsupported features visible as unavailable rather than silently emulating them.
 
-- [ ] A fresh desktop launch discovers or starts one owner per data directory and verifies authenticated runtime identity, directory fingerprint, build provenance, API version, and enabled features.
-- [ ] A stale, malformed, mismatched, or unauthorized runtime record produces an actionable recovery state and never sends operator commands to an unknown process.
-- [ ] Missing optional capabilities disable only affected views/actions; missing required compatibility yields an actionable connection failure.
+- [x] A fresh desktop launch discovers or starts one owner per data directory and verifies authenticated runtime identity, directory fingerprint, build provenance, API version, and enabled features.
+- [x] A stale, malformed, mismatched, or unauthorized runtime record produces an actionable recovery state and never sends operator commands to an unknown process.
+- [x] Missing optional capabilities disable only affected views/actions; missing required compatibility yields an actionable connection failure.
 - [x] Two simultaneous launches converge on one user-space runtime without requiring elevation or a machine-wide service.
-- [ ] Wrong listener, child exit, and the 20-second startup deadline return distinct errors without a port-zero success; cleanup affects only the child this launch owns.
+- [x] Wrong listener, child exit, and the 20-second startup deadline return distinct errors without a port-zero success; cleanup affects only the child this launch owns.
 
 **Exclusions:** No cloud discovery, installer service, plugin ABI, or new transport.
 
@@ -38,6 +38,9 @@ Startup timeout errors now retain the last observed cause, such as an unpublishe
 Malformed discovery files now remain explicit startup errors before a new child is spawned rather than being treated as an absent runtime, with a focused regression for the malformed-file path.
 Discovery records for an answered wrong listener or unauthorized runtime now fail distinctly; only unreachable stale endpoints are retryable during launch convergence.
 When two shells race, the loser now waits briefly for the winner that holds the data-directory lease, re-verifies its authenticated runtime identity, and attaches without claiming ownership of the winner's child.
-`runtime::tests::only_unreachable_discovery_errors_are_retryable` and `runtime::tests::a_losing_launch_reuses_the_verified_owner_after_its_child_exits` cover the classification and retry seams; child-owned cleanup and desktop smoke demonstrations remain open.
+`runtime::tests::only_unreachable_discovery_errors_are_retryable` and `runtime::tests::a_losing_launch_reuses_the_verified_owner_after_its_child_exits` cover the classification and retry seams, with the desktop smoke recorded below.
+The isolated startup wait regression now covers an owned child exiting and a bounded deadline, and both return distinct errors after the helper cleans the child it owns.
+The 2026-09-06 fresh desktop smoke started a new daemon from an absent runtime file, served the canvas on a shell-owned loopback origin, and returned HTTP 200 for both the canvas and compiled widget manifest.
+Optional resource collection remains local to run detail and settings: `RunWidget` keeps the run projection usable when its resource read is unavailable, while `SettingsWidget` hides the resource toggle when the optional runtime route is absent.
 The Windows health probe no longer shuts down its request side before reading the response, because that half-close made the real Axum listener return an empty response even though curl and PowerShell succeeded.
 The fake listener now answers after the HTTP header terminator, and a real `cargo run -p farseer-shell` attached to the live daemon and served its canvas after the fix.

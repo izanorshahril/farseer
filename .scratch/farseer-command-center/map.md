@@ -100,3 +100,17 @@ The project-team regression now accepts two nominated specialist cell calls, rec
 ## Status correction, 2026-09-06 implementation wave 9
 
 The widget recovery acceptance now marks bounded error identity and redaction complete; render isolation, retained-read demonstration, and runtime-continuity E2E remain open.
+
+## Status correction, 2026-09-06 implementation wave 10
+
+The startup wait seam now has isolated child-exit and deadline regressions that verify distinct errors and cleanup of the child owned by that launch.
+The remaining startup gap is the full desktop capability and fresh-launch smoke demonstration.
+
+## Status correction, 2026-09-06 implementation wave 11
+
+Verified startup is complete: isolated child-exit and deadline cleanup tests, malformed/stale/mismatch/unauthorized classification, optional resource degradation, and a fresh `cargo run -p farseer-shell` smoke all pass.
+
+## Status correction, 2026-09-06 implementation wave 12
+
+Widget recovery's structural render isolation and stale-projection read behavior are now accepted from the App boundary and first-party reader implementations.
+The remaining item is one browser failure/recovery demonstration that proves the runtime continues recording work while a widget is broken.
