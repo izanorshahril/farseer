@@ -23,6 +23,8 @@ pub struct Runtime {
     pub api_version: String,
     pub build_provenance: String,
     pub features: Vec<String>,
+    #[serde(default)]
+    pub process_id: Option<u32>,
 }
 
 /// The daemon this shell is talking to.
@@ -100,6 +102,17 @@ pub fn spawn(binary: &Path, cells: &Path, repo: &Path, record: &Path) -> Result<
                 }
                 match verify_classified(&runtime, &expected_data_dir) {
                     Ok(runtime) => {
+                        if runtime
+                            .process_id
+                            .is_some_and(|process_id| process_id != child.id())
+                        {
+                            let _ = child.kill();
+                            let _ = child.wait();
+                            return Ok(Attached {
+                                runtime,
+                                _child: None,
+                            });
+                        }
                         return Ok(Attached {
                             runtime,
                             _child: Some(child),
@@ -243,6 +256,13 @@ fn verify_classified(runtime: &Runtime, expected_data_dir: &str) -> Result<Runti
             "startup: runtime build identity mismatch"
         )));
     }
+    if let Some(process_id) = runtime.process_id
+        && health["process_id"] != serde_json::json!(process_id)
+    {
+        return Err(VerifyError::Incompatible(anyhow!(
+            "startup: runtime process identity mismatch"
+        )));
+    }
     if runtime.build_provenance != format!("farseer-api/{}", env!("CARGO_PKG_VERSION")) {
         return Err(VerifyError::Incompatible(anyhow!(
             "startup: incompatible runtime build {}",
@@ -355,6 +375,7 @@ mod tests {
                 .iter()
                 .map(|feature| (*feature).into())
                 .collect(),
+            process_id: None,
         }
     }
 
@@ -384,6 +405,7 @@ mod tests {
             "data_dir_fingerprint": runtime.data_dir_fingerprint,
             "build_provenance": runtime.build_provenance,
             "features": runtime.features,
+            "process_id": runtime.process_id,
         })
     }
 
@@ -449,6 +471,17 @@ mod tests {
         );
         let error = verify(&runtime, "sha256:data").unwrap_err().to_string();
         assert!(error.contains("feature"), "{error}");
+    }
+
+    #[test]
+    fn process_identity_is_checked_when_present() {
+        let mut runtime = runtime(0);
+        runtime.process_id = Some(41);
+        let mut body = health_body(&runtime);
+        body["process_id"] = serde_json::json!(42);
+        runtime.port = listener(200, body);
+        let error = verify(&runtime, "sha256:data").unwrap_err().to_string();
+        assert!(error.contains("process identity"), "{error}");
     }
 
     #[test]

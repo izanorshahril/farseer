@@ -168,6 +168,10 @@ pub struct RuntimeIdentity {
     pub api_version: String,
     pub build_provenance: String,
     pub features: Vec<String>,
+    /// The process that owns the data-directory lease and published this
+    /// record.  Optional for records written by older runtimes.
+    #[serde(default)]
+    pub process_id: Option<u32>,
 }
 
 pub fn write_runtime_file_with_identity(

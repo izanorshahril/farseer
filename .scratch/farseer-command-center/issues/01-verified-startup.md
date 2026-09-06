@@ -33,6 +33,7 @@ Keep unsupported features visible as unavailable rather than silently emulating 
 Implemented in `crates/farseer-api/src/security.rs`, `crates/farseer-api/src/lib.rs`, and `crates/farseer-shell/src/runtime.rs`.
 `cargo test -p farseer-shell runtime::tests` passes all three handshake tests.
 The shell rejects empty ports, empty tokens, mismatched data fingerprints, incompatible identity, wrong listeners, and missing required features, and leaves successful sidecars alive after UI exit.
+The authenticated discovery identity now carries an optional owner process id, and a launcher kills its own child before attaching when the record belongs to another process; legacy records without that field remain attachable.
 Startup timeout errors now retain the last observed cause, such as an unpublished runtime file, a previous-runtime identity, or an unauthenticated health response, instead of collapsing every failure into one opaque timeout.
 Malformed discovery files now remain explicit startup errors before a new child is spawned rather than being treated as an absent runtime, with a focused regression for the malformed-file path.
 Discovery records for an answered wrong listener or unauthorized runtime now fail distinctly; only unreachable stale endpoints are retryable during launch convergence.

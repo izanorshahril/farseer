@@ -880,6 +880,7 @@ pub async fn serve(state: Arc<AppState>, port: u16) -> std::io::Result<()> {
             .iter()
             .map(|feature| (*feature).into())
             .collect(),
+        process_id: Some(std::process::id()),
     };
     security::write_runtime_file_with_identity(
         &runtime_file_path(),
@@ -1038,6 +1039,7 @@ async fn health(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
         "data_dir_fingerprint": security::data_dir_fingerprint(data_dir),
         "build_provenance": format!("farseer-api/{}", env!("CARGO_PKG_VERSION")),
         "features": RUNTIME_FEATURES,
+        "process_id": std::process::id(),
         "lifecycle": state.runtime_status(),
     }))
 }
