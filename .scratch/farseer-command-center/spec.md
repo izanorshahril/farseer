@@ -1,5 +1,8 @@
 # Farseer Command Center and Self-Maintenance
 
+> Current status, 2026-09-06: package approved and implementation in progress.
+> Original review-gate language below is historical; use [the ticket index](tickets.md) for remaining work.
+
 Status: `proposed-awaiting-single-review`.
 
 This document is the consolidated specification for one review before coding.

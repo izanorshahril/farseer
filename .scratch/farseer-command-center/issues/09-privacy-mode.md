@@ -4,11 +4,11 @@
 
 **What to build:** Add a screenshot-safe presentation mode that masks configured identities and sensitive locators across first-party command-center views.
 
-**Blocked by:** None (eligible only after package approval).
+**Blocked by:** None; package approved.
 
-**Status:** proposed-awaiting-review.
+**Status:** not-started.
 
-**Execution:** blocked until the command-center ticket package receives one final approval.
+**Execution:** package approved; verify named blockers before implementation.
 
 **Review refs:** R05; R13 applies as targeted cleanup within this slice.
 

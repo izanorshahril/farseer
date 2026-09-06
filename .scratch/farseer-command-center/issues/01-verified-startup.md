@@ -4,11 +4,11 @@
 
 **What to build:** Make startup prove which local runtime and feature set the desktop client is connected to before the command center becomes interactive.
 
-**Blocked by:** None (eligible only after package approval).
+**Blocked by:** None; package approved.
 
 **Status:** implemented.
 
-**Execution:** blocked until the command-center ticket package receives one final approval.
+**Execution:** package approved; verify named blockers before implementation.
 
 **Review refs:** R01; R13 applies as targeted cleanup within this slice.
 

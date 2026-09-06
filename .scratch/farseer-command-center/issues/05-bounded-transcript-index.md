@@ -2,9 +2,9 @@
 
 **Parent:** [Command-center decision map](../map.md).
 **What to build:** Make existing transcript attachment/index operations bounded and independently recoverable, with visible pending, complete, truncated, and failed states.
-**Blocked by:** None (eligible only after package approval).
-**Status:** implemented.
-**Execution:** blocked until the command-center package receives its single approval.
+**Blocked by:** None; package approved.
+**Status:** partial.
+**Execution:** package approved; verify named blockers before implementation.
 **Review refs:** R02, R06; R13 applies as targeted cleanup.
 **Decision:** [Bounded record views and optional analysis](../decisions/02-data.md).
 
@@ -34,3 +34,8 @@ Retried or purged source work must not resurrect stale derived edges.
 Implemented in `crates/farseer-api/src/work.rs`, `crates/farseer-store/src/work.rs`, and `crates/farseer-store/src/lifecycle.rs`.
 Reads enforce the 16 MiB cap while streaming, candidate rows and text are bounded, similarity is capped to the top 20 positive edges, source digests are rechecked before commit, and purge removes orphaned derived data.
 Focused bounded-candidate, projection-commit, store, format, and API checks pass.
+
+## Completion correction, 2026-09-06
+
+The earlier implemented label covered bounded reads and projection only.
+Background queueing and operator-visible pending/complete/failed analysis states remain unimplemented; finish and verify those acceptance criteria before closure.

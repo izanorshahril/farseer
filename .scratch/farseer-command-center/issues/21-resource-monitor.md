@@ -3,7 +3,7 @@
 **Parent:** [Command-center decision map](../map.md).
 **What to build:** Show measured resource use for supervised work and retain its final totals, while monitoring can be disabled without affecting execution.
 **Blocked by:** [Independent runtime lifecycle](02-independent-runtime.md), [Attributed usage](12-attributed-usage.md), [Recoverable schema](16-recoverable-schema.md)
-**Status:** proposed-awaiting-review.
+**Status:** not-started.
 **Execution gate:** the single package approval is required in addition to the named blockers.
 **Review refs:** R07; R13 applies as targeted cleanup within this slice.
 **Decision:** [Bounded record views and optional analysis](../decisions/02-data.md).

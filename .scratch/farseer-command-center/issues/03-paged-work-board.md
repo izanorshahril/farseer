@@ -4,11 +4,11 @@
 
 **What to build:** Make global and project kanban views read durable work through bounded projections that remain usable as farseer monitors itself and many projects.
 
-**Blocked by:** None (eligible only after package approval).
+**Blocked by:** None; package approved.
 
 **Status:** implemented.
 
-**Execution:** blocked until the command-center ticket package receives one final approval.
+**Execution:** package approved; verify named blockers before implementation.
 
 **Review refs:** R02, R03; R13 applies as targeted cleanup within this slice.
 

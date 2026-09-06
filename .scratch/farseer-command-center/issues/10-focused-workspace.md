@@ -6,9 +6,9 @@
 
 **Blocked by:** [Widget recovery and isolation](06-widget-recovery.md), [Explicit composer context](07-explicit-composer-context.md), [Responsive canvas layout](08-responsive-canvas.md)
 
-**Status:** proposed-awaiting-review.
+**Status:** not-started.
 
-**Execution:** blocked until the command-center ticket package receives one final approval.
+**Execution:** package approved; verify named blockers before implementation.
 
 **Review refs:** R05; R13 applies as targeted cleanup within this slice.
 

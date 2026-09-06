@@ -3,7 +3,8 @@
 A local-first agent orchestration runtime for Windows.
 One operator, one Rust binary, no required external services.
 
-**Status: `main` contains the current foundation and a Claude Code manager can delegate to a real roster worker.**
+**Status: the foundation is implemented; the approved command-center backlog is partly implemented.**
+Start with [the active work map](.scratch/farseer-command-center/map.md) for next work and [document routing](.scratch/README.md) for retained decisions and Git-only history.
 The original v1 decision route is complete through ticket 28, while follow-on tickets through 40 record implementation corrections, shipped surfaces and a small set of open boundaries.
 Use the map and linked tickets as the specification rather than treating the historical research drafts as current plans.
 `POST /v1/cells/{id}/instruct` runs a cell's manager against a goal and returns a `run_id` immediately.
@@ -109,18 +110,19 @@ An external protocol is spoken at a boundary, never shaped into internals.
 │  ├─ zero.toml        cell #0, the builder harness
 │  └─ social.toml      the second cell, thinner on purpose
 ├─ runners.toml        machine-wide runner facts: which account each signs in with, and where quota is read
-├─ BRIEF.md            historical research and the questions that led to the map
-├─ ARCHITECTURE.md     historical proposal with links to the current map
 ├─ HARNESS.md          runner contract and harness research
 ├─ DESIGN.md           current UI design decisions and production surface
 ├─ PRODUCT.md          current product framing and scope
 ├─ AGENTS.md           conventions for agents working here
-├─ REVIEW.md           current implementation and documentation status
+├─ PROJECT_REVIEW_2026-09-06.md  dated critique and recommendations
 ├─ CLAUDE.md           pointer to the repository instructions
+├─ .scratch/README.md   document routing, retention, and recovery
+├─ .scratch/farseer-command-center/  active map, spec, decisions, and implementation tickets
 └─ .scratch/farseer/
    ├─ map.md           the decision route: destination, decisions, fog, out of scope
    ├─ issues/          original decisions plus follow-on implementation tickets
    ├─ research/        compaction, hang detection, headless UI boundary
+   ├─ runtime-reference.md  implementation notes and machine probes; read on demand
    ├─ prototypes/      one operator turn, end to end
    └─ spikes/          jobspike, wsspike, storebench
 ```

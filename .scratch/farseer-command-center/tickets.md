@@ -1,33 +1,33 @@
 # Implementation ticket index
 
-**Status:** proposed-awaiting-review.
+**Status:** approved; implementation in progress.
 **Parent:** [Command-center decision map](map.md).
 **Review:** [Read the short decision review](REVIEW.md) before opening individual tickets.
 
 Approval is a package-wide gate and is not repeated as a dependency edge below.
-After approval, any ticket whose named blockers are complete is eligible; take Verified startup first by priority.
+Approval is recorded in the parent map; select an unfinished ticket whose named blockers are complete.
 Each ticket is one complete observable slice through the necessary layers, not a separate schema/API/UI assignment.
 Refactoring from review packet R13 stays within the slice that requires it.
-The five proposed decisions govern contracts; the specification governs behavior; each ticket defines its acceptance.
+The five adopted decisions govern contracts; the specification governs behavior; each ticket defines its acceptance.
 
 ## Runtime and bounded reads
 
 | Ticket | Blocked by | Review packets |
 | --- | --- | --- |
-| [Verified startup](issues/01-verified-startup.md) | None (eligible only after package approval). | R01 |
+| [Verified startup](issues/01-verified-startup.md) | None; package approved. | R01 |
 | [Independent runtime lifecycle](issues/02-independent-runtime.md) | [Verified startup](issues/01-verified-startup.md) | R01 |
-| [Paged work board](issues/03-paged-work-board.md) | None (eligible only after package approval). | R02, R03 |
+| [Paged work board](issues/03-paged-work-board.md) | None; package approved. | R02, R03 |
 | [Scoped orchestration graph](issues/04-scoped-graph.md) | [Paged work board](issues/03-paged-work-board.md) | R02, R06 |
-| [Bounded transcript projection](issues/05-bounded-transcript-index.md) | None (eligible only after package approval). | R02, R06 |
+| [Bounded transcript projection](issues/05-bounded-transcript-index.md) | None; package approved. | R02, R06 |
 
 ## Reliable operator views
 
 | Ticket | Blocked by | Review packets |
 | --- | --- | --- |
-| [Widget recovery and isolation](issues/06-widget-recovery.md) | None (eligible only after package approval). | R03 |
-| [Explicit composer context](issues/07-explicit-composer-context.md) | None (eligible only after package approval). | R04 |
-| [Responsive canvas layout](issues/08-responsive-canvas.md) | None (eligible only after package approval). | R05 |
-| [Privacy presentation mode](issues/09-privacy-mode.md) | None (eligible only after package approval). | R05 |
+| [Widget recovery and isolation](issues/06-widget-recovery.md) | None; package approved. | R03 |
+| [Explicit composer context](issues/07-explicit-composer-context.md) | None; package approved. | R04 |
+| [Responsive canvas layout](issues/08-responsive-canvas.md) | None; package approved. | R05 |
+| [Privacy presentation mode](issues/09-privacy-mode.md) | None; package approved. | R05 |
 | [Focused workspace](issues/10-focused-workspace.md) | [Widget recovery and isolation](issues/06-widget-recovery.md), [Explicit composer context](issues/07-explicit-composer-context.md), [Responsive canvas layout](issues/08-responsive-canvas.md) | R05 |
 
 ## Sessions and orchestration
@@ -44,10 +44,10 @@ The five proposed decisions govern contracts; the specification governs behavior
 
 | Ticket | Blocked by | Review packets |
 | --- | --- | --- |
-| [Recoverable schema and backup](issues/16-recoverable-schema.md) | None (eligible only after package approval). | R14 |
+| [Recoverable schema and backup](issues/16-recoverable-schema.md) | None; package approved. | R14 |
 | [Bounded maintenance source proposals](issues/17-maintenance-proposals.md) | [Independent runtime lifecycle](issues/02-independent-runtime.md), [Project team profiles](issues/14-project-teams.md). | R11 |
 | [Safe staged runtime promotion](issues/18-safe-runtime-promotion.md) | [Independent runtime lifecycle](issues/02-independent-runtime.md), [Recoverable schema and backup](issues/16-recoverable-schema.md), [Bounded maintenance source proposals](issues/17-maintenance-proposals.md). | R11, R14 |
-| [Honest tool authority](issues/19-honest-tool-authority.md) | None (eligible only after package approval). | R15 |
+| [Honest tool authority](issues/19-honest-tool-authority.md) | None; package approved. | R15 |
 | [Noncoding artifact-manifest pipeline](issues/20-noncoding-pipeline.md) | [Project team profiles](issues/14-project-teams.md), [Honest tool authority](issues/19-honest-tool-authority.md). | R12 |
 
 ## Optional resource observations
@@ -88,6 +88,15 @@ Use GPT-5.6 Luna for any delegated work and reasoning no higher than xhigh, as t
 No paid or external action is inferred from a deterministic test requirement.
 New dependencies must be checked, exact-pinned, and optional where this plan says they are optional.
 
-Done: 21 proposed slices linked to all 15 review packets.
-Next after approval: [Verified startup](issues/01-verified-startup.md).
+Done: 21 approved slices linked to all 15 review packets; implementation remains partial.
+Next: finish [Bounded transcript projection](issues/05-bounded-transcript-index.md), including its background queue and visible analysis states.
 
+
+## Status clarification, 2026-09-06
+
+Approval is complete; earlier proposal and execution-gate wording is historical.
+Four tickets are recorded implemented: Verified startup, Paged work board, Recoverable schema and backup, and Honest tool authority.
+Bounded transcript projection is partial: bounded reads and projection exist, but the background queue and pending/complete/failed UI contract remain open.
+Widget recovery and Explicit composer context are in progress.
+The other fourteen tickets are not started; dependency completion still governs eligibility.
+These are the prior implementation audit results, not a new code verification performed during document cleanup.

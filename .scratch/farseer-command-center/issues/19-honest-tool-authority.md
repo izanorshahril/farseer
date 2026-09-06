@@ -2,9 +2,9 @@
 
 **Parent:** [Command-center decision map](../map.md).
 **What to build:** Make declared capabilities, enforced tool levels, and unavailable tool-serving paths unambiguous in validation and the operator view.
-**Blocked by:** None (eligible only after package approval).
+**Blocked by:** None; package approved.
 **Status:** implemented.
-**Execution:** blocked until the command-center package receives its single approval.
+**Execution:** package approved; verify named blockers before implementation.
 **Review refs:** R15; R13 applies as targeted cleanup.
 **Decision:** [Self-maintenance and domain integration](../decisions/05-maintenance.md).
 

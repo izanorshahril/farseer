@@ -6,9 +6,9 @@
 
 **Blocked by:** [Attributed usage](12-attributed-usage.md)
 
-**Status:** proposed-awaiting-review.
+**Status:** not-started.
 
-**Execution:** blocked until the command-center ticket package receives one final approval.
+**Execution:** package approved; verify named blockers before implementation.
 
 **Review refs:** R08; R13 applies as targeted cleanup within this slice.
 

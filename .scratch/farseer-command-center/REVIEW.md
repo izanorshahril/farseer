@@ -1,5 +1,8 @@
 # Review once: Farseer's next build
 
+> Current status, 2026-09-06: package approved and implementation in progress.
+> Original review-gate language below is historical; use [the ticket index](tickets.md) for remaining work.
+
 **Read this page, then reply `Approve plan` or name the decisions you want changed.**
 Estimated reading time: 4 minutes.
 Branch: `codex/command-center-plan`.

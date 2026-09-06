@@ -7,7 +7,7 @@
 - The accepted static prototype at `.scratch/farseer/prototypes/berd-home/` is the approval reference for this production translation.
 - This record describes the shipped production files; the source is authoritative over stale review captures after layout changes.
 - Sources are `ui/index.html`, `ui/src/App.tsx`, `ui/src/style.css`, `ui/src/widgets/work.tsx`, and the other built widgets under `ui/src/widgets/`.
-- `.impeccable/review/production-desktop.png` and `.impeccable/review/production-mobile.png` preserve the approved version-six composition rather than the configurable version-eight arrangement.
+- The former version-six captures and .impeccable metadata are [Git-only history](.scratch/README.md#git-only-history); current source and active tickets govern layout changes.
 - The production client keeps the canvas as the only home surface, with every detailed surface represented as a widget on that canvas.
 
 ## Product intent

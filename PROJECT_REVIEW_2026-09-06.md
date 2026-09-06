@@ -5,7 +5,7 @@ Review snapshot: `e9d2e76975d7802c50b501f79d3184cc0bd0e543`, including the uncom
 Scope: user feedback, architecture, maintainability, UI/UX, self-maintenance, multiple harnesses per project, routing, and future domain integrations.
 This is a review and proposed work sequence, not an approved replacement specification.
 No product code was changed for this review.
-The existing [REVIEW.md](REVIEW.md) remains a separate implementation-status document.
+The former root REVIEW.md is [Git-only history](.scratch/README.md#git-only-history); use the [active ticket index](.scratch/farseer-command-center/tickets.md) for implementation status.
 
 ## 1. Recommendation
 
@@ -35,7 +35,7 @@ Those would add maintenance before resolving the observed gaps.
 ### Review method
 
 The local [decision map](.scratch/farseer/map.md), linked tickets, [AGENTS.md](AGENTS.md), and current source were used as the specification and implementation baseline.
-Historical proposals in [ARCHITECTURE.md](ARCHITECTURE.md) and [BRIEF.md](BRIEF.md) were not treated as current implementation facts.
+Historical proposals in [ARCHITECTURE.md](.scratch/README.md#git-only-history) and [BRIEF.md](.scratch/README.md#git-only-history) were not treated as current implementation facts.
 Three bounded GPT-5.6 Luna reviews covered architecture/spec, code/UI quality, and primary-source reference research.
 The source review was repository-wide, not a branch-diff review.
 

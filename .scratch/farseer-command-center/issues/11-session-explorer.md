@@ -6,9 +6,9 @@
 
 **Blocked by:** [Bounded transcript projection](05-bounded-transcript-index.md), [Focused workspace](10-focused-workspace.md)
 
-**Status:** proposed-awaiting-review.
+**Status:** not-started.
 
-**Execution:** blocked until the command-center ticket package receives one final approval.
+**Execution:** package approved; verify named blockers before implementation.
 
 **Review refs:** R06; R13 applies as targeted cleanup within this slice.
 

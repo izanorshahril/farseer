@@ -2,9 +2,9 @@
 
 **Parent:** [Command-center decision map](../map.md).
 **What to build:** Upgrade or restore a local record through an explicit versioned storage contract, and make failure recoverable before any automatic installation change.
-**Blocked by:** None (eligible only after package approval).
+**Blocked by:** None; package approved.
 **Status:** implemented.
-**Execution:** blocked until the command-center package receives its single approval.
+**Execution:** package approved; verify named blockers before implementation.
 **Review refs:** R14; R13 applies as targeted cleanup.
 **Decision:** [Self-maintenance and domain integration](../decisions/05-maintenance.md).
 

@@ -3,8 +3,8 @@
 **Parent:** [Command-center decision map](../map.md).
 **What to build:** Let Farseer maintain its own repository as an ordinary project by creating an isolated candidate change with reproduction and validation evidence.
 **Blocked by:** [Independent runtime lifecycle](02-independent-runtime.md), [Project team profiles](14-project-teams.md).
-**Status:** proposed-awaiting-review.
-**Execution:** blocked until the command-center package receives its single approval.
+**Status:** not-started.
+**Execution:** package approved; verify named blockers before implementation.
 **Review refs:** R11; R13 applies as targeted cleanup.
 **Decision:** [Self-maintenance and domain integration](../decisions/05-maintenance.md).
 

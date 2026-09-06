@@ -3,8 +3,8 @@
 **Parent:** [Command-center decision map](../map.md).
 **What to build:** Run a deterministic local artifact-manifest job in an authorized plain-directory project using existing task/run and worker supervision.
 **Blocked by:** [Project team profiles](14-project-teams.md), [Honest tool authority](19-honest-tool-authority.md).
-**Status:** proposed-awaiting-review.
-**Execution:** blocked until the command-center package receives its single approval.
+**Status:** not-started.
+**Execution:** package approved; verify named blockers before implementation.
 **Review refs:** R12; R13 applies as targeted cleanup.
 **Decision:** [Self-maintenance and domain integration](../decisions/05-maintenance.md).
 

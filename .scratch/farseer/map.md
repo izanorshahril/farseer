@@ -407,3 +407,10 @@ That is legitimate, and is not the agent answering its own questions.
 - **The bug was mechanical; the question underneath is not.** `zero.toml` declares a worktree strategy, which needs a git repository, so farseer's own default address cannot run in an installed application at all. Whether farseer is a tool you run **inside** a project or an application that **points at** projects has never been decided - the record already assumes the second, everything else assumes the first, and nothing forced the question until there was an installer. The mechanical part was built and no policy was invented: three search paths, nothing seeded, and the canvas names the places it looked.
 
 - `40 work model and session explorer` **closed 2026-09-04** from the operator UX review and primary-source session-graph research. It adds durable conversations and task boards without changing the meanings of task, run, session, project, record, memory, or attachment. No surveyed open project combined Farseer's causal topology, cross-project semantic similarity, and local custody model end to end, so Farseer keeps SQLite as truth and borrows only protocols and interaction patterns.
+
+## Documentation routing correction, 2026-09-06
+
+The command-center package is approved and its [active map](../farseer-command-center/map.md) tracks follow-on implementation.
+Original decisions and corrections here remain relevant contracts, not a second current implementation backlog.
+Root BRIEF.md, ARCHITECTURE.md, and REVIEW.md now live in [Git-only history](../README.md#git-only-history).
+Load historical evidence only for a specific decision or regression.

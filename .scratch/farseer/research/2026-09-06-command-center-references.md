@@ -6,7 +6,7 @@ Scope: primary-source verification of Berd, Orca, Hermes Agent, and NVIDIA NeMo 
 
 The local inspiration list names Hermes as a self-improvement reference and Orca as the closest orchestration reference in [Inspirationst.txt](../../../Inspirationst.txt), lines 16 and 22.
 
-The historical [BRIEF.md](../../../BRIEF.md), line 54 onward, discusses runner routing separately from token routing and optional board/router surfaces.
+The historical [BRIEF.md](../../README.md#git-only-history), line 54 onward, discusses runner routing separately from token routing and optional board/router surfaces.
 Use the current decision map and implementation rather than that historical brief as authority for shipped behavior.
 
 ## Verified references

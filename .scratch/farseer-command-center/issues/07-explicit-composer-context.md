@@ -4,11 +4,11 @@
 
 **What to build:** Make every operator request visibly and deliberately target a conversation, project, and optional declared harness choice while preserving top-manager ingress.
 
-**Blocked by:** None (eligible only after package approval).
+**Blocked by:** None; package approved.
 
 **Status:** in-progress.
 
-**Execution:** blocked until the command-center ticket package receives one final approval.
+**Execution:** package approved; verify named blockers before implementation.
 
 **Review refs:** R04; R13 applies as targeted cleanup within this slice.
 

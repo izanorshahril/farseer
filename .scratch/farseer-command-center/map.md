@@ -1,16 +1,16 @@
 # Map: Farseer command center and self-maintenance
 
 Label: `wayfinder:map`.
-Status: `awaiting-single-review`.
+Status: approved; implementation in progress.
 Branch: `codex/command-center-plan`.
 Baseline: `e9d2e76975d7802c50b501f79d3184cc0bd0e543` plus the inherited uncommitted review snapshot.
 
 ## Destination
 
 One reviewable decision package, specification, and dependency-linked implementation backlog for a robust headless Farseer with customizable operator views, project teams, economical routing, and bounded self-maintenance.
-This effort ends at the operator's single review; product implementation is not part of this planning turn.
+The original planning turn ended at review; the operator subsequently approved implementation.
 
-## Notes
+## Original planning notes (historical; approval recorded below)
 
 Open [the short review](REVIEW.md) for nominees, selected recommendations, costs, and the approval boundary.
 Open [the specification](spec.md) for behavior and test seams.
@@ -46,9 +46,9 @@ The package remains the implementation source of truth while work proceeds beyon
 
 ## Decisions so far
 
-No new decision is operator-adopted yet.
-The proposed resolutions live only in their five decision tickets, reached from the short review.
-After approval, append one named pointer per adopted resolution here; keep the detailed rationale in its decision ticket.
+The five decisions are adopted under the package approval recorded above.
+The resolutions and their original rationale live in the five decision tickets, reached from the short review.
+Adopted resolutions: [runtime ownership](decisions/01-runtime.md), [bounded data](decisions/02-data.md), [operator workspace](decisions/03-workspace.md), [routing](decisions/04-routing.md), and [maintenance](decisions/05-maintenance.md).
 
 ## Not yet specified
 
@@ -66,5 +66,5 @@ An unexpected failure of an acceptance contract is evidence to update that ticke
 | Direct project-manager ingress | Existing top-manager ownership remains; revisit with measured coordination cost |
 | Live trading/publishing, remote hosts, cross-platform rollout | Separate domain/deployment projects; the local manifest pilot proves the interface first |
 
-Done: route selected as a proposal, ready for one package review.
-Next: open [the short review](REVIEW.md).
+Done: package approved; implementation partly complete.
+Next: select unfinished work from [the ticket index](tickets.md); verify named blockers and acceptance criteria.
