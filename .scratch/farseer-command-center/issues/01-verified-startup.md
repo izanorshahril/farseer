@@ -39,3 +39,5 @@ Malformed discovery files now remain explicit startup errors before a new child 
 Discovery records for an answered wrong listener or unauthorized runtime now fail distinctly; only unreachable stale endpoints are retryable during launch convergence.
 When two shells race, the loser now waits briefly for the winner that holds the data-directory lease, re-verifies its authenticated runtime identity, and attaches without claiming ownership of the winner's child.
 `runtime::tests::only_unreachable_discovery_errors_are_retryable` and `runtime::tests::a_losing_launch_reuses_the_verified_owner_after_its_child_exits` cover the classification and retry seams; child-owned cleanup and desktop smoke demonstrations remain open.
+The Windows health probe no longer shuts down its request side before reading the response, because that half-close made the real Axum listener return an empty response even though curl and PowerShell succeeded.
+The fake listener now answers after the HTTP header terminator, and a real `cargo run -p farseer-shell` attached to the live daemon and served its canvas after the fix.

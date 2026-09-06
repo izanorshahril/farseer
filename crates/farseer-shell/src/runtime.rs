@@ -312,7 +312,11 @@ fn health(runtime: &Runtime) -> Result<serde_json::Value> {
         runtime.port, runtime.token
     )?;
     stream.flush()?;
-    stream.shutdown(std::net::Shutdown::Write)?;
+    // `01 verified startup`: `Connection: close` already bounds this response.
+    // On Windows, a local write-half shutdown can make hyper drop the response
+    // before this reader sees it, even though the same request succeeds when
+    // the write side stays open.  Keep the socket open until the server closes
+    // it.
     let mut response = Vec::new();
     stream.read_to_end(&mut response)?;
     let (headers, body) = response
@@ -387,8 +391,19 @@ mod tests {
         let port = listener.local_addr().unwrap().port();
         thread::spawn(move || {
             let (mut stream, _) = listener.accept().unwrap();
+            // `01 verified startup`: the production Axum listener answers as
+            // soon as the HTTP header terminator arrives.  Waiting for EOF here
+            // would only work with the old client half-close and would miss
+            // the Windows behavior this seam is meant to cover.
             let mut request = Vec::new();
-            let _ = stream.read_to_end(&mut request);
+            let mut chunk = [0_u8; 512];
+            while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+                let read = stream.read(&mut chunk).unwrap();
+                if read == 0 {
+                    break;
+                }
+                request.extend_from_slice(&chunk[..read]);
+            }
             let bytes = body.to_string();
             let response = format!(
                 "HTTP/1.1 {status} OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{bytes}",
@@ -410,6 +425,43 @@ mod tests {
             "features": runtime.features,
             "process_id": runtime.process_id,
         })
+    }
+
+    #[test]
+    fn health_keeps_the_write_side_open_until_the_listener_answers() {
+        let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let body = health_body(&runtime(port));
+        thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = Vec::new();
+            let mut chunk = [0_u8; 512];
+            while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+                let read = stream.read(&mut chunk).unwrap();
+                if read == 0 {
+                    return;
+                }
+                request.extend_from_slice(&chunk[..read]);
+            }
+            // `01 verified startup`: a client that half-closes before the
+            // response makes this read return zero.  The real Axum listener
+            // then drops the response; keep the test's refusal explicit so the
+            // regression stays local.
+            stream
+                .set_read_timeout(Some(Duration::from_millis(250)))
+                .unwrap();
+            let mut probe = [0_u8; 1];
+            if matches!(stream.read(&mut probe), Ok(0)) {
+                return;
+            }
+            let bytes = body.to_string();
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{bytes}",
+                bytes.len()
+            );
+            stream.write_all(response.as_bytes()).unwrap();
+        });
+        assert!(health(&runtime(port)).is_ok());
     }
 
     #[test]

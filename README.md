@@ -136,7 +136,7 @@ An external protocol is spoken at a boundary, never shaped into internals.
 cargo run
 ```
 
-Opens the desktop shell, which is what running farseer means: it attaches to a daemon already on this machine or starts one itself, serves the canvas on a loopback port of its own, and proxies `/v1` with the operator token attached on its side - so the page it loads is one origin and never holds a credential.
+Opens the desktop shell, which is what running farseer means: it attaches to a daemon already on this machine or starts one itself, verifies the authenticated runtime handshake, serves the canvas on a loopback port of its own, and proxies `/v1` with the operator token attached on its side - so the page it loads is one origin and never holds a credential.
 It also puts the most constrained subscription window in the system tray. See [Tray](#tray).
 
 Build the canvas once first, and rebuild it after any `ui/` change, because `cargo run` serves the compiled `ui/dist` rather than the Vite source:

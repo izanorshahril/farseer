@@ -4249,7 +4249,26 @@ runner = "farseer-test-missing-runner"
             .find(|event| event.kind == EventKind::CELL_CALLED.into())
             .expect("accepted specialist call is recorded");
         assert_eq!(called.payload["project_specialists"], json!(["social"]));
-        let run_count = h.state.store().recent_runs(100).unwrap().len();
+        let accepted_run_id = accepted["run_id"].as_str().unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
+        let run_count = loop {
+            let rows = h.state.store().recent_runs(100).unwrap();
+            if rows
+                .iter()
+                .any(|row| row.run_id.to_string() == accepted_run_id)
+            {
+                break rows.len();
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "accepted specialist call never created its run row"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        };
+        let call_count = events
+            .iter()
+            .filter(|event| event.kind == EventKind::CELL_CALLED.into())
+            .count();
 
         let (status, refused) = h.send(request("abroad")).await;
         assert_eq!(status, StatusCode::BAD_REQUEST, "{refused}");
@@ -4259,7 +4278,16 @@ runner = "farseer-test-missing-runner"
                 .unwrap()
                 .contains("not an eligible specialist")
         );
+        let call_count_after = h
+            .state
+            .store()
+            .scan(0, 100, &ScanFilter::default())
+            .unwrap()
+            .iter()
+            .filter(|event| event.kind == EventKind::CELL_CALLED.into())
+            .count();
         assert_eq!(h.state.store().recent_runs(100).unwrap().len(), run_count);
+        assert_eq!(call_count_after, call_count);
     }
 
     #[tokio::test]

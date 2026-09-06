@@ -150,3 +150,8 @@ The Safe staged runtime promotion ticket now has a public CLI regression for a f
 ## Status correction, 2026-09-06 implementation wave 5
 
 The Project team profiles ticket now has a deterministic multi-cell regression that records the project specialist set on accepted calls and refuses non-specialist calls before creating a run.
+
+## Status correction, 2026-09-06 implementation wave 6
+
+The shell startup health probe now keeps its write side open until the authenticated response is read, fixing a Windows-only empty-response failure against the real Axum listener.
+The focused shell startup suite passes nine tests, and a real `cargo run -p farseer-shell` attached to the running daemon and served the canvas.
