@@ -50,6 +50,7 @@ mod a2a;
 mod artifacts;
 mod attach;
 mod lifecycle;
+mod maintenance;
 mod mcp;
 mod notify;
 mod project_profiles;
@@ -137,6 +138,10 @@ pub struct AppState {
     polled_windows: Mutex<Vec<farseer_core::WindowObservation>>,
     /// Optional Job Object sampling is operator-controlled and failure-isolated.
     resource_monitor: AtomicBool,
+    /// Serialized access to the small JSON proposal ledger. The work itself
+    /// remains in the canonical SQLite task/run/artifact rows.
+    maintenance_gate: Mutex<()>,
+    maintenance_path: PathBuf,
     runtime: RuntimeControl,
 }
 
@@ -403,6 +408,7 @@ impl AppState {
     ) -> Self {
         let runs_dir = runs_dir.into();
         let transcript_dir = runs_dir.parent().unwrap_or(&runs_dir).join("transcripts");
+        let maintenance_path = runs_dir.join("maintenance.json");
         Self {
             store: Mutex::new(store),
             cells: Mutex::new(BTreeMap::new()),
@@ -412,6 +418,8 @@ impl AppState {
             thresholds: LivenessThresholds::default(),
             polled_windows: Mutex::new(Vec::new()),
             resource_monitor: AtomicBool::new(true),
+            maintenance_gate: Mutex::new(()),
+            maintenance_path,
             runs_dir,
             transcript_dir,
             repo_root: repo_root.into(),
@@ -534,6 +542,16 @@ impl AppState {
 
     pub(crate) fn runs_dir(&self) -> &std::path::Path {
         &self.runs_dir
+    }
+
+    pub(crate) fn maintenance_gate(&self) -> std::sync::MutexGuard<'_, ()> {
+        self.maintenance_gate
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+    }
+
+    pub(crate) fn maintenance_path(&self) -> &Path {
+        &self.maintenance_path
     }
 
     pub(crate) fn active_run_ids(&self) -> Vec<String> {
@@ -710,6 +728,18 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/v1/runtime/drain", post(drain_runtime))
         .route("/v1/runtime/force", post(force_runtime))
         .route("/v1/runtime/resources", post(set_resource_monitor))
+        .route(
+            "/v1/maintenance/proposals",
+            get(maintenance::list).post(maintenance::begin),
+        )
+        .route(
+            "/v1/maintenance/proposals/{proposal_id}/evidence",
+            post(maintenance::record_evidence),
+        )
+        .route(
+            "/v1/maintenance/proposals/{proposal_id}/cancel",
+            post(maintenance::cancel),
+        )
         .route("/v1/cells", get(list_cells))
         .route("/v1/cells/{cell_id}", get(get_cell))
         .route("/v1/cells/reload", post(reload_cells))
@@ -4233,6 +4263,72 @@ grants_shell = true
             .body(Body::empty())
             .unwrap();
         assert_eq!(h.send(request).await.0, StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn a_maintenance_proposal_uses_ordinary_work_and_bounds_its_attempt() {
+        let h = harness();
+        let (status, created) = h
+            .post(
+                "/v1/maintenance/proposals",
+                json!({
+                    "trigger_id": "fixture-failure",
+                    "lineage_id": "lineage-1",
+                    "actor": "operator",
+                    "source_revision": "HEAD",
+                    "previous_revision": "parent",
+                    "scope": ["crates/farseer-api"],
+                    "goal": "repair the deterministic fixture"
+                }),
+            )
+            .await;
+        assert_eq!(status, StatusCode::CREATED);
+        let proposal_id = created["proposal"]["proposal_id"].as_str().unwrap();
+        let task_id = created["proposal"]["task_id"].as_str().unwrap();
+        assert_eq!(created["created"], true);
+
+        let (status, evidence) = h
+            .post(
+                &format!("/v1/maintenance/proposals/{proposal_id}/evidence"),
+                json!({
+                    "artifact": "runs/candidate",
+                    "branch": "farseer/maintenance/fixture",
+                    "reproducer": "tests/fixture.rs",
+                    "validation": [{"command": "cargo test -p farseer-api", "outcome": "ok", "exit_code": 0}],
+                    "outcome": "ok"
+                }),
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(evidence["proposal"]["status"], "succeeded");
+        assert_eq!(evidence["task_id"], task_id);
+        assert_eq!(evidence["artifact"]["kind"], "maintenance-candidate");
+        assert_eq!(
+            h.state
+                .store()
+                .task(task_id.parse().unwrap())
+                .unwrap()
+                .unwrap()
+                .state,
+            farseer_core::TaskState::Review
+        );
+
+        let (status, duplicate) = h
+            .post(
+                "/v1/maintenance/proposals",
+                json!({
+                    "trigger_id": "fixture-failure",
+                    "lineage_id": "lineage-1",
+                    "actor": "operator",
+                    "source_revision": "HEAD",
+                    "previous_revision": "parent",
+                    "goal": "same trigger"
+                }),
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(duplicate["created"], false);
+        assert_eq!(duplicate["proposal"]["proposal_id"], proposal_id);
     }
 
     #[tokio::test]

@@ -80,6 +80,8 @@ export function createBridge(): Bridge {
         /^\/projects$/,
         /^\/projects\/roots$/,
         /^\/artifacts\/manifests$/,
+        /^\/maintenance\/proposals$/,
+        /^\/maintenance\/proposals\/[^/]+\/(evidence|cancel)$/,
       ];
       if (!allowed.some((pattern) => pattern.test(path))) {
         throw new Error(`${path} is not a verb this bridge offers`);

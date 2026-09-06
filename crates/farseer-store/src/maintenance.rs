@@ -104,6 +104,10 @@ pub struct ProposalMetadata {
     pub source_revision: String,
     pub previous_revision: String,
     pub scope: Vec<String>,
+    /// Existing work identity, when this proposal has been admitted as an
+    /// ordinary task in the record.
+    #[serde(default)]
+    pub task_id: Option<String>,
     pub candidate: Option<CandidateSource>,
     pub attempts: Vec<MaintenanceAttempt>,
     pub status: ProposalStatus,
@@ -178,11 +182,32 @@ impl ProposalLedger {
             source_revision: request.source_revision,
             previous_revision: request.previous_revision,
             scope: request.scope,
+            task_id: None,
             candidate: None,
             attempts: Vec::new(),
             status: ProposalStatus::Open,
         });
         Ok(BeginProposal::Created(request.proposal_id))
+    }
+
+    /// Link the proposal to the ordinary task that carries its work history.
+    pub fn link_task(&mut self, proposal_id: &str, task_id: String) -> Result<()> {
+        if task_id.trim().is_empty() {
+            return Err(MaintenanceError::EmptyField("task_id"));
+        }
+        let proposal = self
+            .proposals
+            .iter_mut()
+            .find(|proposal| proposal.proposal_id == proposal_id)
+            .ok_or_else(|| MaintenanceError::MissingProposal(proposal_id.into()))?;
+        if proposal.task_id.is_some() {
+            return Err(MaintenanceError::InvalidPromotionTransition {
+                from: "task-linked".into(),
+                to: "task-linked".into(),
+            });
+        }
+        proposal.task_id = Some(task_id);
+        Ok(())
     }
 
     pub fn record_attempt(&mut self, proposal_id: &str, attempt: MaintenanceAttempt) -> Result<()> {
