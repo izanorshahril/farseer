@@ -494,6 +494,7 @@ button {
 
 .focus-pane-tabs {
   margin-bottom: 12px;
+  flex-wrap: wrap;
 }
 
 .focus-pane .chip.active,
@@ -537,6 +538,22 @@ button {
   font: 11px/1.4 var(--mono);
 }
 
+.focus-main-summary,
+.focus-comparison {
+  display: grid;
+  gap: 10px;
+}
+
+.focus-comparison select {
+  margin-left: 6px;
+}
+
+.reveal-field {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
 .focus-open,
 .focus-back {
   white-space: nowrap;
@@ -578,6 +595,20 @@ button {
   min-height: 100%;
   padding: 8px;
 }
+
+.read-failure {
+  margin: 0 0 10px;
+  padding: 8px 10px;
+  border: 1px solid rgba(248, 81, 73, 0.35);
+  border-radius: 6px;
+  background: rgba(248, 81, 73, 0.06);
+}
+
+.read-failure p { margin: 4px 0 8px; }
+.read-diagnostics { display: inline-flex; align-items: center; gap: 8px; }
+.read-diagnostics summary { list-style: none; cursor: pointer; }
+.read-diagnostics summary::-webkit-details-marker { display: none; }
+.read-diagnostics[open] { flex-wrap: wrap; }
 
 .grip {
   display: inline-grid;

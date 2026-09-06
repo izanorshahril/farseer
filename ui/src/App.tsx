@@ -339,7 +339,8 @@ export function App() {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [privacy, setPrivacy] = useState(true);
   const [focusedId, setFocusedId] = useState<WidgetId | null>(null);
-  const [focusPane, setFocusPane] = useState<"navigation" | "inspector">("inspector");
+  const [focusPane, setFocusPane] = useState<"navigation" | "main" | "inspector" | "comparison">("inspector");
+  const [comparisonId, setComparisonId] = useState<WidgetId | null>(null);
   const focusReturn = useRef<HTMLButtonElement | null>(null);
   // Pointer capture works in both Chromium and the desktop WebView2. Native
   // HTML drag-and-drop did not: WebView2 emitted dragover but no drop for the
@@ -397,6 +398,7 @@ export function App() {
         setSidebarCollapsed(next.sidebarCollapsed ?? false);
         setFocusedId(next.focused ?? null);
         setFocusPane(next.focusPane ?? "inspector");
+        setComparisonId(next.comparison ?? null);
       })
       .catch(() => {
         layoutRef.current = DEFAULT_LAYOUT;
@@ -892,8 +894,9 @@ export function App() {
         {focusedWidget && (
           <aside className="focus-pane" aria-label={`${focusedWidget.title} focused workspace pane`}>
             <div className="row focus-pane-tabs">
-              <button className={focusPane === "navigation" ? "chip active" : "chip"} onClick={() => { setFocusPane("navigation"); persist((current) => ({ ...current, focusPane: "navigation" })); }}>navigation</button>
-              <button className={focusPane === "inspector" ? "chip active" : "chip"} onClick={() => { setFocusPane("inspector"); persist((current) => ({ ...current, focusPane: "inspector" })); }}>inspector</button>
+              {(["navigation", "main", "inspector", "comparison"] as const).map((pane) => (
+                <button key={pane} className={focusPane === pane ? "chip active" : "chip"} onClick={() => { setFocusPane(pane); persist((current) => ({ ...current, focusPane: pane })); }}>{pane}</button>
+              ))}
             </div>
             {focusPane === "navigation" ? (
               <nav aria-label="Focused widget navigation">
@@ -902,6 +905,21 @@ export function App() {
                   return item ? <button key={id} className={id === focusedId ? "focus-nav-item active" : "focus-nav-item"} onClick={() => { setFocusedId(id); persist((current) => ({ ...current, focused: id })); }}>{item.title}</button> : null;
                 })}
               </nav>
+            ) : focusPane === "main" ? (
+              <div className="focus-main-summary">
+                <b>{focusedWidget.title}</b>
+                <p className="dim small">The focused face is the main pane. Its card above remains the same live widget and command surface.</p>
+              </div>
+            ) : focusPane === "comparison" ? (
+              <div className="focus-comparison">
+                <label>compare with
+                  <select value={comparisonId ?? ""} onChange={(event) => { const value = event.currentTarget.value || null; setComparisonId(value); persist((current) => ({ ...current, comparison: value })); }}>
+                    <option value="">none</option>
+                    {available.filter((item) => item.id !== focusedId).map((item) => <option key={item.id} value={item.id}>{item.title}</option>)}
+                  </select>
+                </label>
+                {comparisonId && <p className="dim small">Comparison uses the same selected project, subject, and runtime state.</p>}
+              </div>
             ) : (
               <div className="focus-inspector">
                 <b>{focusedWidget.title}</b>

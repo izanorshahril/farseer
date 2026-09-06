@@ -3,6 +3,7 @@ import type { Bridge } from "../bridge";
 import { onSubjectSelection, selectedSubject } from "../selection";
 import { follow, type RecordEvent } from "../stream";
 import { mask, usePrivacy } from "../privacy";
+import { ReadFailure } from "../ReadFailure";
 /**
  * What the top manager said, as a conversation.
  *
@@ -156,6 +157,7 @@ export function ConversationWidget({ bridge }: { bridge: Bridge }) {
   const [turns, setTurns] = useState<Turn[]>([]);
   const [meta, setMeta] = useState<Meta>({ sessions: [] });
   const [error, setError] = useState<string | null>(null);
+  const [retry, setRetry] = useState(0);
   const [showSilent, setShowSilent] = useState(false);
   const thread = useRef<HTMLOListElement>(null);
 
@@ -271,7 +273,7 @@ export function ConversationWidget({ bridge }: { bridge: Bridge }) {
       subscription.close();
       selectedSubscription.close();
     };
-  }, [bridge, subject.conversation, subject.task, subject.run]);
+  }, [bridge, retry, subject.conversation, subject.task, subject.run]);
 
   // The newest turn is the one being waited for, and a thread that keeps its
   // scroll at the top hides exactly the line the operator is here to read.
@@ -364,6 +366,7 @@ export function ConversationWidget({ bridge }: { bridge: Bridge }) {
   if (turns.length === 0)
     return (
       <>
+        {error && <ReadFailure capability="conversation" error={error} onRetry={() => setRetry((current) => current + 1)} />}
         {strip}
         <p className="empty">Nothing said in this conversation yet.</p>
       </>
@@ -371,7 +374,7 @@ export function ConversationWidget({ bridge }: { bridge: Bridge }) {
 
   return (
     <>
-      {error && <p className="empty bad" role="alert">{error} - showing the last successful conversation projection.</p>}
+      {error && <ReadFailure capability="conversation" error={error} stale onRetry={() => setRetry((current) => current + 1)} />}
       {strip}
       <ol className="thread" ref={thread}>
       {turns.map((turn) => (

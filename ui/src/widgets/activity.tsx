@@ -113,7 +113,7 @@ export function ActivityWidget({ bridge: _bridge }: { bridge: Bridge }) {
     <>
       <div className="row dim small" style={{ marginBottom: 8 }}>
         <span className={stream === "stale" ? "pulse warn" : live ? "pulse on" : "pulse"} aria-hidden />
-        <span>{stream === "stale" ? "record connection lost - reconnecting" : live ? "following the record" : "waiting for the first event"}</span>
+        <span>{stream === "stale" ? "record connection lost - reconnecting" : stream === "connecting" ? "connecting to the record" : live ? "following the record" : "waiting for the first event"}</span>
       </div>
       {events.length === 0 ? (
         <p className="empty">

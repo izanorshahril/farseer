@@ -320,11 +320,86 @@ fn decode_task_cursor(value: &str) -> ApiResult<TaskPageCursor> {
 #[derive(Debug, Serialize)]
 pub(super) struct TaskDetail {
     pub task: Task,
+    pub usage: TaskUsage,
     pub allowed_transitions: Vec<TaskState>,
     pub transitions: Vec<farseer_core::TaskTransition>,
     pub runs: Vec<crate::RunView>,
     pub sessions: Vec<farseer_core::HarnessSession>,
     pub attachments: Vec<TranscriptAttachmentView>,
+    pub artifacts: Vec<farseer_store::ArtifactRow>,
+}
+
+#[derive(Debug, Serialize)]
+pub(super) struct TaskUsage {
+    pub scope: &'static str,
+    pub runs: usize,
+    pub successful_runs: usize,
+    pub failed_runs: usize,
+    pub tokens: u64,
+    pub usd_micros: u64,
+    pub reported_usd_micros: u64,
+    pub estimated_usd_micros: u64,
+    pub duration_ms: i64,
+    pub cost_basis: &'static str,
+}
+
+/// `12 attributed usage` aggregates distinct run rows while keeping reported
+/// and estimated spend separate and naming the task scope.
+fn task_usage(state: &Arc<AppState>, rows: &[farseer_store::RunRow]) -> TaskUsage {
+    let mut successful_runs = 0;
+    let mut failed_runs = 0;
+    let mut tokens: u64 = 0;
+    let mut usd_micros: u64 = 0;
+    let mut reported_usd_micros: u64 = 0;
+    let mut estimated_usd_micros: u64 = 0;
+    let mut duration_ms: i64 = 0;
+    let mut has_reported = false;
+    let mut has_estimated = false;
+    let mut has_unknown = false;
+    for row in rows {
+        if row.outcome.as_deref() == Some("ok") {
+            successful_runs += 1;
+        } else if row.outcome.is_some() {
+            failed_runs += 1;
+        }
+        tokens = tokens.saturating_add(row.tokens);
+        usd_micros = usd_micros.saturating_add(row.usd_micros);
+        duration_ms = duration_ms.saturating_add(
+            row.finished_ts
+                .unwrap_or_else(now_ms)
+                .saturating_sub(row.started_ts)
+                .max(0),
+        );
+        match crate::run_view(state, row.clone()).cost_basis {
+            "reported" => {
+                has_reported = true;
+                reported_usd_micros = reported_usd_micros.saturating_add(row.usd_micros);
+            }
+            "estimated" => {
+                has_estimated = true;
+                estimated_usd_micros = estimated_usd_micros.saturating_add(row.usd_micros);
+            }
+            _ => has_unknown = true,
+        }
+    }
+    let cost_basis = match (has_reported, has_estimated, has_unknown) {
+        (true, false, false) => "reported",
+        (false, true, false) => "estimated",
+        (false, false, _) => "unknown",
+        _ => "mixed",
+    };
+    TaskUsage {
+        scope: "task",
+        runs: rows.len(),
+        successful_runs,
+        failed_runs,
+        tokens,
+        usd_micros,
+        reported_usd_micros,
+        estimated_usd_micros,
+        duration_ms,
+        cost_basis,
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -379,6 +454,7 @@ pub(super) async fn get_task(
     let store = state.store();
     let task = store.task(task_id)?.ok_or(ApiError::NotFound("task"))?;
     let rows = store.runs_for_task(task_id)?;
+    let usage = task_usage(&state, &rows);
     let mut sessions = Vec::new();
     let mut attachments = Vec::new();
     for row in &rows {
@@ -398,6 +474,7 @@ pub(super) async fn get_task(
                 .collect::<farseer_store::Result<Vec<_>>>()?,
         );
     }
+    let artifacts = store.artifacts_for_task(task_id)?;
     let transitions = store.task_transitions(task_id)?;
     let allowed_transitions = TaskState::ALL
         .into_iter()
@@ -410,11 +487,13 @@ pub(super) async fn get_task(
         .collect();
     Ok(Json(TaskDetail {
         task,
+        usage,
         allowed_transitions,
         transitions,
         runs,
         sessions,
         attachments,
+        artifacts,
     }))
 }
 

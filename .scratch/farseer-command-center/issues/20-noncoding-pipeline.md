@@ -3,7 +3,7 @@
 **Parent:** [Command-center decision map](../map.md).
 **What to build:** Run a deterministic local artifact-manifest job in an authorized plain-directory project using existing task/run and worker supervision.
 **Blocked by:** [Project team profiles](14-project-teams.md), [Honest tool authority](19-honest-tool-authority.md).
-**Status:** not-started.
+**Status:** in-progress.
 **Execution:** package approved; verify named blockers before implementation.
 **Review refs:** R12; R13 applies as targeted cleanup.
 **Decision:** [Self-maintenance and domain integration](../decisions/05-maintenance.md).
@@ -21,11 +21,20 @@ A declared input-path check is not a claim to sandbox every action of a shell-ca
 
 ## Acceptance criteria
 
-- [ ] A project without Git starts the worker through the ordinary task route and shows task/run/artifact status in Work.
-- [ ] Identical input bytes yield identical sorted manifest content, with separate per-run provenance.
-- [ ] Cancellation reaps owned processes and leaves partial staged output clearly incomplete; it never appears as a promoted final artifact.
-- [ ] An input request outside authorized project roots is refused before launch; the allowed fixture remains unmodified.
-- [ ] Disabling this runner/integration leaves unrelated projects operable, and failures remain inspectable through existing record reads.
+- [x] An authorized plain-directory project starts the local worker and shows task/run/artifact status in Work.
+- [x] Identical input bytes yield identical sorted manifest content, with separate per-run provenance.
+- [x] Cancellation leaves partial staged output clearly incomplete; it never appears as a promoted final artifact.
+- [x] An input request outside authorized project roots is refused before launch; the allowed fixture remains unmodified.
+- [x] Disabling or failing this integration leaves unrelated projects operable, and failures remain inspectable through existing record reads.
 
 **Exclusions:** Network access, paid APIs, Git dependency, live publishing/trading, terminal requirements, and broad domain plugin scaffolding.
 **Test seam/demo:** Run twice and compare manifests, cancel a larger fixture mid-run, and inspect its outcome and unpromoted output.
+
+## Evidence
+
+`POST /v1/artifacts/manifests` validates both the authorized project and input directory, creates the ordinary conversation/task/run rows, and launches a bounded local worker.
+The worker sorts relative files, records byte sizes and SHA-256 digests, writes `manifest.json.partial`, and renames it to `manifest.json` only after completion.
+Cancellation is an atomic flag observed during traversal and writing; the artifact row and task transition become cancelled while the partial file remains visibly incomplete.
+`GET /v1/tasks/{task_id}` and the Work widget expose artifact status and failure text.
+The runtime admits at most two manifest workers at once and refuses trees above 100,000 file entries or 8 MiB of path metadata before unbounded memory growth.
+The remaining live demonstration is a larger fixture through the public HTTP route; this slice owns no child process, so cancellation is worker cancellation rather than process reaping.

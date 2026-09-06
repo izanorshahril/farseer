@@ -4,6 +4,7 @@ import { follow } from "../stream";
 import { selectRun } from "../selection";
 import { confirmVerb } from "../confirm";
 import { meaningOf } from "../meaning";
+import { ReadFailure } from "../ReadFailure";
 
 /**
  * The fleet, with `05 run state model`'s verbs on the line.
@@ -155,13 +156,17 @@ export function RunsWidget({ bridge }: { bridge: Bridge }) {
   const [cannot, setCannot] = useState<Record<string, string[]>>({});
   const [busy, setBusy] = useState<string | null>(null);
   const [note, setNote] = useState<string | null>(null);
+  const [readError, setReadError] = useState<string | null>(null);
 
   const load = useCallback(
     () =>
       bridge
         .read<Run[]>("/runs?limit=25")
-        .then(setRuns)
-        .catch((e: Error) => setNote(e.message)),
+        .then((next) => {
+          setRuns(next);
+          setReadError(null);
+        })
+        .catch((e: Error) => setReadError(e.message)),
     [bridge],
   );
 
@@ -227,12 +232,13 @@ export function RunsWidget({ bridge }: { bridge: Bridge }) {
     }
   };
 
-  if (note && !runs) return <p className="empty bad">{note}</p>;
+  if (!runs && readError) return <ReadFailure capability="run list" error={readError} onRetry={() => void load()} />;
   if (!runs) return <p className="empty">reading runs...</p>;
   if (runs.length === 0) return <p className="empty">No runs yet.</p>;
 
   return (
     <>
+      {readError && <ReadFailure capability="run list" error={readError} stale onRetry={() => void load()} />}
       <ul className="runs">
         {threaded(runs).map(({ run, under }) => {
           const verbs = verbsFor(run, steerable);

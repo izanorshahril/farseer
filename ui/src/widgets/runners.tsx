@@ -3,6 +3,7 @@ import type { Bridge } from "../bridge";
 import { follow, type RecordEvent } from "../stream";
 import { confirmVerb } from "../confirm";
 import { mask, usePrivacy } from "../privacy";
+import { ReadFailure } from "../ReadFailure";
 
 /**
  * Every runner process farseer has alive right now.
@@ -119,7 +120,7 @@ function Thread({ bridge, run, onBack }: { bridge: Bridge; run: Run; onBack: () 
         <span className="grow" />
         <span className="mono faint small">{mask(run.run_id.slice(0, 8), "session", privacy)}</span>
       </div>
-      {error && <p className="empty bad">{error}</p>}
+      {error && <ReadFailure capability="runner thread" error={error} stale={Boolean(events)} onRetry={() => void load()} />}
       {!events && !error && <p className="empty">reading the thread...</p>}
       {events && shown.length === 0 && (
         <p className="empty">
@@ -160,6 +161,7 @@ export function RunnersWidget({ bridge }: { bridge: Bridge }) {
   const [runs, setRuns] = useState<Run[] | null>(null);
   const [facts, setFacts] = useState<Record<string, RunnerFacts>>({});
   const [note, setNote] = useState<string | null>(null);
+  const [readError, setReadError] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   /** The run whose thread is showing, or `null` for the list. */
   const [open, setOpen] = useState<string | null>(null);
@@ -172,8 +174,11 @@ export function RunnersWidget({ bridge }: { bridge: Bridge }) {
     () =>
       bridge
         .read<Run[]>("/runs?limit=50")
-        .then(setRuns)
-        .catch((e: Error) => setNote(e.message)),
+        .then((next) => {
+          setRuns(next);
+          setReadError(null);
+        })
+        .catch((e: Error) => setReadError(e.message)),
     [bridge],
   );
 
@@ -210,7 +215,7 @@ export function RunnersWidget({ bridge }: { bridge: Bridge }) {
     }
   };
 
-  if (note && !runs) return <p className="empty bad">{note}</p>;
+  if (!runs && readError) return <ReadFailure capability="active runners" error={readError} onRetry={() => void load()} />;
   if (!runs) return <p className="empty">reading runners...</p>;
 
   const opened = runs.find((run) => run.run_id === open);
@@ -249,6 +254,7 @@ export function RunnersWidget({ bridge }: { bridge: Bridge }) {
 
   return (
     <>
+      {readError && <ReadFailure capability="active runners" error={readError} stale onRetry={() => void load()} />}
       <ul className="runners-live">
         {tasks.map((task) => (
           <li key={task.task_id}>

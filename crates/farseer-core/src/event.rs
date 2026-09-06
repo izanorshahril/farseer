@@ -70,6 +70,14 @@ impl EventKind {
     pub const RUN_STARTED: &'static str = "run_started";
     pub const RUN_FINISHED: &'static str = "run_finished";
 
+    /// The deterministic route and its observed pressure, sealed before a
+    /// process is spawned.
+    ///
+    /// `13 explainable routing` keeps this separate from `run_queued`: the
+    /// queue payload reconstructs the immutable contract, while this event
+    /// explains why this candidate was selected at that moment.
+    pub const ROUTING_SEALED: &'static str = "routing_sealed";
+
     // The three progress kinds. `05 run state model` made these a hard disqualifier for any
     // control channel that cannot emit them.
     pub const TOOL_CALL_STARTED: &'static str = "tool_call_started";

@@ -55,11 +55,13 @@ graph TD
   REC -->|live record and saved layout| UI
   UI -.->|attach, any depth| W0
   UI -.->|attach| WS
+  UI -.->|optional terminal sessions| TERM[PowerShell, cmd, Git Bash]
+  REC -.->|resource samples and artifacts| OBS[bounded observations]
 
   classDef core fill:#1a3a5c,stroke:#4a90d9,color:#fff
   classDef ext fill:#3a3a3a,stroke:#777,color:#ccc
   class UI,M0,MS,W0,WS,REC,MCPFACE core
-  class RUN,PEER,TOOL ext
+  class RUN,PEER,TOOL,TERM,OBS ext
 ```
 
 Solid edges are native. Dotted edges cross a protocol boundary.
@@ -81,9 +83,9 @@ An external protocol is spoken at a boundary, never shaped into internals.
 .
 ├─ crates/
 │  ├─ farseer-core/    domain model: cells, policy, conversations, tasks, sessions, run state and scrubbing. Pure, no I/O
-│  ├─ farseer-store/   SQLite truth: record, work model, session/transcript metadata, memory, UI state and authorized roots
-│  ├─ farseer-api/     loopback HTTP/SSE, work queries and commands, token guard, manager transports and /v1/mcp
-│  ├─ farseer-runner/  runner adapters for Claude Code, Codex, cursor-agent, Goose, pi, omp, agy and ACP faces, plus PATHEXT resolution, Job-Object spawn, stream mapping and worktree lifecycle
+  │  ├─ farseer-store/   SQLite truth: record, work model, session/transcript metadata, artifacts, resource samples, maintenance fixtures, memory, UI state and authorized roots
+  │  ├─ farseer-api/     loopback HTTP/SSE, work queries and commands, artifact and terminal adapters, token guard, manager transports and /v1/mcp
+  │  ├─ farseer-runner/  runner adapters for Claude Code, Codex, cursor-agent, Goose, pi, omp, agy and ACP faces, plus PATHEXT resolution, Job-Object spawn/resource observation, terminal profiles, stream mapping and worktree lifecycle
 │  ├─ farseer-manager/ runs one sealed contract, captures terminal text, and records what happened
 │  ├─ farseer/         the binary: runtime and CLI in one
 │  └─ farseer-shell/   the desktop shell: finds a farseer, serves the canvas and its widgets, holds the token, remembers the window, and puts each provider's quota in the tray
@@ -207,6 +209,7 @@ Binds `127.0.0.1` only, opens the record, loads the definitions, and writes its 
 | `GET /v1/stream` | the same query as SSE, honouring `Last-Event-ID`. Attach and replay are one call with a different cursor |
 | `GET /v1/runs` | list recent runs newest first using the same row shape as the single-run read |
 | `GET /v1/runs/{id}` | a run's row: lifecycle, outcome, cost, tokens, and `18`/`05`'s liveness - `live`/`stalled`/`likely_hung`, or `null` once nothing in memory can answer |
+| `GET /v1/runs/{id}/resources` | bounded optional Job Object observations with measured, stale, or unavailable status, source, units, timestamp and supervised-job scope |
 | `POST /v1/runs/{id}/cancel` | end a run early, recorded as `05`'s `cancelled` outcome, never `failed`. `404` if it already finished or never existed - idempotent, not a silent no-op |
 | `POST /v1/runs/{id}/steer` | send a follow-up message into a run's live process. `400` if the runner has no steering path - Codex, cursor-agent and goose today - `404` if the run is unknown or already finished |
 | `POST /v1/runs/{id}/rerun` | same sealed contract, fresh run, fresh workspace; managers and delegated workers retain their pinned cell authority, and a worker reacquires that cell's shared cap; legacy records without a pinned definition fail closed; `404` on an unknown run |
@@ -216,6 +219,7 @@ Binds `127.0.0.1` only, opens the record, loads the definitions, and writes its 
 | `GET /v1/cells/states` | every cell that is not simply active |
 | `GET /v1/conversations`, `POST /v1/conversations` | list durable conversations or create one |
 | `GET /v1/tasks`, `/v1/tasks/{id}`, `POST /v1/tasks/{id}/transition` | read tasks and record validated lifecycle transitions with actor and reason |
+| `POST /v1/artifacts/manifests` | run a local authorized-directory manifest job with sorted SHA-256 entries and staged completion |
 | `GET /v1/work/graph`, `/v1/work/search` | query durable work edges and scrubbed transcript projections |
 | `GET`/`POST /v1/runs/{id}/transcripts` | read or add transcript custody metadata and derived text |
 | `GET /v1/runs/{id}/control` | read the current attach control state |
@@ -224,6 +228,7 @@ Binds `127.0.0.1` only, opens the record, loads the definitions, and writes its 
 | `POST /a2a` | the A2A JSON-RPC face for a foreign orchestrator: `message/send`, `tasks/get`, `tasks/cancel`. Authenticated by a bearer **per peer**, each bound to one cell, so the caller's identity is derived from auth rather than asserted. `tasks/resubscribe` answers `501` and says why - A2A's subscription cannot express `16`'s cursored replay |
 | `GET`/`PUT /v1/ui-state/{key}` | an opaque blob farseer never parses, so a canvas survives a restart. `canvas` holds the widget arrangement and `window` the desktop window's own size and position. `413` above 1 MiB |
 | `GET /v1/projects`, `POST /v1/projects`, `POST`/`DELETE /v1/projects/roots` | manage authorized project roots and project projections |
+| `GET`/`POST /v1/terminals`, `GET`/`DELETE /v1/terminals/{id}` | open, reconnect, inspect, input, resize and explicitly end optional PowerShell, cmd or Git Bash sessions |
 | `GET /v1/analytics/{cost,intervention,rework,lessons}` | the four questions from [11 analytics questions](.scratch/farseer/issues/11-analytics-questions.md) |
 | `/v1/mcp` | the streamable-HTTP MCP face nested into this router and guard; all four tools - `read_memory`, `write_memory`, `delegate_to_worker` and `delegate_to_cell` - derive identity from an active manager capability, and no raw event append exists because "an agent that can forge events can rewrite its own history" |
 | `POST /v1/manager/delegate/{worker,cell}` | the same two delegation verbs as plain JSON, for a manager whose runner has no MCP client. It calls the same functions the MCP tools call, so the roster, the worker cap and the budget are one implementation rather than two |

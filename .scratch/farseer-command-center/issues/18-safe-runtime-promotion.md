@@ -3,7 +3,7 @@
 **Parent:** [Command-center decision map](../map.md).
 **What to build:** Promote one approved local runtime candidate and recover to its matched prior binary/data if activation fails.
 **Blocked by:** [Independent runtime lifecycle](02-independent-runtime.md), [Recoverable schema and backup](16-recoverable-schema.md), [Bounded maintenance source proposals](17-maintenance-proposals.md).
-**Status:** not-started.
+**Status:** in-progress.
 **Execution:** package approved; verify named blockers before implementation; a real future promotion separately requires product-level operator authorization.
 **Review refs:** R11, R14; R13 applies as targeted cleanup.
 **Decision:** [Self-maintenance and domain integration](../decisions/05-maintenance.md).
@@ -28,3 +28,9 @@ Use an isolated installation/data fixture for development and tests.
 
 **Exclusions:** Multi-host rollout, live operator installation changes in the test, silent hot patching, and an automatic agent judgment as the promotion gate.
 **Test seam/demo:** Use a disposable versioned installation with a deliberately failing candidate; observe automatic bounded recovery and query the restored task record.
+
+## Evidence
+
+`farseer-store::maintenance::FixturePromotion` now stages a digest-checked candidate beside an active fixture, requires a zero-run drain and matched backup gate, switches directory identities only through an explicit call, verifies authenticated health and smoke evidence, and restores the prior directory without starting the candidate.
+Promotion journal writes retain the previous metadata file during the Windows replacement window and restore it if publishing the new journal fails.
+The fixture test covers stage, backup gate, activation, health verification, and rollback; process startup, migration execution, and public CLI integration remain open.

@@ -26,7 +26,8 @@ The profile supplies a validated default eligible coordinating cell; actual top-
 - [ ] Global and project boards show the same task under the selected project team without duplicating it.
 
 **Evidence:** Version-one `.farseer/profile.toml` files are validated against authorized project paths and existing cells, exposed through project views and `/v1/projects/profile`, and applied to future top-manager submissions.
-Specialist delegation provenance, profile transition history, and a multi-cell board demo remain open.
+When a profile declares specialist cells, the existing pinned cell roster remains the grant and the profile narrows calls to the declared specialist set; each accepted cell call records the profile specialist set beside its bounded call budget.
+Profile transition history and a multi-cell board demo remain open.
 
 **Exclusions:** No project-specific copy of cell grants, arbitrary runner discovery, direct non-zero project ingress, or promise of zero coordination cost.
 

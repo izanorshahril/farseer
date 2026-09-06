@@ -43,6 +43,8 @@ use windows::Win32::System::Threading::{
 };
 use windows::core::PCWSTR;
 
+use crate::resource::{self, ResourceObservation};
+
 #[derive(Debug, thiserror::Error)]
 pub enum SpawnError {
     /// **Names the executable and the arguments, not just the failure.**
@@ -125,10 +127,16 @@ fn close(job: &Mutex<Option<RawJobHandle>>) {
 pub struct StdinHandle(Arc<Mutex<ChildStdin>>);
 
 impl StdinHandle {
-    pub fn write_line(&self, line: &str) -> std::io::Result<()> {
+    pub fn write(&self, bytes: &[u8]) -> std::io::Result<()> {
         let mut stdin = self.0.lock().unwrap_or_else(|e| e.into_inner());
-        writeln!(stdin, "{line}")?;
+        stdin.write_all(bytes)?;
         stdin.flush()
+    }
+
+    pub fn write_line(&self, line: &str) -> std::io::Result<()> {
+        let mut bytes = line.as_bytes().to_vec();
+        bytes.push(b'\n');
+        self.write(&bytes)
     }
 }
 
@@ -300,6 +308,25 @@ impl SupervisedProcess {
     /// before you might need it.
     pub fn cancel_token(&self) -> CancelToken {
         CancelToken(Arc::clone(&self.job), Arc::clone(&self.cancelled))
+    }
+
+    /// Read cumulative metrics from this process's owned job.
+    ///
+    /// The job handle is never reconstructed from a PID, so a recycled PID or
+    /// an unrelated parent/child cannot transfer ownership of an observation.
+    pub fn resource_observation(
+        &self,
+        run_id: impl Into<String>,
+        timestamp_ms: i64,
+        final_sample: bool,
+    ) -> ResourceObservation {
+        let metrics = self
+            .job
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .as_ref()
+            .and_then(|RawJobHandle(raw)| resource::query_job(HANDLE(*raw as *mut _)).ok());
+        resource::observation(run_id, metrics, timestamp_ms, final_sample)
     }
 
     /// A handle that can write to this process's stdin from another thread.

@@ -108,6 +108,7 @@ function connect(
 ): Subscription {
   const controller = new AbortController();
   let cursor = options.since;
+  let lastSeq = options.since ?? -1;
   let stopped = false;
   setStreamState("connecting");
 
@@ -138,8 +139,13 @@ function connect(
             if (data) {
               try {
                 const event = JSON.parse(data) as RecordEvent;
-                cursor = event.seq;
-                onEvent(event);
+                // The cursor is exclusive, but a proxy or reconnect can still
+                // replay the last frame. Keep the feed idempotent at this seam.
+                if (event.seq > lastSeq) {
+                  lastSeq = event.seq;
+                  cursor = event.seq;
+                  onEvent(event);
+                }
               } catch {
                 // A frame farseer could not serialise arrives as a comment; it
                 // is not worth tearing the stream down over.
@@ -148,6 +154,7 @@ function connect(
             split = buffer.indexOf("\n\n");
           }
         }
+        if (!stopped) setStreamState("stale");
       } catch (error) {
         if (stopped || (error as Error).name === "AbortError") return;
         setStreamState("stale");

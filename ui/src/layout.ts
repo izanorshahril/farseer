@@ -38,7 +38,8 @@ export type CanvasLayout = {
   /** Presentation state stays in the same opaque UI-state document. */
   sidebarCollapsed?: boolean;
   focused?: string | null;
-  focusPane?: "navigation" | "inspector";
+  focusPane?: "navigation" | "main" | "inspector" | "comparison";
+  comparison?: string | null;
 };
 
 /** The first standard size is the default for every newly mounted widget. */
@@ -115,9 +116,14 @@ export function normalizeLayout(value: unknown, fallback: CanvasLayout): CanvasL
     ...(typeof value.sidebarCollapsed === "boolean" ? { sidebarCollapsed: value.sidebarCollapsed } : {}),
     ...(typeof value.focused === "string" ? { focused: value.focused } : {}),
     ...(value.focused === null ? { focused: null } : {}),
-    ...(value.focusPane === "navigation" || value.focusPane === "inspector"
+    ...(value.focusPane === "navigation" ||
+    value.focusPane === "main" ||
+    value.focusPane === "inspector" ||
+    value.focusPane === "comparison"
       ? { focusPane: value.focusPane }
       : {}),
+    ...(typeof value.comparison === "string" ? { comparison: value.comparison } : {}),
+    ...(value.comparison === null ? { comparison: null } : {}),
   };
 }
 

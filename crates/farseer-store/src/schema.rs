@@ -165,6 +165,41 @@ CREATE TABLE IF NOT EXISTS transcript_projection_jobs (
 CREATE INDEX IF NOT EXISTS transcript_projection_jobs_status
     ON transcript_projection_jobs(status, updated_ts);
 
+-- Deterministic local artifact jobs keep mutable supervision state beside the
+-- task/run records; manifest bytes live in the staged filesystem output.
+CREATE TABLE IF NOT EXISTS artifacts (
+    artifact_id BLOB PRIMARY KEY,
+    task_id     BLOB NOT NULL,
+    run_id      BLOB NOT NULL,
+    kind        TEXT NOT NULL,
+    status      TEXT NOT NULL,
+    input_path  TEXT NOT NULL,
+    staged_path TEXT NOT NULL,
+    final_path  TEXT,
+    error       TEXT,
+    created_ts  INTEGER NOT NULL,
+    finished_ts INTEGER
+);
+CREATE INDEX IF NOT EXISTS artifacts_task ON artifacts(task_id, created_ts);
+
+-- Optional Windows Job Object observations. Final rows are retained when
+-- bounded detail retention removes older samples.
+CREATE TABLE IF NOT EXISTS resource_samples (
+    seq                     INTEGER PRIMARY KEY,
+    run_id                  BLOB NOT NULL,
+    source                  TEXT NOT NULL,
+    scope                   TEXT NOT NULL,
+    cpu_time_100ns          INTEGER,
+    memory_high_water_bytes INTEGER,
+    cpu_unit                TEXT NOT NULL,
+    memory_unit             TEXT NOT NULL,
+    timestamp_ms            INTEGER NOT NULL,
+    collector_version       TEXT NOT NULL,
+    status                  TEXT NOT NULL,
+    final_sample            INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS resource_samples_run ON resource_samples(run_id, timestamp_ms);
+
 CREATE TABLE IF NOT EXISTS similarity_edges (
     left_digest        TEXT NOT NULL,
     right_digest       TEXT NOT NULL,

@@ -39,6 +39,10 @@ pub mod acp_drive;
 #[cfg(windows)]
 pub mod drive;
 #[cfg(windows)]
+pub mod resource;
+#[cfg(windows)]
 pub mod spawn;
+#[cfg(windows)]
+pub mod terminal;
 #[cfg(windows)]
 pub mod workspace;

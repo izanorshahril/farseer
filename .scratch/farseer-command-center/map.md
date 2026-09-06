@@ -36,7 +36,9 @@ Historical decision corrections are appended by the adopting implementation slic
 The package was approved for implementation on the command-center branch.
 Verified startup, independent runtime lifecycle, paged work-board reads, scoped graph, bounded transcript projection, recoverable schema/backup, and honest tool authority are implemented and tested.
 Widget recovery, explicit composer context, responsive canvas, privacy presentation, focused workspace, session explorer, attributed usage, explainable routing, and project team profiles have bounded increments in progress; their remaining acceptance items stay open.
-All other ticket statuses remain as written until their blockers and acceptance evidence are complete.
+Terminal profiles, the deterministic local artifact manifest, and the optional resource monitor now have bounded runtime/API/UI slices with explicit follow-up limits.
+Maintenance proposals and staged promotion now have store-level fixture primitives but no public maintenance task or promotion command.
+All remaining acceptance items stay open until their blockers and evidence are complete.
 
 ## Corrections after approval
 

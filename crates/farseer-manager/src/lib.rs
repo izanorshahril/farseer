@@ -70,6 +70,15 @@ pub trait RunSink {
         observation: &farseer_core::WindowObservation,
         ts: i64,
     ) -> Result<bool, StoreError>;
+
+    /// Optional resource evidence. A disabled or failed observer must not
+    /// alter the run lifecycle, per `21 optional supervised resource monitor`.
+    fn observe_resource(
+        &self,
+        _observation: &farseer_runner::resource::ResourceObservation,
+    ) -> Result<(), StoreError> {
+        Ok(())
+    }
 }
 
 impl RunSink for Store {
@@ -777,6 +786,14 @@ impl StartedWorker {
         let activity = Arc::clone(&self.activity);
         let monotonic_start = self.monotonic_start;
 
+        // Ownership is the job handle, never a PID. The initial and final
+        // snapshots are best-effort; the observer is optional and cannot
+        // block or fail lifecycle writes.
+        let first_resource =
+            self.proc
+                .resource_observation(contract.run_id.to_string(), now_ms(), false);
+        let _ = sink.observe_resource(&first_resource);
+
         // What the ACP handshake learned, replayed into the read loop as though
         // the agent had announced it mid-stream - which is how Claude Code and
         // Codex report the same facts. The handshake happens in `bootstrap`,
@@ -1045,25 +1062,39 @@ impl StartedWorker {
             on_line(Ok(vec![RunnerSignal::Session(info)]));
         }
 
-        if ends_at_terminal {
-            // A conversational runner stays alive after the work is done, so
-            // end of stream never comes. `29 harness protocol`'s first live run
-            // waited for it anyway and hung.
-            while let Some(line) = self.proc.read_line()? {
-                let parsed = (self.parse)(&line);
-                let ended = parsed.as_ref().is_ok_and(|signals| {
-                    signals
-                        .iter()
-                        .any(|signal| matches!(signal, RunnerSignal::Finished(_)))
-                });
-                on_line(parsed);
-                if ended {
-                    break;
+        // Keep the final resource observation on every exit path, including a
+        // reader/protocol error.  Resource evidence is optional, but a failed
+        // turn still has an owned Job Object whose cumulative totals are useful
+        // for explaining the failure.
+        let stream_result: Result<(), ManagerError> = (|| {
+            if ends_at_terminal {
+                // A conversational runner stays alive after the work is done, so
+                // end of stream never comes. `29 harness protocol`'s first live run
+                // waited for it anyway and hung.
+                while let Some(line) = self.proc.read_line()? {
+                    let parsed = (self.parse)(&line);
+                    let ended = parsed.as_ref().is_ok_and(|signals| {
+                        signals
+                            .iter()
+                            .any(|signal| matches!(signal, RunnerSignal::Finished(_)))
+                    });
+                    on_line(parsed);
+                    if ended {
+                        break;
+                    }
                 }
+            } else {
+                drive(&mut self.proc, self.parse, on_line)?;
             }
-        } else {
-            drive(&mut self.proc, self.parse, on_line)?;
-        }
+            Ok(())
+        })();
+
+        let final_resource =
+            self.proc
+                .resource_observation(contract.run_id.to_string(), now_ms(), true);
+        let _ = sink.observe_resource(&final_resource);
+
+        stream_result?;
 
         if let Some(e) = store_err {
             return Err(e.into());

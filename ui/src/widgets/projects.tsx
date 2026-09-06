@@ -4,6 +4,7 @@ import { currentProject, onProject, setProject } from "../project";
 import { confirmGrantWithdrawal } from "../confirm";
 import { meaningOf } from "../meaning";
 import { mask, usePrivacy } from "../privacy";
+import { ReadFailure } from "../ReadFailure";
 
 /**
  * The folders farseer may work in, and the projects inside them.
@@ -74,6 +75,7 @@ export function ProjectsWidget({ bridge }: { bridge: Bridge }) {
   const privacy = usePrivacy();
   const [roots, setRoots] = useState<Root[] | null>(null);
   const [note, setNote] = useState<string | null>(null);
+  const [readError, setReadError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [rootPath, setRootPath] = useState("");
   /** Which root the new-project field is open under, or `null` for none. */
@@ -97,8 +99,11 @@ export function ProjectsWidget({ bridge }: { bridge: Bridge }) {
     () =>
       bridge
         .read<Root[]>("/projects")
-        .then(setRoots)
-        .catch((e: Error) => setNote(e.message)),
+        .then((next) => {
+          setRoots(next);
+          setReadError(null);
+        })
+        .catch((e: Error) => setReadError(e.message)),
     [bridge],
   );
 
@@ -201,7 +206,7 @@ export function ProjectsWidget({ bridge }: { bridge: Bridge }) {
     }
   };
 
-  if (!roots && note) return <p className="empty bad">{note}</p>;
+  if (!roots && readError) return <ReadFailure capability="project roots" error={readError} onRetry={() => void load()} />;
   if (!roots) return <p className="empty">reading folders...</p>;
 
   // A root the operator never arranged sorts after every one they did, and
@@ -216,6 +221,8 @@ export function ProjectsWidget({ bridge }: { bridge: Bridge }) {
 
   return (
     <div className="projects">
+      {readError && <ReadFailure capability="project roots" error={readError} stale onRetry={() => void load()} />}
+      {note && <p className="empty bad" role="alert">{note}</p>}
       {roots.length === 0 && (
         <p className="empty">
           Farseer has no folder to work in yet. Add one below - everything it builds stays inside

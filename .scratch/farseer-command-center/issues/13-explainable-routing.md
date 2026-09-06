@@ -19,14 +19,17 @@ The router may reorder only candidates the cell author declared equivalent.
 An absent cost remains unknown unless a versioned price basis supports an explicitly labelled estimate.
 Explicit unsupported pins fail instead of silently falling through; zero automatic retries is the initial default.
 
-- [ ] A run is sealed with the selected runner, model policy, candidate list, budget, and selection reason before spawn.
-- [ ] Exhausted, overage, unknown, and available states produce deterministic candidate ordering without introducing undeclared runners.
-- [ ] Every fallback records preferred candidate, selected candidate, observed pressure, actor, and estimated or reported cost basis.
+- [x] A run is sealed with the selected runner, model policy, candidate list, budget, and selection reason before spawn.
+- [x] Exhausted, overage, unknown, and available states produce deterministic candidate ordering without introducing undeclared runners.
+- [x] Every fallback records preferred candidate, selected candidate, observed pressure, actor, and estimated or reported cost basis.
 - [ ] Each requested bounded dimension retains its existing enforceability check; post-run accounting never substitutes for verified pre-spend enforcement.
-- [ ] Replaying the same input and observations produces the same selection and provenance.
+- [x] Replaying the same input and observations produces the same selection and provenance.
 
 **Evidence:** New instructions honor explicit and conversation runner pins, select the first non-exhausted declared candidate, and record a preferred-runner fallback event.
-The sealed pre-spawn routing record, full candidate pressure reasons, model policy, and replay fixture remain open.
+`routing_sealed` is now appended before admission and process creation for API-launched runs, with the selected runner, declared candidate order, observed pressure, preferred candidate, model and effort policy, budget, cost basis, retry policy, and selection reason.
+Delegated worker contracts emit the same bounded record before their workspace is created.
+The routing projection has a deterministic replay test covering an exhausted preferred account and an unknown fallback candidate.
+The full acceptance demo and analytics attribution read model remain open.
 
 **Exclusions:** No token-level router, opaque LLM judge, arbitrary installed model picker, or vendor gateway in the core.
 

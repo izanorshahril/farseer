@@ -20,14 +20,14 @@ Provide route, breadcrumb, Back, focus restoration, and one optional second main
 No docking library is required.
 
 - [x] Conversation, Work, Fleet, and Capacity expose the same titlebar convention for opening a focused face.
-- [ ] Navigation/main/inspector toggles work for a selected task and run, with an optional comparison pane; hidden panes do not alter execution state.
+- [x] Navigation/main/inspector toggles work for a selected task and run, with an optional comparison pane; hidden panes do not alter execution state.
 - [ ] Back restores the originating face, subject, and keyboard focus, including after restart.
 - [x] Inactive faces are removed from accessibility navigation and reduced-motion mode remains understandable.
 - [x] A focused workspace failure returns to the last valid face without affecting runtime execution.
 
-**Evidence:** `ui/src/App.tsx` gives each face the same focus action, persists focus and pane state in the canvas document, restores focus on Back or Escape, masks inspector identities, and clears stale focused faces.
+**Evidence:** `ui/src/App.tsx` gives each face the same focus action, persists focus, pane, and comparison state in the canvas document, restores focus on Back or Escape, masks inspector identities, and clears stale focused faces.
 `ui/src/style.css` hides inactive faces from the accessibility tree through layout removal and supplies responsive navigation and reduced-motion behavior.
-Comparison panes and browser-level focus restoration demos remain open.
+Browser-level focus restoration demos remain open.
 
 **Exclusions:** No arbitrary nested docking layout, terminal pane as runtime truth, or widget-owned agents.
 

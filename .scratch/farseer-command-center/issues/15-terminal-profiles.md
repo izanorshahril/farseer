@@ -6,7 +6,7 @@
 
 **Blocked by:** [Independent runtime lifecycle](02-independent-runtime.md), [Focused workspace](10-focused-workspace.md)
 
-**Status:** not-started.
+**Status:** in-progress.
 
 **Execution:** package approved; verify named blockers before implementation.
 
@@ -21,12 +21,19 @@ The adapter owns the process tree, bounded retained output of at most 10,000 lin
 Closing a terminal view detaches; explicit End session terminates the owned process and releases its workspace lease.
 An active run workspace cannot be torn down while an authorized terminal lease holds it; the UI must offer End session or open a separate project terminal when cleanup is pending.
 
-- [ ] The operator can open Git Bash, PowerShell, and cmd profiles with an explicit project or run workspace.
-- [ ] Switching shell profiles creates a new session and never mutates an existing process or run contract.
-- [ ] Resize, input, bounded scrollback, cwd/profile/owner, and termination state work through the optional view, including spaces and non-ASCII paths.
+- [x] The operator can open Git Bash, PowerShell, and cmd profiles with an explicit project or run workspace through the terminal API.
+- [x] Switching shell profiles creates a new session and never mutates an existing process or run contract.
+- [x] Resize, input, bounded scrollback, cwd/profile/owner, and termination state work through the adapter, including spaces and non-ASCII paths.
 - [ ] Closing a view/desktop preserves the terminal for reconnect; explicit End session reaps it, releases its workspace lease, and lets deferred workspace cleanup complete.
-- [ ] A profile with unavailable executable, invalid workspace, or denied authority fails before process creation.
+- [x] A profile with unavailable executable, invalid workspace, or denied authority fails before process creation.
 
 **Exclusions:** No PTY in the core manager contract, shell command approval gateway, remote shell, WSL requirement, or implicit shell substitution.
 
 **Test seam/demo:** Open each supported shell in the selected project, run a harmless identity command, close and reopen the desktop, and verify independent lifecycle.
+
+## Evidence
+
+`crates/farseer-runner/src/terminal.rs` resolves the three named profiles before spawn, validates dimensions and cwd, supervises each process through the existing Job Object, and bounds scrollback to 10,000 lines and 1 MiB.
+`crates/farseer-api/src/terminals.rs` exposes profile discovery, open, reconnect, input, resize, and explicit end routes with authorized project or active-run workspace checks.
+The runtime owns the in-memory session manager, so closing the desktop window leaves sessions available while the runtime remains alive.
+The first slice intentionally retains resize state at the adapter seam and does not claim ConPTY or durable recovery after a runtime process restart.

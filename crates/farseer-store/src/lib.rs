@@ -27,8 +27,10 @@ use farseer_core::{
 
 mod analytics;
 mod lifecycle;
+pub mod maintenance;
 mod memory;
 mod quota;
+mod resource;
 mod roots;
 mod schema;
 mod ui_state;
@@ -45,10 +47,11 @@ pub use farseer_core::MemoryId;
 pub use lifecycle::{Lifecycle, Purged};
 pub use memory::{MemoryCaps, MemoryClaim, MemoryScope, NewMemory, Promotion};
 pub use quota::WindowRow;
+pub use resource::ResourceSample;
 pub use ui_state::{UI_STATE_CAP_BYTES, UI_STATE_KEY_CAP_BYTES};
 pub use work::{
-    GraphEdge, GraphFilter, GraphNode, GraphPage, IndexedTranscript, RunParent, SessionRow,
-    SimilarityEdge, TaskCursor, TaskFilter, TranscriptAttachment, TranscriptProjection,
+    ArtifactRow, GraphEdge, GraphFilter, GraphNode, GraphPage, IndexedTranscript, RunParent,
+    SessionRow, SimilarityEdge, TaskCursor, TaskFilter, TranscriptAttachment, TranscriptProjection,
 };
 
 #[derive(Debug, thiserror::Error)]

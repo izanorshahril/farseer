@@ -30,6 +30,11 @@ Diagnostics may be expanded, but raw backend traces are not the primary message.
 
 ## Evidence
 
-The current increment adds `ui/src/WidgetBoundary.tsx` around every first-party and authored widget, a retry action with redacted operator-facing diagnostics, and shared SSE `connecting`/`live`/`stale` state rendered by Activity.
+`ui/src/WidgetBoundary.tsx` surrounds every first-party and authored widget, so a render exception is localized to that widget.
+`ui/src/ReadFailure.tsx` gives failed reads a capability label, retry action, optional scope reduction, and a bounded incident/status diagnostic without rendering backend messages.
+Conversation, run detail, runner thread, delegation, fleet, projects, quota, work, settings, and list widgets retain prior projections where available and use the shared recovery surface.
+`ui/src/stream.ts` marks EOF and transport errors stale, reconnects from the exclusive cursor, and drops replayed sequence numbers before dispatch.
+`ui/tests/recovery.test.ts` covers diagnostic redaction and duplicate stream-frame suppression.
 `bun run --cwd ui check` and `bun run --cwd ui test` pass.
-Per-widget stale projection retention and injected browser failure tests remain open.
+
+The runtime-continuity demo with an injected browser failure remains a manual E2E check because the UI test harness has no browser renderer or live farseer process.

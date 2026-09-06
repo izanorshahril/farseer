@@ -3,7 +3,7 @@
 **Parent:** [Command-center decision map](../map.md).
 **What to build:** Show measured resource use for supervised work and retain its final totals, while monitoring can be disabled without affecting execution.
 **Blocked by:** [Independent runtime lifecycle](02-independent-runtime.md), [Attributed usage](12-attributed-usage.md), [Recoverable schema](16-recoverable-schema.md)
-**Status:** not-started.
+**Status:** in-progress.
 **Execution gate:** the single package approval is required in addition to the named blockers.
 **Review refs:** R07; R13 applies as targeted cleanup within this slice.
 **Decision:** [Bounded record views and optional analysis](../decisions/02-data.md).
@@ -20,18 +20,19 @@ Sampling has a bounded queue and cannot block lifecycle writes; a dropped sample
 
 ## Acceptance criteria
 
-- [ ] A deterministic CPU/memory fixture produces nonnegative measured values with source, units, timestamp, and ownership scope, visible from run detail.
-- [ ] Disabling or failing the collector leaves launch, cancellation, finalization, and unrelated views working.
-- [ ] Reused PID and parent/child aggregate fixtures neither misattribute nor double-count usage.
-- [ ] Retention removes expired samples while the final cumulative observation and task/run identity remain queryable.
-- [ ] The UI distinguishes unavailable, stale, and measured data; no host-wide percentage is inferred from partial observation.
+- [x] A deterministic CPU/memory fixture produces nonnegative measured values with source, units, timestamp, and ownership scope, visible from run detail.
+- [ ] Disabling or failing the collector leaves launch, cancellation, finalization, and unrelated views working; failure fallback is implemented, but an operator toggle is still open.
+- [ ] The collector queries the owned Job Object handle rather than a PID, so reused PIDs and unrelated parent/child trees cannot transfer ownership; deterministic reused-PID and parent/child fixtures remain open.
+- [x] Retention removes expired non-final samples while the final cumulative observation and task/run identity remain queryable.
+- [x] The run detail distinguishes unavailable, stale, and measured data; it shows job scope and does not infer a host-wide percentage.
 
 ## Test seam and demo
 
-Start a deterministic supervised job through the public command interface and compare its recorded samples with the fixture's known ownership.
-Toggle collection while inspecting the same run through the operator view.
-Exercise collector failure and retention using injected observation/time inputs rather than sleeps.
+The deterministic fixture and retention tests run in `farseer-runner` and `farseer-store` without sleeps.
+The public run detail reads `/v1/runs/{id}/resources`, and the UI renders the latest state with safe fallback when that read fails.
+The remaining live demo is a Windows supervised run with a runtime toggle and periodic samples.
 
 ## Exclusions
 
 Cross-platform collectors, GPU/network tracing, OTLP servers, privileged host monitoring, and externally launched unowned processes remain outside this slice.
+The first bounded slice records start and final cumulative observations; a five-second background sampler and operator toggle remain open before this ticket can be marked complete.

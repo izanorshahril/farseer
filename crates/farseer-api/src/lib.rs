@@ -31,7 +31,7 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router, middleware};
 use serde::{Deserialize, Serialize};
-use tokio::sync::Notify;
+use tokio::sync::{Notify, Semaphore};
 
 use farseer_core::RunnerConfig;
 use farseer_core::policy::Budget;
@@ -43,9 +43,11 @@ use farseer_manager::{
     LivenessHandle, MANAGER_CELL_FIELD, RUN_ROLE_FIELD, RunOptions, RunRole, RunSink, SteerHandle,
 };
 use farseer_runner::spawn::CancelToken;
+use farseer_runner::terminal::TerminalManager;
 use farseer_store::{RunRow, ScanFilter, Store, StoreError, UI_STATE_CAP_BYTES};
 
 mod a2a;
+mod artifacts;
 mod attach;
 mod lifecycle;
 mod mcp;
@@ -53,6 +55,7 @@ mod notify;
 mod project_profiles;
 mod projects;
 pub mod security;
+mod terminals;
 mod work;
 
 pub use security::{RuntimeToken, runtime_file_path, write_runtime_file};
@@ -116,6 +119,12 @@ pub struct AppState {
     worker_counts: Mutex<HashMap<CellId, u32>>,
     /// Set exactly once after `serve` binds, including an OS-selected port.
     base_url: OnceLock<String>,
+    /// Optional operator shell sessions. Their output is adapter state, never
+    /// canonical run truth.
+    terminals: TerminalManager,
+    /// Keep local artifact work bounded even when several clients submit at
+    /// once; queued work remains visible through the normal task record.
+    artifact_slots: Arc<Semaphore>,
     /// Bounded single-worker queue for optional transcript projections.
     transcript_queue: OnceLock<tokio::sync::mpsc::Sender<work::ProjectionRequest>>,
     /// The last snapshot [`poll_windows`] took, or empty if nothing has polled.
@@ -407,6 +416,8 @@ impl AppState {
             pending_cancellations: Mutex::new(HashMap::new()),
             worker_counts: Mutex::new(HashMap::new()),
             base_url: OnceLock::new(),
+            terminals: TerminalManager::default(),
+            artifact_slots: Arc::new(Semaphore::new(2)),
             transcript_queue: OnceLock::new(),
             runtime: RuntimeControl::new(),
         }
@@ -499,6 +510,18 @@ impl AppState {
 
     pub fn runner_config(&self) -> &RunnerConfig {
         &self.runner_config
+    }
+
+    pub(crate) fn terminals(&self) -> &TerminalManager {
+        &self.terminals
+    }
+
+    pub(crate) fn runs_dir(&self) -> &std::path::Path {
+        &self.runs_dir
+    }
+
+    pub(crate) fn active_run_ids(&self) -> Vec<String> {
+        self.runs().keys().map(ToString::to_string).collect()
     }
 
     pub fn reload(&self) -> ReloadReport {
@@ -621,6 +644,33 @@ impl RunSink for AppState {
         self.store()
             .observe_window(cell_id, run_id, observation, ts)
     }
+
+    fn observe_resource(
+        &self,
+        observation: &farseer_runner::resource::ResourceObservation,
+    ) -> Result<(), StoreError> {
+        let run_id = observation
+            .run_id
+            .parse()
+            .map_err(|_| StoreError::Corrupt {
+                field: "resource run_id",
+                value: observation.run_id.clone(),
+            })?;
+        self.store()
+            .record_resource(&farseer_store::ResourceSample {
+                run_id,
+                source: observation.source.clone(),
+                scope: observation.scope.clone(),
+                cpu_time_100ns: observation.cpu_time_100ns,
+                memory_high_water_bytes: observation.memory_high_water_bytes,
+                cpu_unit: observation.cpu_unit.to_string(),
+                memory_unit: observation.memory_unit.to_string(),
+                timestamp_ms: observation.timestamp_ms,
+                collector_version: observation.collector_version.to_string(),
+                status: observation.status.to_string(),
+                final_sample: observation.final_sample,
+            })
+    }
 }
 
 #[derive(Debug, Default, Serialize)]
@@ -663,6 +713,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/v1/stream", get(stream_events))
         .route("/v1/runs", get(list_runs))
         .route("/v1/runs/{run_id}", get(get_run))
+        .route("/v1/runs/{run_id}/resources", get(get_run_resources))
         .route("/v1/runs/{run_id}/cancel", post(cancel_run))
         .route("/v1/runs/{run_id}/steer", post(steer_run))
         .route("/v1/runs/{run_id}/rerun", post(rerun_run))
@@ -674,6 +725,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/v1/tasks", get(work::list_tasks))
         .route("/v1/tasks/page", get(work::list_task_page))
         .route("/v1/tasks/{task_id}", get(work::get_task))
+        .route("/v1/artifacts/manifests", post(artifacts::start_manifest))
         .route("/v1/work/sessions", get(work::list_sessions))
         .route(
             "/v1/tasks/{task_id}/transition",
@@ -717,6 +769,16 @@ pub fn router(state: Arc<AppState>) -> Router {
             "/v1/projects/profile/reload",
             post(project_profiles::reload),
         )
+        .route(
+            "/v1/terminals",
+            get(terminals::profiles).post(terminals::open),
+        )
+        .route(
+            "/v1/terminals/{id}",
+            get(terminals::read).delete(terminals::end),
+        )
+        .route("/v1/terminals/{id}/input", post(terminals::input))
+        .route("/v1/terminals/{id}/resize", post(terminals::resize))
         .route("/v1/skills", get(skills))
         .route("/v1/quota", get(quota))
         .route("/v1/quota/refresh", post(refresh_quota))
@@ -852,6 +914,8 @@ enum ApiError {
     Steer(String),
     #[error("transcript storage failed: {0}")]
     Transcript(String),
+    #[error("terminal session failed: {0}")]
+    Terminal(#[from] farseer_runner::terminal::TerminalError),
 }
 
 impl IntoResponse for ApiError {
@@ -875,6 +939,19 @@ impl IntoResponse for ApiError {
             | Self::Corrupt(_)
             | Self::Steer(_)
             | Self::Transcript(_) => StatusCode::INTERNAL_SERVER_ERROR,
+            Self::Terminal(error) => match error {
+                farseer_runner::terminal::TerminalError::ProfileUnavailable(_)
+                | farseer_runner::terminal::TerminalError::NotFound(_) => StatusCode::NOT_FOUND,
+                farseer_runner::terminal::TerminalError::MissingOwner
+                | farseer_runner::terminal::TerminalError::InvalidWorkspace(_)
+                | farseer_runner::terminal::TerminalError::InvalidDimensions
+                | farseer_runner::terminal::TerminalError::Ended => StatusCode::BAD_REQUEST,
+                farseer_runner::terminal::TerminalError::Input(_)
+                | farseer_runner::terminal::TerminalError::Spawn(_)
+                | farseer_runner::terminal::TerminalError::Reader(_) => {
+                    StatusCode::INTERNAL_SERVER_ERROR
+                }
+            },
         };
         (
             status,
@@ -1278,11 +1355,12 @@ async fn instruct_cell(
     });
     let conversation_runner = existing
         .as_ref()
-        .and_then(|conversation| conversation.manager_runner.as_deref());
+        .and_then(|conversation| conversation.manager_runner.as_deref())
+        .map(str::to_owned);
     let (runner, routing_fallback) = if let Some(runner) = requested_runner {
         (runner.to_owned(), None)
-    } else if let Some(runner) = conversation_runner {
-        (runner.to_owned(), None)
+    } else if let Some(runner) = conversation_runner.as_ref() {
+        (runner.clone(), None)
     } else {
         let preferred = cell.manager.runner().to_owned();
         let selected = first_available_runner(&state, &cell.manager.runners).ok_or(
@@ -1374,6 +1452,21 @@ async fn instruct_cell(
         cell.clone(),
         project,
         None,
+        Some(routing_provenance(
+            &state,
+            &cell,
+            &runner,
+            if requested_runner.is_some() {
+                "explicit_runner_pin"
+            } else if conversation_runner.is_some() {
+                "conversation_runner_pin"
+            } else if routing_fallback.is_some() {
+                "availability_fallback"
+            } else {
+                "cell_preference"
+            },
+            cell.budget,
+        )),
     ) {
         Ok(run_id) => run_id,
         Err(error) => {
@@ -1852,6 +1945,7 @@ pub(crate) fn spawn_run(
     pinned_cell: CellDefinition,
     project: Option<PathBuf>,
     caller_children: Option<Arc<Mutex<HashSet<RunId>>>>,
+    routing: Option<serde_json::Value>,
 ) -> ApiResult<RunId> {
     ensure_runner_authority(&pinned_cell, &contract.runner)?;
     if let Some(dimension) = unenforceable_budget_dimension(&contract.runner, contract.budget) {
@@ -1876,7 +1970,29 @@ pub(crate) fn spawn_run(
         None
     };
     let run_id = contract.run_id;
+    // Admission comes before the provenance write so a draining runtime does
+    // not retain a routing event for work it refused.  The route is still
+    // sealed before any workspace or process is created.
     state.admit_run()?;
+    if let Err(error) = state.store().append(&NewEvent::new(
+        contract.cell_id.clone(),
+        run_id,
+        farseer_core::EventKind::new(farseer_core::EventKind::ROUTING_SEALED),
+        farseer_core::Actor::System,
+        now_ms(),
+        routing.unwrap_or_else(|| {
+            routing_provenance(
+                state,
+                &pinned_cell,
+                &contract.runner,
+                "sealed_contract",
+                contract.budget,
+            )
+        }),
+    )) {
+        state.release_run();
+        return Err(error.into());
+    }
     let (cwd, repo_for_teardown) =
         match create_workspace(state, contract.workspace, run_id, project.as_deref()) {
             Ok(workspace) => workspace,
@@ -2431,6 +2547,7 @@ async fn respawn(
         // An operator re-run belongs to the operator, not to whatever manager
         // owned the run it repeats.
         None,
+        None,
     ) {
         Ok(run_id) => run_id,
         Err(error) => {
@@ -2602,6 +2719,14 @@ pub struct RunView {
     pub operator_touched: bool,
     pub started_ts: i64,
     pub finished_ts: Option<i64>,
+    /// `12 attributed usage`: wall duration derived from observed start and finish timestamps.
+    /// This is a run-local observation and never a billing denominator.
+    pub duration_ms: i64,
+    /// `12 attributed usage`: whether the terminal report stated the cost or farseer derived it from
+    /// the configured list price.
+    pub cost_basis: &'static str,
+    /// `12 attributed usage`: the aggregation scope for the usage fields above.
+    pub usage_scope: &'static str,
     pub liveness_stalled_secs: u64,
     pub liveness_likely_hung_secs: u64,
     /// `18 hang detection prior art`/`05 run state model`'s watchdog state - `"live"`, `"stalled"` or `"likely_hung"` -
@@ -2689,6 +2814,19 @@ async fn get_run(
     Ok(Json(run_view(&state, row)))
 }
 
+/// Optional process evidence is read separately so an unavailable collector
+/// never changes the stable run shape or lifecycle response.
+async fn get_run_resources(
+    State(state): State<Arc<AppState>>,
+    UrlPath(run_id): UrlPath<String>,
+) -> ApiResult<Json<Vec<farseer_store::ResourceSample>>> {
+    let run_id: RunId = run_id.parse().map_err(|_| ApiError::NotFound("run"))?;
+    if state.store().run(run_id)?.is_none() {
+        return Err(ApiError::NotFound("run"));
+    }
+    Ok(Json(state.store().resource_samples(run_id, 256)?))
+}
+
 /// One row, on all three axes.
 ///
 /// Shared by the list and the single read so the two can never disagree about
@@ -2712,12 +2850,15 @@ fn title_of(goal: &str) -> Option<String> {
 
 /// The goal and role a run was queued with, read from its first recorded event.
 ///
-/// One indexed row per run - `events_run(run_id, seq)` makes `LIMIT 1` cheap -
+/// A small indexed prefix per run - `events_run(run_id, seq)` makes this cheap -
 /// rather than the full scan `original_run` does, because a list of fifty runs
 /// must not cost fifty full scans.
 fn queued_facts(state: &Arc<AppState>, run_id: RunId) -> (Option<String>, Option<String>) {
     let store = state.store();
-    let Ok(events) = store.scan(0, 1, &ScanFilter::run(run_id)) else {
+    // `13 explainable routing` seals one provenance event immediately before
+    // `run_queued`, so read the small fixed prefix and locate the queue event
+    // instead of assuming it is the first row.
+    let Ok(events) = store.scan(0, 4, &ScanFilter::run(run_id)) else {
         return (None, None);
     };
     let Some(queued) = events
@@ -2843,6 +2984,101 @@ fn first_available_runner(state: &AppState, candidates: &[String]) -> Option<Str
         .cloned()
 }
 
+/// Seal the route facts that led to a contract before its process is spawned.
+///
+/// This is deliberately a small projection over declared candidates and the
+/// latest observed windows.  It does not price work, discover runners, or
+/// turn unknown pressure into a score.  The candidate order is the cell
+/// author's order, which makes replaying the same observations deterministic.
+pub(crate) fn routing_provenance(
+    state: &AppState,
+    cell: &CellDefinition,
+    selected: &str,
+    reason: &str,
+    budget: Budget,
+) -> serde_json::Value {
+    routing_provenance_for_candidates(state, &cell.manager.runners, selected, reason, budget)
+}
+
+/// Variant used by a worker roster, whose candidates belong to the caller's
+/// pinned cell rather than to the cell manager itself.
+pub(crate) fn routing_provenance_for_candidates(
+    state: &AppState,
+    candidates: &[String],
+    selected: &str,
+    reason: &str,
+    budget: Budget,
+) -> serde_json::Value {
+    let config = state.runner_config();
+    let windows = state
+        .store()
+        .windows(|account| config.runners_on(account))
+        .unwrap_or_default();
+    let preferred = candidates.first().cloned();
+    let candidates = candidates
+        .iter()
+        .map(|runner| {
+            let account = config.account_for(runner);
+            let matching = windows
+                .iter()
+                .filter(|window| {
+                    config
+                        .runners_on(&window.account)
+                        .iter()
+                        .any(|name| name == runner)
+                })
+                .collect::<Vec<_>>();
+            let exhausted = matching
+                .iter()
+                .filter(|window| window.status == "exhausted_until")
+                .filter_map(|window| window.resets_at)
+                .collect::<Vec<_>>();
+            let overage = matching.iter().any(|window| window.is_using_overage);
+            let pressure = if !exhausted.is_empty() {
+                "exhausted"
+            } else if overage {
+                "overage"
+            } else if matching.is_empty() {
+                "unknown"
+            } else {
+                "available"
+            };
+            serde_json::json!({
+                "runner": runner,
+                "account": account,
+                "pressure": pressure,
+                "resets_at": exhausted,
+            })
+        })
+        .collect::<Vec<_>>();
+    let (model, effort) = config.launch_of(selected);
+    let cost_basis = match config.price_for(selected) {
+        Some(usd_micros_per_mtok) => serde_json::json!({
+            "kind": "configured_list_price_estimate",
+            "usd_micros_per_mtok": usd_micros_per_mtok,
+        }),
+        None => serde_json::json!({ "kind": "runner_reported_or_unknown" }),
+    };
+    serde_json::json!({
+        "version": 1,
+        "selected_runner": selected,
+        "preferred_runner": preferred,
+        "candidates": candidates,
+        "reason": reason,
+        "model_policy": {
+            "model": model,
+            "effort": effort,
+        },
+        "budget": budget,
+        "cost_basis": cost_basis,
+        "policy": {
+            "availability": "observed_windows",
+            "unknown_is_eligible": true,
+            "automatic_retries": 0,
+        },
+    })
+}
+
 /// Refuse a tool level farseer cannot actually impose on this runner.
 ///
 /// The third application of one rule, and the one `36 tool grant enforcement`
@@ -2913,6 +3149,13 @@ fn run_view(state: &Arc<AppState>, row: RunRow) -> RunView {
         operator_touched: row.operator_touched,
         started_ts: row.started_ts,
         finished_ts: row.finished_ts,
+        duration_ms: row
+            .finished_ts
+            .unwrap_or_else(now_ms)
+            .saturating_sub(row.started_ts)
+            .max(0),
+        cost_basis: cost_basis(state, run_id),
+        usage_scope: "run",
         liveness_stalled_secs: state.thresholds.stalled_secs,
         liveness_likely_hung_secs: state.thresholds.likely_hung_secs,
         liveness: state
@@ -2930,6 +3173,38 @@ fn run_view(state: &Arc<AppState>, row: RunRow) -> RunView {
         .to_string(),
     };
     view
+}
+
+/// `12 attributed usage` preserves the distinction manager reports make in `run_finished`.
+/// A positive value in the run row alone cannot say whether it was provider
+/// reported or a configured list-price estimate.
+fn cost_basis(state: &Arc<AppState>, run_id: RunId) -> &'static str {
+    let Ok(events) = state.store().scan_tail(8, &ScanFilter::run(run_id)) else {
+        return "unknown";
+    };
+    let Some(event) = events
+        .iter()
+        .rev()
+        .find(|event| event.kind.as_str() == farseer_core::EventKind::RUN_FINISHED)
+    else {
+        return "unknown";
+    };
+    if event
+        .payload
+        .get("cost_estimated")
+        .and_then(serde_json::Value::as_bool)
+        == Some(true)
+    {
+        "estimated"
+    } else if event
+        .payload
+        .get("cost_usd_micros")
+        .is_some_and(|value| !value.is_null())
+    {
+        "reported"
+    } else {
+        "unknown"
+    }
 }
 
 #[cfg(test)]
@@ -3372,7 +3647,7 @@ mod tests {
     use super::*;
     use axum::body::Body;
     use axum::http::Request;
-    use farseer_core::{Actor, NewEvent};
+    use farseer_core::{Actor, EventKind, NewEvent};
     use http_body_util::BodyExt;
     use serde_json::json;
     use tower::ServiceExt;
@@ -4649,6 +4924,7 @@ grants_shell = true
             cell,
             None,
             Some(Arc::clone(&children)),
+            None,
         )
         .expect("the callee spawns");
 
@@ -6787,6 +7063,111 @@ runner = "{runner}"
         // And a pin with nowhere to go is `None`, which the delegation path
         // turns into `runner_exhausted` - `26` section 3, not a fifth outcome.
         assert_eq!(first_available_runner(&h.state, &pinned), None);
+    }
+
+    #[test]
+    fn routing_provenance_is_bounded_and_replayable() {
+        let h = harness();
+        let mut cell = cell_with("pi");
+        cell.manager.runners = vec!["pi".into(), "omp".into()];
+        let spent = farseer_core::WindowObservation {
+            account: "pi".into(),
+            runner: "pi".into(),
+            availability: farseer_core::Availability::ExhaustedUntil {
+                resets_at: 1_787_000_000,
+            },
+            rate_limit_type: "five_hour".into(),
+            is_using_overage: false,
+            used_percent: None,
+            window_duration_mins: None,
+            provider: None,
+            label: None,
+        };
+        h.state
+            .store()
+            .observe_window(&CellId::new("zero"), RunId::new(), &spent, 1_000)
+            .unwrap();
+
+        let first = routing_provenance(
+            &h.state,
+            &cell,
+            "omp",
+            "availability_fallback",
+            farseer_core::Budget::default(),
+        );
+        let second = routing_provenance(
+            &h.state,
+            &cell,
+            "omp",
+            "availability_fallback",
+            farseer_core::Budget::default(),
+        );
+        assert_eq!(first, second, "same observations must replay identically");
+        assert_eq!(first["selected_runner"], "omp");
+        assert_eq!(first["preferred_runner"], "pi");
+        assert_eq!(first["candidates"][0]["runner"], "pi");
+        assert_eq!(first["candidates"][0]["pressure"], "exhausted");
+        assert_eq!(first["candidates"][1]["runner"], "omp");
+        assert_eq!(first["candidates"][1]["pressure"], "unknown");
+        assert_eq!(first["policy"]["automatic_retries"], 0);
+        assert_eq!(first["cost_basis"]["kind"], "runner_reported_or_unknown");
+    }
+
+    #[test]
+    fn run_usage_preserves_reported_estimated_and_unknown_cost_basis() {
+        let h = harness();
+        for (basis, payload) in [
+            (
+                "reported",
+                serde_json::json!({
+                    "outcome": "ok",
+                    "cost_usd_micros": 12,
+                    "cost_estimated": false
+                }),
+            ),
+            (
+                "estimated",
+                serde_json::json!({
+                    "outcome": "ok",
+                    "cost_usd_micros": 12,
+                    "cost_estimated": true
+                }),
+            ),
+            (
+                "unknown",
+                serde_json::json!({ "outcome": "failed", "cost_usd_micros": null }),
+            ),
+        ] {
+            let run_id = RunId::new();
+            h.state
+                .store()
+                .upsert_run(&RunRow {
+                    run_id,
+                    task_id: farseer_core::TaskId::new(),
+                    cell_id: CellId::new("zero"),
+                    runner: "pi".into(),
+                    model: "model".into(),
+                    outcome: Some("ok".into()),
+                    usd_micros: 12,
+                    tokens: 4,
+                    operator_touched: false,
+                    started_ts: 1,
+                    finished_ts: Some(3),
+                })
+                .unwrap();
+            h.state
+                .store()
+                .append(&NewEvent::new(
+                    CellId::new("zero"),
+                    run_id,
+                    EventKind::new(EventKind::RUN_FINISHED),
+                    Actor::System,
+                    3,
+                    payload,
+                ))
+                .unwrap();
+            assert_eq!(cost_basis(&h.state, run_id), basis);
+        }
     }
 
     /// `runner = "pi"` and `runners = ["pi", "omp"]` are the same field, because

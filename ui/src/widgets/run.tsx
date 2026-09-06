@@ -5,6 +5,7 @@ import { mask, usePrivacy } from "../privacy";
 import { onSelection, selectRun, selectedRun } from "../selection";
 import { confirmVerb } from "../confirm";
 import { meaningOf } from "../meaning";
+import { ReadFailure } from "../ReadFailure";
 
 /**
  * One run, whole: what it was told to do, everything it did, and how it ended.
@@ -34,10 +35,26 @@ type Run = {
   operator_touched: boolean;
   started_ts: number;
   finished_ts: number | null;
+  duration_ms?: number;
+  cost_basis?: "reported" | "estimated" | "unknown";
+  usage_scope?: string;
   liveness: "live" | "stalled" | "likely_hung" | null;
   title: string | null;
   role: string | null;
   finished_reason: string | null;
+};
+
+type ResourceSample = {
+  source: string;
+  scope: string;
+  cpu_time_100ns: number | null;
+  memory_high_water_bytes: number | null;
+  cpu_unit: string;
+  memory_unit: string;
+  timestamp_ms: number;
+  collector_version: string;
+  status: "measured" | "unavailable" | string;
+  final_sample: boolean;
 };
 
 /**
@@ -142,6 +159,7 @@ export function RunWidget({ bridge }: { bridge: Bridge }) {
   const [runId, setRunId] = useState<string | null>(selectedRun());
   const [run, setRun] = useState<Run | null>(null);
   const [events, setEvents] = useState<RecordEvent[]>([]);
+  const [resources, setResources] = useState<ResourceSample[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [note, setNote] = useState<string | null>(null);
@@ -154,12 +172,16 @@ export function RunWidget({ bridge }: { bridge: Bridge }) {
   const load = useCallback(
     async (id: string) => {
       try {
-        const [row, trajectory] = await Promise.all([
+        const [row, trajectory, samples] = await Promise.all([
           bridge.read<Run>(`/runs/${id}`),
           bridge.read<RecordEvent[]>(`/events?run=${id}`),
+          // Resource collection is optional. A read failure must leave the
+          // run detail usable, per `21 optional supervised resource monitor`.
+          bridge.read<ResourceSample[]>(`/runs/${id}/resources`).catch(() => []),
         ]);
         setRun(row);
         setEvents(trajectory);
+        setResources(samples);
         setError(null);
       } catch (e) {
         setError((e as Error).message);
@@ -172,6 +194,7 @@ export function RunWidget({ bridge }: { bridge: Bridge }) {
     if (!runId) {
       setRun(null);
       setEvents([]);
+      setResources([]);
       setNote(null);
       setDraft(null);
       return;
@@ -222,17 +245,27 @@ export function RunWidget({ bridge }: { bridge: Bridge }) {
         contract, everything it did, and the verbs that need both on screen.
       </p>
     );
-  if (error && !run) return <p className="empty bad">{error}</p>;
+  if (error && !run) return <ReadFailure capability="run detail" error={error} onRetry={() => runId ? void load(runId) : undefined} />;
   if (!run) return <p className="empty">reading the run...</p>;
 
   const queued = events.find((event) => event.kind === "run_queued");
   const contract = (queued?.payload ?? {}) as Contract;
   const took = durations(events);
   const running = run.lifecycle === "running";
+  const latestResource = resources.at(-1);
+  const resourceStale = latestResource && Date.now() - latestResource.timestamp_ms > 15_000;
+  const resourceState = !latestResource
+    ? "unavailable"
+    : latestResource.status !== "measured"
+      ? "unavailable"
+      : resourceStale
+        ? "stale"
+        : "measured";
+  const memory = latestResource?.memory_high_water_bytes;
 
   return (
     <>
-      {error && <p className="empty bad" role="alert">{error} - showing the last successful run projection.</p>}
+      {error && <ReadFailure capability="run detail" error={error} stale onRetry={() => runId ? void load(runId) : undefined} />}
       <div className="row" style={{ marginBottom: 8 }}>
         <b>{run.title ?? run.run_id.slice(0, 8)}</b>
         <span className="grow" />
@@ -250,7 +283,22 @@ export function RunWidget({ bridge }: { bridge: Bridge }) {
         <Fact label="state" value={running ? (run.liveness ?? "running") : (run.outcome ?? "")} />
         <Fact label="took" value={elapsed(run, now)} />
         <Fact label="cost" value={run.usd_micros > 0 ? usd(run.usd_micros) : undefined} />
+        <Fact label="cost basis" value={run.cost_basis} />
+        <Fact label="usage scope" value={run.usage_scope} />
         <Fact label="tokens" value={run.tokens > 0 ? run.tokens.toLocaleString() : undefined} />
+      </div>
+
+      <div className="meta resource-facts" title="Optional supervised-job observations; this is not host-wide telemetry">
+        <Fact label="resources" value={resourceState} />
+        <Fact
+          label="cpu time"
+          value={latestResource?.cpu_time_100ns == null ? undefined : `${latestResource.cpu_time_100ns} × 100ns`}
+        />
+        <Fact
+          label="memory high water"
+          value={memory == null ? undefined : `${(memory / (1024 * 1024)).toFixed(1)} MiB`}
+        />
+        <Fact label="resource scope" value={latestResource?.scope} />
       </div>
 
       {/* Why it ended that way, when the record says. A screen of `failed`

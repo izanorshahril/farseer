@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import type { Bridge } from "../bridge";
+import { ReadFailure } from "../ReadFailure";
 
 /**
  * Which harness stands in front of farseer.
@@ -40,6 +41,7 @@ export function SettingsWidget({ bridge }: { bridge: Bridge }) {
   /** Which runner is expanded. `null` means "whichever is in use". */
   const [open, setOpen] = useState<string | null>(null);
   const [available, setAvailable] = useState(true);
+  const [readError, setReadError] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     try {
@@ -49,7 +51,9 @@ export function SettingsWidget({ bridge }: { bridge: Bridge }) {
       ]);
       setRunners(list);
       setCurrent(top);
-    } catch {
+      setReadError(null);
+    } catch (error) {
+      setReadError((error as Error).message);
       setAvailable(false);
     }
     // Separate from the two above: a settings surface that vanishes because the
@@ -101,10 +105,14 @@ export function SettingsWidget({ bridge }: { bridge: Bridge }) {
         there is nothing here to write with.
       </p>
     );
-  if (!runners || !current) return <p className="empty">reading the definition...</p>;
+  if (!runners || !current) {
+    if (readError) return <ReadFailure capability="settings" error={readError} onRetry={() => void load()} />;
+    return <p className="empty">reading the definition...</p>;
+  }
 
   return (
     <>
+      {readError && <ReadFailure capability="settings" error={readError} stale onRetry={() => void load()} />}
       <p className="dim small" style={{ margin: "0 0 10px" }}>
         The harness in front of <b>{current.cell_id}</b>. Every request you type goes to it, and it
         decides where the work goes.

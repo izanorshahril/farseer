@@ -3,7 +3,7 @@
 **Parent:** [Command-center decision map](../map.md).
 **What to build:** Let Farseer maintain its own repository as an ordinary project by creating an isolated candidate change with reproduction and validation evidence.
 **Blocked by:** [Independent runtime lifecycle](02-independent-runtime.md), [Project team profiles](14-project-teams.md).
-**Status:** not-started.
+**Status:** in-progress.
 **Execution:** package approved; verify named blockers before implementation.
 **Review refs:** R11; R13 applies as targeted cleanup.
 **Decision:** [Self-maintenance and domain integration](../decisions/05-maintenance.md).
@@ -28,3 +28,9 @@ Normal project execution remains possible while maintenance is disabled.
 
 **Exclusions:** New proposal status engines, automatic merge/promotion, credential changes, and permanent background LLM reasoning.
 **Test seam/demo:** A deterministic runner fixture produces a candidate edit in an isolated test repository; inspect the evidence and repeat the trigger without creating another task.
+
+## Evidence
+
+`farseer-store::maintenance::ProposalLedger` now persists proposal metadata, trigger and lineage identity, one bounded attempt, candidate source metadata, and validation evidence.
+Duplicate triggers return the existing proposal, a different trigger is refused while one proposal is open, and self-lineage events are suppressible after reload through the JSON ledger.
+Task/run/artifact view integration and the deterministic runner fixture remain open.

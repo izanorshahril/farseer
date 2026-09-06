@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import type { Bridge } from "../bridge";
-import { mask, usePrivacy } from "../privacy";
+import { mask, RevealField, usePrivacy } from "../privacy";
+import { ReadFailure } from "../ReadFailure";
 
 /**
  * `27 quota accounting`'s utilisation surface, as a widget.
@@ -336,7 +337,8 @@ export function QuotaWidget({ bridge }: { bridge: Bridge }) {
   // widget that hides its refresh button exactly when the read is broken hides
   // the control the operator came for, and shows them a message about a setting
   // with nothing to click afterwards.
-  if (!windows && !error) return <p className="empty">reading windows...</p>;
+  if (!windows && error) return <ReadFailure capability="quota windows" error={error} onRetry={() => void load()} />;
+  if (!windows) return <p className="empty">reading windows...</p>;
 
   // **Grouped by provider, not by account.** One login spans several providers -
   // four of the five omp reports here carry the same email - so grouping by
@@ -350,7 +352,7 @@ export function QuotaWidget({ bridge }: { bridge: Bridge }) {
   //
   // First-seen order rather than sorted, so the list does not reshuffle under
   // the operator every thirty seconds.
-  const groups: { key: string; title: string; under: string; windows: Window[] }[] = [];
+  const groups: { key: string; title: string; underValue: string; windows: Window[] }[] = [];
   for (const w of windows ?? []) {
     const key = w.provider ?? w.account;
     const found = groups.find((g) => g.key === key);
@@ -361,7 +363,7 @@ export function QuotaWidget({ bridge }: { bridge: Bridge }) {
         title: w.provider ? providerName(w.provider) : mask(w.account, "account", privacy),
         // The login underneath, which is the thing two providers can share and
         // the reason the heading is no longer allowed to be it.
-        under: mask(w.account, "account", privacy),
+        underValue: w.account,
         windows: [w],
       });
   }
@@ -369,7 +371,7 @@ export function QuotaWidget({ bridge }: { bridge: Bridge }) {
   return (
     <>
       {controls}
-      {error && <p className="empty bad">{error}</p>}
+      {error && <ReadFailure capability="quota windows" error={error} stale onRetry={() => void load()} />}
       {groups.length === 0 && !error && (
         <p className="empty">
           No window observed yet. A window appears the first time a runner reports one, which is
@@ -382,9 +384,12 @@ export function QuotaWidget({ bridge }: { bridge: Bridge }) {
           <div className="row">
             <b>{group.title}</b>
             <span className="grow" />
-            <span className="faint small mono" title={group.under}>
-              {group.under}
-            </span>
+            <RevealField
+              value={group.underValue}
+              kind="account"
+              fieldKey={`quota:${group.key}`}
+              label="provider account"
+            />
           </div>
           <div className="tiles">
             {group.windows.map((w) => (

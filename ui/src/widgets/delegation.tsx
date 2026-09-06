@@ -1,7 +1,8 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import type { Bridge } from "../bridge";
 import { meaningOf } from "../meaning";
 import { follow, type RecordEvent } from "../stream";
+import { ReadFailure } from "../ReadFailure";
 
 /**
  * What the top manager asked a worker for, and what came back.
@@ -103,6 +104,11 @@ function fold(current: Map<string, Exchange>, event: RecordEvent): Map<string, E
 export function DelegationWidget({ bridge }: { bridge: Bridge }) {
   const [byRun, setByRun] = useState<Map<string, Exchange>>(new Map());
   const [error, setError] = useState<string | null>(null);
+  const load = useCallback(async () => {
+    const events = await bridge.read<RecordEvent[]>("/events?tail=600");
+    setByRun((current) => events.reduce(fold, current));
+    setError(null);
+  }, [bridge]);
 
   useEffect(() => {
     let live = true;
@@ -110,18 +116,13 @@ export function DelegationWidget({ bridge }: { bridge: Bridge }) {
     // Replay then follow, per `07 attach semantics` - the same call, a different
     // cursor. Without the replay a widget mounted after a run is a blank panel
     // about work that already happened.
-    bridge
-      .read<RecordEvent[]>("/events?tail=600")
-      .then((events) => live && events.forEach(add))
-      .catch((e: Error) => live && setError(e.message));
+    void load().catch((e: Error) => live && setError(e.message));
     const subscription = follow(add);
     return () => {
       live = false;
       subscription.close();
     };
-  }, [bridge]);
-
-  if (error) return <p className="empty bad">{error}</p>;
+  }, [load]);
 
   // Newest first: a delegation from an hour ago is history, and the one that
   // just started is the one being watched.
@@ -129,14 +130,16 @@ export function DelegationWidget({ bridge }: { bridge: Bridge }) {
 
   if (exchanges.length === 0)
     return (
-      <p className="empty">
-        No worker has been given anything yet. When the top manager delegates, what it asked for
-        and what came back appear here as a pair.
-      </p>
+      <>
+        {error && <ReadFailure capability="worker delegation" error={error} onRetry={() => void load().catch((e: Error) => setError(e.message))} />}
+        {!error && <p className="empty">No worker has been given anything yet. When the top manager delegates, what it asked for and what came back appear here as a pair.</p>}
+      </>
     );
 
   return (
-    <ol className="exchanges">
+    <>
+      {error && <ReadFailure capability="worker delegation" error={error} stale onRetry={() => void load().catch((e: Error) => setError(e.message))} />}
+      <ol className="exchanges">
       {exchanges.map((exchange) => (
         <li key={exchange.run}>
           <div className="row small">
@@ -170,6 +173,7 @@ export function DelegationWidget({ bridge }: { bridge: Bridge }) {
           )}
         </li>
       ))}
-    </ol>
+      </ol>
+    </>
   );
 }

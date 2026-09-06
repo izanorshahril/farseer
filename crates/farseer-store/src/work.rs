@@ -66,6 +66,24 @@ pub struct TranscriptProjection {
     pub updated_ts: i64,
 }
 
+/// Mutable supervision/provenance for a staged artifact.
+/// The deterministic artifact bytes are kept at `final_path` only after the
+/// worker has completed successfully.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ArtifactRow {
+    pub artifact_id: RunId,
+    pub task_id: TaskId,
+    pub run_id: RunId,
+    pub kind: String,
+    pub status: String,
+    pub input_path: String,
+    pub staged_path: String,
+    pub final_path: Option<String>,
+    pub error: Option<String>,
+    pub created_ts: i64,
+    pub finished_ts: Option<i64>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IndexedTranscript {
     pub digest: String,
@@ -144,6 +162,89 @@ pub struct GraphPage {
 }
 
 impl Store {
+    pub fn create_artifact(&self, artifact: &ArtifactRow) -> Result<()> {
+        self.conn().execute(
+            "INSERT INTO artifacts
+             (artifact_id, task_id, run_id, kind, status, input_path, staged_path,
+              final_path, error, created_ts, finished_ts)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+            rusqlite::params![
+                &artifact.artifact_id.as_bytes()[..],
+                &artifact.task_id.as_bytes()[..],
+                &artifact.run_id.as_bytes()[..],
+                &artifact.kind,
+                &artifact.status,
+                &artifact.input_path,
+                &artifact.staged_path,
+                artifact.final_path.as_deref(),
+                artifact.error.as_deref(),
+                artifact.created_ts,
+                artifact.finished_ts,
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn update_artifact(
+        &self,
+        artifact_id: RunId,
+        status: &str,
+        final_path: Option<&str>,
+        error: Option<&str>,
+        finished_ts: Option<i64>,
+    ) -> Result<bool> {
+        Ok(self.conn().execute(
+            "UPDATE artifacts SET status = ?2, final_path = ?3, error = ?4,
+             finished_ts = ?5 WHERE artifact_id = ?1",
+            rusqlite::params![
+                &artifact_id.as_bytes()[..],
+                status,
+                final_path,
+                error,
+                finished_ts,
+            ],
+        )? == 1)
+    }
+
+    pub fn artifacts_for_task(&self, task_id: TaskId) -> Result<Vec<ArtifactRow>> {
+        let mut statement = self.conn().prepare_cached(
+            "SELECT artifact_id, run_id, kind, status, input_path, staged_path,
+                    final_path, error, created_ts, finished_ts
+             FROM artifacts WHERE task_id = ?1 ORDER BY created_ts, rowid",
+        )?;
+        let rows = statement.query_map([&task_id.as_bytes()[..]], |row| {
+            Ok((
+                row.get::<_, Vec<u8>>(0)?,
+                row.get::<_, Vec<u8>>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, String>(4)?,
+                row.get::<_, String>(5)?,
+                row.get::<_, Option<String>>(6)?,
+                row.get::<_, Option<String>>(7)?,
+                row.get::<_, i64>(8)?,
+                row.get::<_, Option<i64>>(9)?,
+            ))
+        })?;
+        rows.map(|row| {
+            let row = row?;
+            Ok(ArtifactRow {
+                artifact_id: RunId::from_bytes(uuid_bytes(&row.0, "artifact_id")?),
+                task_id,
+                run_id: RunId::from_bytes(uuid_bytes(&row.1, "run_id")?),
+                kind: row.2,
+                status: row.3,
+                input_path: row.4,
+                staged_path: row.5,
+                final_path: row.6,
+                error: row.7,
+                created_ts: row.8,
+                finished_ts: row.9,
+            })
+        })
+        .collect()
+    }
+
     pub fn create_conversation(&self, conversation: &Conversation) -> Result<()> {
         self.conn().execute(
             "INSERT INTO conversations

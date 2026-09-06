@@ -593,6 +593,30 @@ impl FarseerMcp {
             definition_of_done: args.definition_of_done.unwrap_or_default(),
         });
 
+        // `13 explainable routing`: persist the worker candidate pressure and
+        // selection before a workspace or process is created.
+        self.state
+            .store()
+            .append(&NewEvent::new(
+                manager.cell.cell_id.clone(),
+                run_id,
+                EventKind::new(EventKind::ROUTING_SEALED),
+                Actor::Manager,
+                now_ms(),
+                crate::routing_provenance_for_candidates(
+                    &self.state,
+                    &candidates,
+                    &contract.runner,
+                    if candidates.first() == Some(&contract.runner) {
+                        "worker_preference"
+                    } else {
+                        "availability_fallback"
+                    },
+                    effective_budget,
+                ),
+            ))
+            .map_err(store_error)?;
+
         // The whole worker lifecycle blocks here - real minutes, not a
         // request/response tick - so `block_in_place` tells the multi-thread
         // runtime this task is stepping out of the async pool rather than
@@ -711,6 +735,32 @@ impl FarseerMcp {
                 None,
             )
         })?;
+        // `14 project teams` keeps profile specialists an eligibility
+        // narrowing over the cell's existing roster grant.  A project profile
+        // never copies grants into a second policy system, but it can refuse a
+        // call to a cell that the project did not nominate for this team.
+        let project_specialists = if let Some(project) = manager.project.as_deref() {
+            let (profile, _) =
+                crate::project_profiles::effective(&self.state, project).map_err(api_error)?;
+            if !profile.specialist_cells.is_empty()
+                && !profile
+                    .specialist_cells
+                    .iter()
+                    .any(|id| id == to_cell.as_str())
+            {
+                return Err(McpError::invalid_params(
+                    format!(
+                        "cell `{}` is not an eligible specialist in project profile `{}`",
+                        args.cell,
+                        project.display()
+                    ),
+                    None,
+                ));
+            }
+            Some(profile.specialist_cells)
+        } else {
+            None
+        };
         // `17 cell lifecycle`: a paused or archived callee starts no new run,
         // and a caller finding that out is better than a run that begins in a
         // cell the operator has stopped.
@@ -774,6 +824,7 @@ impl FarseerMcp {
             callee,
             manager.project.clone(),
             Some(Arc::clone(&manager.child_runs)),
+            None,
         ) {
             Ok(run_id) => run_id,
             Err(error) => {
@@ -804,6 +855,7 @@ impl FarseerMcp {
                 serde_json::json!({
                     "call": call,
                     "callee_run_id": run_id.to_string(),
+                    "project_specialists": project_specialists,
                 }),
             ))
             .map_err(store_error)?;

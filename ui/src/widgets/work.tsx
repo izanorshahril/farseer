@@ -3,6 +3,7 @@ import type { Bridge } from "../bridge";
 import { onSubjectSelection, selectSubject, selectedSubject } from "../selection";
 import { follow } from "../stream";
 import { mask, usePrivacy } from "../privacy";
+import { ReadFailure } from "../ReadFailure";
 
 type TaskState = "inbox" | "planned" | "in_progress" | "blocked" | "review" | "done" | "cancelled";
 type Task = {
@@ -30,13 +31,37 @@ type Conversation = {
   updated_ts: number;
   archived_ts?: number;
 };
-type Run = { run_id: string; runner: string; outcome?: string };
+type Run = {
+  run_id: string;
+  runner: string;
+  outcome?: string;
+  model?: string;
+  usd_micros?: number;
+  tokens?: number;
+  duration_ms?: number;
+  cost_basis?: "reported" | "estimated" | "unknown";
+};
 type Session = { run_id: string; identifier_kind: string; identifier: string; log_pointer?: string };
 type SessionRow = { session: Session & { observed_ts: number }; runner: string; model: string; project_path?: string; log_available: boolean };
 type SessionPage = { rows: SessionRow[]; next_offset?: number };
+type SearchHit = { digest: string; excerpt: string; coverage: string; projection_version?: string };
+type SearchPage = { rows: SearchHit[]; next_offset?: number };
 type Projection = { status: "pending" | "complete" | "truncated" | "failed" | "cancelled"; error?: string; coverage: string; updated_ts: number };
 type Attachment = { digest: string; run_id: string; custody: string; source: string; projection?: Projection };
-type TaskDetail = { task: Task; allowed_transitions: TaskState[]; runs: Run[]; sessions: Session[]; attachments: Attachment[]; transitions: { from: TaskState; to: TaskState; actor: string; reason: string; ts: number }[] };
+type Artifact = { artifact_id: string; run_id: string; kind: string; status: string; input_path: string; staged_path: string; final_path?: string; error?: string; created_ts: number; finished_ts?: number };
+type TaskUsage = {
+  scope: "task";
+  runs: number;
+  successful_runs: number;
+  failed_runs: number;
+  tokens: number;
+  usd_micros: number;
+  reported_usd_micros: number;
+  estimated_usd_micros: number;
+  duration_ms: number;
+  cost_basis: "reported" | "estimated" | "mixed" | "unknown";
+};
+type TaskDetail = { task: Task; usage?: TaskUsage; allowed_transitions: TaskState[]; runs: Run[]; sessions: Session[]; attachments: Attachment[]; artifacts?: Artifact[]; transitions: { from: TaskState; to: TaskState; actor: string; reason: string; ts: number }[] };
 type GraphNode = { id: string; kind: string; label: string; project_path?: string; runner?: string; target?: string; parent?: string };
 type GraphEdge = { from: string; to: string; kind: string; source?: string; projection?: string; score?: number; evidence: string[] };
 type Graph = {
@@ -49,7 +74,7 @@ type Graph = {
   generated_ts: number;
 };
 type Cell = { manager: { runners: string[] } };
-type Face = "board" | "conversations" | "sessions" | "graph" | "completed";
+type Face = "board" | "conversations" | "sessions" | "search" | "graph" | "completed";
 
 const STATES: TaskState[] = ["inbox", "planned", "in_progress", "blocked", "review", "done", "cancelled"];
 
@@ -69,6 +94,10 @@ export function WorkWidget({ bridge }: { bridge: Bridge }) {
   const [sessions, setSessions] = useState<SessionRow[]>([]);
   const [sessionOffset, setSessionOffset] = useState<number | undefined>();
   const [sessionsLoading, setSessionsLoading] = useState(false);
+  const [searchQuery, setSearchQuery] = useState("");
+  const [searchRows, setSearchRows] = useState<SearchHit[]>([]);
+  const [searchOffset, setSearchOffset] = useState<number | undefined>();
+  const [searchLoading, setSearchLoading] = useState(false);
   const [graph, setGraph] = useState<Graph | null>(null);
   const [graphProject, setGraphProject] = useState("");
   const [graphRunner, setGraphRunner] = useState("");
@@ -165,6 +194,26 @@ export function WorkWidget({ bridge }: { bridge: Bridge }) {
     }
   }, [bridge, projectScope]);
 
+  const loadSearch = useCallback(async (offset = 0) => {
+    if (!searchQuery.trim()) {
+      setSearchRows([]);
+      setSearchOffset(undefined);
+      return;
+    }
+    setSearchLoading(true);
+    try {
+      const params = new URLSearchParams({ q: searchQuery.trim(), limit: "50", offset: String(offset) });
+      const page = await bridge.read<SearchPage>(`/work/search/page?${params}`);
+      setSearchRows((current) => offset ? [...current, ...page.rows] : page.rows);
+      setSearchOffset(page.next_offset);
+      setError(null);
+    } catch (failure) {
+      setError((failure as Error).message);
+    } finally {
+      setSearchLoading(false);
+    }
+  }, [bridge, searchQuery]);
+
   useEffect(() => {
     if (face !== "graph") return;
     setGraph(null);
@@ -177,6 +226,13 @@ export function WorkWidget({ bridge }: { bridge: Bridge }) {
     setSessionOffset(undefined);
     void loadSessions();
   }, [face, projectScope, loadSessions]);
+
+  useEffect(() => {
+    if (face !== "search") return;
+    setSearchRows([]);
+    setSearchOffset(undefined);
+    void loadSearch();
+  }, [face, loadSearch]);
 
   useEffect(() => onSubjectSelection(setSubject), []);
   useEffect(() => {
@@ -250,7 +306,7 @@ export function WorkWidget({ bridge }: { bridge: Bridge }) {
     <div className={`work-panel${expanded ? " expanded" : ""}`}>
       <div className="work-toolbar">
         <div role="tablist" aria-label="Work faces">
-          {(["board", "conversations", "sessions", "graph", "completed"] as Face[]).map((name) => (
+          {(["board", "conversations", "sessions", "search", "graph", "completed"] as Face[]).map((name) => (
             <button key={name} className={face === name ? "chip on" : "chip"} role="tab" aria-selected={face === name} onClick={() => setFace(name)}>
               {name}
             </button>
@@ -278,10 +334,25 @@ export function WorkWidget({ bridge }: { bridge: Bridge }) {
             </select>
           </>
         )}
+        {face === "search" && (
+          <form onSubmit={(event) => { event.preventDefault(); void loadSearch(); }} className="row">
+            <input aria-label="search indexed transcripts" value={searchQuery} onChange={(event) => setSearchQuery(event.currentTarget.value)} placeholder="search scrubbed transcripts" />
+            <button className="chip on" disabled={searchLoading || !searchQuery.trim()}>search</button>
+          </form>
+        )}
         <button className="chip" aria-pressed={expanded} onClick={() => setExpanded((current) => !current)}>{expanded ? "restore" : "expand"}</button>
       </div>
-      {error && <p className="empty bad" role="alert">{error}</p>}
-      {face === "graph" && error && <button className="chip" onClick={() => loadGraph().catch(() => undefined)} disabled={graphLoading}>retry graph</button>}
+      {error && <ReadFailure
+        capability={`work ${face}`}
+        error={error}
+        stale
+        onRetry={() => {
+          if (face === "graph") void loadGraph().catch(() => undefined);
+          else if (face === "sessions") void loadSessions().catch(() => undefined);
+          else void load().catch(() => undefined);
+        }}
+        onReduceScope={projectScope ? () => setProjectScope("") : undefined}
+      />}
 
       {face === "board" && (
         <>
@@ -344,6 +415,22 @@ export function WorkWidget({ bridge }: { bridge: Bridge }) {
         </div>
       )}
 
+      {face === "search" && (
+        <div className="work-search">
+          {searchRows.length === 0 && !searchLoading && <p className="empty">Search indexed transcript excerpts.</p>}
+          <ul className="plain-list">
+            {searchRows.map((hit) => (
+              <li key={hit.digest} className="row-button">
+                <b className="mono">{mask(short(hit.digest), "session", privacy)}</b>
+                <small>{hit.coverage} · projection {hit.projection_version ?? "not stated"}</small>
+                <span>{hit.excerpt}</span>
+              </li>
+            ))}
+          </ul>
+          {searchOffset !== undefined && <button className="chip" onClick={() => void loadSearch(searchOffset)} disabled={searchLoading}>{searchLoading ? "searching..." : "load more excerpts"}</button>}
+        </div>
+      )}
+
       {face === "completed" && (
         <div className="completed-work">
           {[...grouped.done, ...grouped.cancelled].map((task) => (
@@ -366,8 +453,17 @@ export function WorkWidget({ bridge }: { bridge: Bridge }) {
         <aside className="task-detail" aria-label="Selected task detail">
           <div className="row"><b>{detail.task.title}</b><span className="badge">{stateLabel(detail.task.state)}</span><button className="chip" onClick={() => selectSubject({ task: null, run: null })}>close</button></div>
           <p>{detail.task.goal}</p>
+          {detail.usage && <div className="meta" aria-label="task usage">
+            <span><i>usage scope</i><b>task</b></span>
+            <span><i>runs</i><b>{detail.usage.runs}</b></span>
+            <span><i>tokens</i><b>{detail.usage.tokens.toLocaleString()}</b></span>
+            <span><i>cost</i><b>${(detail.usage.usd_micros / 1_000_000).toFixed(4)}</b></span>
+            <span><i>cost basis</i><b>{detail.usage.cost_basis}</b></span>
+            <span><i>duration</i><b>{(detail.usage.duration_ms / 1000).toFixed(1)}s</b></span>
+          </div>}
           <div className="task-actions">{detail.allowed_transitions.map((state) => <button key={state} className="chip" onClick={() => transition(state).catch((failure: Error) => setError(failure.message))}>{stateLabel(state)}</button>)}</div>
-          <div className="task-runs">{detail.runs.map((run) => <button key={run.run_id} className="chip" onClick={() => selectSubject({ run: run.run_id })}>{short(run.run_id)} · {run.runner} · {run.outcome ?? "running"}</button>)}</div>
+          <div className="task-runs">{detail.runs.map((run) => <button key={run.run_id} className="chip" onClick={() => selectSubject({ run: run.run_id })}>{short(run.run_id)} · {run.runner} · {run.model ?? "model not reported"} · {run.outcome ?? "running"}</button>)}</div>
+          {detail.artifacts?.map((artifact) => <p key={artifact.artifact_id} className="mono small">{artifact.kind} · {artifact.status} · {mask(artifact.input_path, "path", privacy)}{artifact.error ? ` · ${artifact.error}` : ""}</p>)}
           {detail.sessions.map((session) => <p key={`${session.identifier_kind}:${session.identifier}`} className="mono small">{session.identifier_kind} {mask(session.identifier, "session", privacy)}{session.log_pointer ? ` · ${mask(session.log_pointer, "path", privacy)}` : ""}</p>)}
           <form className="transcript-form" onSubmit={(event) => { event.preventDefault(); addTranscript().catch((failure: Error) => setError(failure.message)); }}>
             <select aria-label="transcript custody" value={transcriptMode} onChange={(event) => setTranscriptMode(event.currentTarget.value)}><option>reference</option><option>copy</option><option>copy-plus-index</option></select>
