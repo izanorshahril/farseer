@@ -142,3 +142,7 @@ The Verified startup ticket now carries an optional owner process id in the auth
 Only unreachable stale endpoints are retryable during startup; an answered wrong listener or unauthorized runtime fails distinctly, and a losing launcher terminates its non-owner child before attaching.
 The Safe staged runtime promotion ticket now runs explicit bounded migration and candidate-startup commands from disposable fixtures without shell interpolation, records observations in the promotion journal, and preserves recovery metadata on failure.
 The public browser smoke demonstrations and some live supervised-run evidence remain open by design; these are evidence gaps, not reasons to retain obsolete planning drafts.
+
+## Status correction, 2026-09-06 implementation wave 4
+
+The Safe staged runtime promotion ticket now has a public CLI regression for a failing candidate startup, including restored active identity, quarantined candidate, command observation, and durable recovery journal evidence.

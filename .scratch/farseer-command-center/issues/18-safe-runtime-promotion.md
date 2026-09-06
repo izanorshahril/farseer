@@ -3,7 +3,7 @@
 **Parent:** [Command-center decision map](../map.md).
 **What to build:** Promote one approved local runtime candidate and recover to its matched prior binary/data if activation fails.
 **Blocked by:** [Independent runtime lifecycle](02-independent-runtime.md), [Recoverable schema and backup](16-recoverable-schema.md), [Bounded maintenance source proposals](17-maintenance-proposals.md).
-**Status:** in-progress; bounded migration and candidate-startup execution is implemented, while the public end-to-end smoke demonstration remains open.
+**Status:** implemented.
 **Execution:** package approved; verify named blockers before implementation; a real future promotion separately requires product-level operator authorization.
 **Review refs:** R11, R14; R13 applies as targeted cleanup.
 **Decision:** [Self-maintenance and domain integration](../decisions/05-maintenance.md).
@@ -37,4 +37,4 @@ Promotion journal writes retain the previous metadata file during the Windows re
 The fixture tests cover stage, backup gate, activation, health verification, failed-health rollback, and an injected restore failure that records a stopped recovery note.
 `farseer promote-fixture` now drives those phases for a disposable root and persists each phase, while `farseer rollback-fixture` works from the durable journal without starting the candidate.
 The unit seam covers successful and failing migration/startup commands, timeout bounds, journal observations, and recovery back to the previous fixture.
-The remaining evidence gap is a public CLI demonstration with a deliberately failing candidate smoke command and the resulting restored task/admission record.
+`crates/farseer/tests/promotion.rs` drives the public CLI with a deliberately failing candidate startup and verifies the restored active identity, quarantined candidate, failed command observation, and recovery journal.
