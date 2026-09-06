@@ -2112,22 +2112,28 @@ pub(crate) fn spawn_run(
     // not retain a routing event for work it refused.  The route is still
     // sealed before any workspace or process is created.
     state.admit_run()?;
-    if let Err(error) = state.store().append(&NewEvent::new(
+    // Build the payload before taking the store lock. `routing_provenance`
+    // reads the same store, so evaluating it inside the `append` call would
+    // re-enter the non-reentrant mutex and hang every run with an inferred
+    // route.
+    let routing = routing.unwrap_or_else(|| {
+        routing_provenance(
+            state,
+            &pinned_cell,
+            &contract.runner,
+            "sealed_contract",
+            contract.budget,
+        )
+    });
+    let routing_event = NewEvent::new(
         contract.cell_id.clone(),
         run_id,
         farseer_core::EventKind::new(farseer_core::EventKind::ROUTING_SEALED),
         farseer_core::Actor::System,
         now_ms(),
-        routing.unwrap_or_else(|| {
-            routing_provenance(
-                state,
-                &pinned_cell,
-                &contract.runner,
-                "sealed_contract",
-                contract.budget,
-            )
-        }),
-    )) {
+        routing,
+    );
+    if let Err(error) = state.store().append(&routing_event) {
         state.release_run();
         return Err(error.into());
     }
@@ -5615,7 +5621,7 @@ grants_shell = true
         assert!(child_token.was_cancelled());
     }
 
-    /// A cell whose runner is not installed on this machine.
+    /// A cell whose runner is intentionally absent from every test machine.
     ///
     /// The point is a run that reaches `spawn_run`, registers, and then ends on
     /// its own at `ExecutableNotFound` - **without launching an agent**. A test
@@ -5626,7 +5632,7 @@ name = "Cell Zero"
 workspace_strategy = "plain_directory"
 
 [manager]
-runner = "cursor-agent"
+runner = "farseer-test-missing-runner"
 
 # `12 autonomy and deny list`: a runner with shell-equivalent reach needs the
 # cell to have granted one, or the run is refused before it is spawned.
@@ -5677,7 +5683,6 @@ grants_shell = true
             None,
         )
         .expect("the callee spawns");
-
         assert!(
             children.lock().unwrap().contains(&run_id),
             "an immediate cancel would race process startup and miss the callee              unless it is reachable before spawn_run returns"
@@ -6029,15 +6034,18 @@ grants_shell = true
         let mut queued = serde_json::Value::Null;
         for _ in 0..100 {
             let (_, events) = h.get(&format!("/v1/events?run={task_id}&limit=5")).await;
-            if events.get(0).is_some() {
-                queued = events;
+            if let Some(event) = events
+                .as_array()
+                .and_then(|events| events.iter().find(|event| event["kind"] == "run_queued"))
+            {
+                queued = event.clone();
                 break;
             }
             tokio::time::sleep(std::time::Duration::from_millis(20)).await;
         }
-        assert_eq!(queued[0]["cell_id"], "zero", "{queued}");
+        assert_eq!(queued["cell_id"], "zero", "{queued}");
         assert!(
-            queued[0]["payload"]["goal"]
+            queued["payload"]["goal"]
                 .as_str()
                 .unwrap()
                 .contains("a friendly orchestrator"),
