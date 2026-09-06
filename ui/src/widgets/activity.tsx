@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import type { Bridge } from "../bridge";
-import { follow, type RecordEvent } from "../stream";
+import { follow, onStreamState, type RecordEvent, type StreamState } from "../stream";
 
 /**
  * What the fleet is doing, live.
@@ -92,9 +92,11 @@ function summarise(event: RecordEvent): string {
 export function ActivityWidget({ bridge: _bridge }: { bridge: Bridge }) {
   const [events, setEvents] = useState<RecordEvent[]>([]);
   const [live, setLive] = useState(false);
+  const [stream, setStream] = useState<StreamState>("connecting");
   const took = durations(events);
 
   useEffect(() => {
+    const status = onStreamState(setStream);
     const subscription = follow((event) => {
       if (NOISE.has(event.kind)) return;
       setLive(true);
@@ -102,14 +104,14 @@ export function ActivityWidget({ bridge: _bridge }: { bridge: Bridge }) {
       // unbounded one is a memory leak with a scrollbar.
       setEvents((current) => [event, ...current].slice(0, 60));
     });
-    return subscription.close;
+    return () => { status(); subscription.close(); };
   }, []);
 
   return (
     <>
       <div className="row dim small" style={{ marginBottom: 8 }}>
-        <span className={live ? "pulse on" : "pulse"} aria-hidden />
-        <span>{live ? "following the record" : "waiting for the first event"}</span>
+        <span className={stream === "stale" ? "pulse warn" : live ? "pulse on" : "pulse"} aria-hidden />
+        <span>{stream === "stale" ? "record connection lost - reconnecting" : live ? "following the record" : "waiting for the first event"}</span>
       </div>
       {events.length === 0 ? (
         <p className="empty">

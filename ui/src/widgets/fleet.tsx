@@ -18,6 +18,12 @@ type Cell = {
   description: string;
   version: string;
   roster_size: number;
+  authority: {
+    tool_level: "read" | "edit" | "shell";
+    shell_grant: boolean;
+    runners: { runner: string; tool_level: string; shell_reach: string }[];
+    tools: { name: string; grants_shell: boolean; serving_path: boolean; authority: string }[];
+  };
 };
 
 /** Only the two fields this widget needs off a run row. */
@@ -103,6 +109,28 @@ export function FleetWidget({ bridge }: { bridge: Bridge }) {
           <p className="dim small">
             {cell.description || cell.cell_id} v{cell.version}
           </p>
+          <details className="fleet-detail">
+            <summary>authority detail</summary>
+            <p className="dim small">
+              Runner level <code>{cell.authority.tool_level}</code>:{" "}
+              {cell.authority.runners
+                .map((runner) => runner.runner + " " + runner.tool_level + "/" + runner.shell_reach)
+                .join(", ") || "none"}.
+              Shell reach is {cell.authority.shell_grant ? "explicitly granted" : "not granted"}.
+            </p>
+            {cell.authority.tools.length > 0 ? (
+              <ul className="fleet-tools">
+                {cell.authority.tools.map((tool) => (
+                  <li key={tool.name}>
+                    <code>{tool.name}</code> <span className="dim small">recorded only - no Farseer call</span>
+                    {tool.grants_shell ? <span className="dim small">; grants shell reach, not per-tool containment</span> : null}
+                  </li>
+                ))}
+              </ul>
+            ) : (
+              <p className="dim small">No declared tools.</p>
+            )}
+          </details>
         </li>
       ))}
     </ul>

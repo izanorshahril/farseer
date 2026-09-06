@@ -1,9 +1,11 @@
-# Farseer: Architecture Draft
+# Farseer: Architecture Research Draft
 
-Status: draft 1, proposal. **The model proposed here was tested and largely survived** - see [.scratch/farseer/map.md](.scratch/farseer/map.md) for what changed, notably the A2A-shaped in-process bus, which was rejected.
+Status: historical proposal. **Do not use this file as the current implementation contract.**
+The current contract is in [README.md](README.md), [AGENTS.md](AGENTS.md), and the linked tickets from [.scratch/farseer/map.md](.scratch/farseer/map.md).
+The model proposed here was tested and partly survived; several proposals below were replaced by later tickets.
 Date: 2026-08-18.
 Companion to `BRIEF.md` (research and landscape).
-This document proposes the model; `.scratch/farseer/map.md` holds the route to deciding it.
+This document records the model that led to the map; it is retained for design history.
 
 ## 1. The one idea
 
@@ -43,7 +45,7 @@ Rules 1 to 3 are the defence against the documented number-one multi-agent failu
 cell
   identity      id, name, agent card (capabilities, skills, endpoint)
   manager       one long-lived agent session, idle-cheap, wakes on events
-  roster        worker role definitions (contract template, tools, seat class, budget)
+  roster        worker role definitions (contract template, tools, runner class, budget)
   record scope  the slice of the record this cell owns and what it may read of others
   policy        autonomy grants, deny list, delivery gate, escalation rules
   workspace     isolation strategy for whatever this cell operates on
@@ -58,7 +60,7 @@ If that is not true, the abstraction has failed, and that is the load-bearing te
 
 - **Layer 1, orchestration.** The cell runtime: supervision, contracts, attach, durability. Non-negotiable.
 - **Layer 2, the record.** Event log, memory, knowledge base, graph, shared across all cells and all harnesses.
-- **Layer 3, improvements.** Kanban projection, seat and model routing.
+- **Layer 3, improvements.** Kanban projection, runner and model routing.
 
 Unchanged design rule: Layer 3 must be deletable without breaking Layer 1.
 New corollary: **a cell must be deletable without breaking the runtime**, and the runtime must run with exactly one cell.
@@ -79,7 +81,7 @@ Farseer should always write `ACP (Zed)` or avoid the acronym.
 
 Transport decision:
 
-- **Internal cells** exchange A2A-shaped envelopes over farseer's in-process bus. No HTTP, no serialization tax, no discovery problem.
+- **Internal cells** use farseer's in-process cell-call transport. No HTTP, no serialization tax, no discovery problem.
 - **External harnesses** get a real A2A endpoint plus an Agent Card.
 - Same message shape both ways, so promoting a local cell to a remote service is configuration, not a rewrite.
 
@@ -92,7 +94,7 @@ Farseer's registry must health-check, not trust the card.
 farseer/
   core (Rust)                 single binary, no required external services
     api                       HTTP + SSE/WebSocket for UI and CLI
-    bus                       A2A-shaped envelopes; in-process for local cells
+    bus                       cell-call transport; in-process for local cells
     a2a                       external endpoint + agent card registry + health checks
     mcp                       the record exposed to any harness (native exe, absolute path)
     store                     SQLite (WAL); event log is truth; git owns code state
@@ -103,7 +105,7 @@ farseer/
     cells                     cell registry, roster definitions, policy, lifecycle
     chronicler                deterministic state keeper: ledger, board, session logs
     librarian                 agent: memory curation, lesson promotion, KB, graph upkeep
-    router                    seat/quota accounting, model selection (Layer 3)
+    router                    runner/quota accounting, model selection (Layer 3)
     workspace                 isolation strategy per cell
   ui (web)                    manager chat, worker attach, diff review, board, graph explorer
   cli (farseer.exe)           non-interactive, JSON out, explicit exit codes
@@ -137,7 +139,7 @@ cell definition       identity, agent card, roster, policy, record scope
 worker contracts      one template per role, with validation and done-criteria
 tool bindings         MCP servers and credentials the roster needs
 workspace strategy    what this cell operates on and how it is isolated
-seat mapping          which harness accounts and model classes each role may use
+runner mapping        which harness accounts and model classes each role may use
 evaluation hooks      how the cell's own output gets reviewed
 ```
 
@@ -148,7 +150,7 @@ Building a harness is therefore a task shape, not a new subsystem.
 
 1. No PTY as a control channel. A PTY is a view, attached only on request.
 2. Every child in a Win32 Job Object with `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`.
-3. Nothing runs from inside a workspace we intend to delete. Cleanup is a supervised state machine ending in quarantine, never a blind recursive delete.
+3. Nothing runs from inside a workspace we intend to delete. Cleanup is a supervised state machine that reaps the process tree before deletion and surfaces a stuck workspace, never a blind recursive delete or assumed quarantine rename.
 4. Long paths everywhere (`\\?\`), workspaces at a short root such as `D:\fw\<hash>`.
 5. One writer to the store, in-process, WAL, native path only.
 6. The event log is truth. Everything else is a projection and can be dropped and rebuilt.
@@ -199,8 +201,8 @@ Read the dotted lines as the operator privilege: attach bypasses the hierarchy, 
 
 ## 11. Open architectural questions
 
-These are the ones this document creates, on top of the 35 in `BRIEF.md`.
-Each is a ticket on the map.
+These are historical questions raised by this document.
+Use the map and linked ticket status before treating one as current work.
 
 1. Is the cell the right primitive, or is it one abstraction too many for v1?
 2. Does a cell own a private record scope, or is there one global record with visibility rules?

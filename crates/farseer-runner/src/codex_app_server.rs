@@ -1,4 +1,4 @@
-//! The Codex app-server runner: the face of Codex farseer had not opened.
+//! The Codex app-server runner: the richer Codex face used when its handshake and event stream are available.
 //!
 //! `codex exec --json`, which [`crate::codex`] drives, is the **cut-down**
 //! face. `30 codex app server` looked at the real one - 95 client methods and 75

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { Bridge } from "../bridge";
 import { onSubjectSelection, selectSubject, selectedSubject } from "../selection";
 import { follow } from "../stream";
@@ -13,6 +13,13 @@ type Task = {
   state: TaskState;
   priority: number;
   updated_ts: number;
+};
+type TaskPage = {
+  tasks: Task[];
+  next_cursor?: string;
+  has_more: boolean;
+  freshness: "eventual";
+  generated_ts: number;
 };
 type Conversation = {
   conversation_id: string;
@@ -48,6 +55,9 @@ export function WorkWidget({ bridge }: { bridge: Bridge }) {
   const [face, setFace] = useState<Face>("board");
   const [expanded, setExpanded] = useState(false);
   const [tasks, setTasks] = useState<Task[]>([]);
+  const [nextCursor, setNextCursor] = useState<string | undefined>();
+  const [loadingMore, setLoadingMore] = useState(false);
+  const loadVersion = useRef(0);
   const [projectScope, setProjectScope] = useState("");
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [graph, setGraph] = useState<Graph | null>(null);
@@ -60,22 +70,42 @@ export function WorkWidget({ bridge }: { bridge: Bridge }) {
   const [error, setError] = useState<string | null>(null);
 
   const load = useCallback(async () => {
-    const [nextTasks, nextConversations, nextGraph, cell] = await Promise.all([
-      bridge.read<Task[]>("/tasks?limit=1000"),
+    const version = ++loadVersion.current;
+    const params = new URLSearchParams({ limit: "100" });
+    if (projectScope) params.set("project", projectScope);
+    const [nextTasks, nextConversations, cell] = await Promise.all([
+      bridge.read<TaskPage>(`/tasks/page?${params}`),
       bridge.read<Conversation[]>("/conversations?limit=500"),
-      bridge.read<Graph>("/work/graph"),
       bridge.read<Cell>("/cells/zero"),
     ]);
-    setTasks(nextTasks);
+    if (version !== loadVersion.current) return;
+    setTasks(nextTasks.tasks);
+    setNextCursor(nextTasks.next_cursor);
     setConversations(nextConversations);
-    setGraph(nextGraph);
     setRunners(cell.manager.runners);
     const selectedTask = selectedSubject().task;
     if (selectedTask) {
-      setDetail(await bridge.read<TaskDetail>(`/tasks/${selectedTask}`));
+      const selected = await bridge.read<TaskDetail>(`/tasks/${selectedTask}`);
+      if (version === loadVersion.current && selectedSubject().task === selectedTask) setDetail(selected);
     }
     setError(null);
-  }, [bridge]);
+  }, [bridge, projectScope]);
+
+  const loadMore = async () => {
+    if (!nextCursor || loadingMore) return;
+    const version = loadVersion.current;
+    setLoadingMore(true);
+    try {
+      const params = new URLSearchParams({ limit: "100", cursor: nextCursor });
+      if (projectScope) params.set("project", projectScope);
+      const page = await bridge.read<TaskPage>(`/tasks/page?${params}`);
+      if (version !== loadVersion.current) return;
+      setTasks((current) => [...current, ...page.tasks]);
+      setNextCursor(page.next_cursor);
+    } finally {
+      if (version === loadVersion.current) setLoadingMore(false);
+    }
+  };
 
   useEffect(() => {
     load().catch((failure: Error) => setError(failure.message));
@@ -90,13 +120,21 @@ export function WorkWidget({ bridge }: { bridge: Bridge }) {
     };
   }, [load]);
 
+  useEffect(() => {
+    if (face !== "graph" || graph) return;
+    bridge.read<Graph>("/work/graph").then(setGraph).catch((failure: Error) => setError(failure.message));
+  }, [bridge, face, graph]);
+
   useEffect(() => onSubjectSelection(setSubject), []);
   useEffect(() => {
     if (!subject.task) {
       setDetail(null);
       return;
     }
-    bridge.read<TaskDetail>(`/tasks/${subject.task}`).then(setDetail).catch((failure: Error) => setError(failure.message));
+    const taskId = subject.task;
+    bridge.read<TaskDetail>(`/tasks/${taskId}`).then((next) => {
+      if (selectedSubject().task === taskId) setDetail(next);
+    }).catch((failure: Error) => setError(failure.message));
   }, [bridge, subject.task]);
 
   const projectPaths = useMemo(
@@ -118,20 +156,22 @@ export function WorkWidget({ bridge }: { bridge: Bridge }) {
 
   const transition = async (state: TaskState) => {
     if (!detail) return;
-    await bridge.post(`/tasks/${detail.task.task_id}/transition`, {
+    const taskId = detail.task.task_id;
+    await bridge.post(`/tasks/${taskId}/transition`, {
       state,
       reason: `Moved from ${stateLabel(detail.task.state)} to ${stateLabel(state)} in Work`,
     });
     await load();
-    setDetail(await bridge.read<TaskDetail>(`/tasks/${detail.task.task_id}`));
+    if (selectedSubject().task === taskId) setDetail(await bridge.read<TaskDetail>(`/tasks/${taskId}`));
   };
 
   const addTranscript = async () => {
     const run = detail?.runs.at(-1);
     if (!run || !transcriptPath.trim()) return;
+    const taskId = detail!.task.task_id;
     await bridge.post(`/runs/${run.run_id}/transcripts`, { mode: transcriptMode, path: transcriptPath.trim() });
     setTranscriptPath("");
-    setDetail(await bridge.read<TaskDetail>(`/tasks/${detail!.task.task_id}`));
+    if (selectedSubject().task === taskId) setDetail(await bridge.read<TaskDetail>(`/tasks/${taskId}`));
     await load();
   };
 
@@ -172,18 +212,21 @@ export function WorkWidget({ bridge }: { bridge: Bridge }) {
       {error && <p className="empty bad" role="alert">{error}</p>}
 
       {face === "board" && (
-        <div className="work-board">
-          {STATES.filter((state) => state !== "done" && state !== "cancelled").map((state) => (
-            <section key={state} className="work-column" aria-label={stateLabel(state)}>
-              <h4>{stateLabel(state)} <span>{grouped[state].length}</span></h4>
-              {grouped[state].map((task) => (
-                <button key={task.task_id} className={subject.task === task.task_id ? "work-card selected" : "work-card"} onClick={() => chooseTask(task)}>
-                  <b>{task.title}</b><small>{task.project_path ?? "fleet"}</small>
-                </button>
-              ))}
-            </section>
-          ))}
-        </div>
+        <>
+          <div className="work-board">
+            {STATES.filter((state) => state !== "done" && state !== "cancelled").map((state) => (
+              <section key={state} className="work-column" aria-label={stateLabel(state)}>
+                <h4>{stateLabel(state)} <span>{grouped[state].length}</span></h4>
+                {grouped[state].map((task) => (
+                  <button key={task.task_id} className={subject.task === task.task_id ? "work-card selected" : "work-card"} onClick={() => chooseTask(task)}>
+                    <b>{task.title}</b><small>{task.project_path ?? "fleet"}</small>
+                  </button>
+                ))}
+              </section>
+            ))}
+          </div>
+          {nextCursor && <button className="chip" onClick={() => loadMore().catch((failure: Error) => setError(failure.message))} disabled={loadingMore}>{loadingMore ? "loading..." : "load more"}</button>}
+        </>
       )}
 
       {face === "conversations" && (

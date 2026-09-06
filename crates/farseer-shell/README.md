@@ -1,32 +1,48 @@
 # farseer-shell
 
-The desktop shell, chosen in [28 operator surface](../../.scratch/farseer/issues/28-operator-surface.md).
+The desktop shell is the Tauri client for the headless farseer runtime, chosen in [28 operator surface](../../.scratch/farseer/issues/28-operator-surface.md).
 
-It does three things and deliberately not a fourth.
+It finds or starts a local daemon, serves the compiled canvas and widget bundles, proxies authenticated `/v1` requests, and owns desktop-only state such as the tray and window geometry.
+The runtime remains headless and the webview never receives the operator token.
 
-1. **Finds a farseer.** Attaches to a running daemon if the runtime file names one that answers, and starts one as a sidecar otherwise. A daemon it started dies with the window; one the operator started does not, because `01 cell primitive` requires the runtime to outlive any UI.
-2. **Serves the canvas** on a loopback port the OS chooses, so two windows never collide.
-3. **Proxies `/v1`** with the operator token attached on this side.
+## Runtime and browser boundary
 
-The webview therefore loads **one origin** and the page never holds a credential - the same property the Vite dev proxy has, and the one `28`'s third gate is about.
+The shell attaches to a running daemon when its runtime file names one that answers.
+If no daemon answers, it starts one as a sidecar and the sidecar dies with the window.
+A daemon started separately outlives the shell.
+Both paths verify that the advertised port answers before accepting the runtime file.
 
-## This is not the runtime serving HTML
-
-`01 cell primitive` kept rendering out of the runtime, and it still is: farseer serves no HTML and knows nothing about widgets.
-The shell is a client of `/v1` like the CLI, and it happens to hand the page to its own webview.
+The shell serves the built canvas from `ui/dist` and widget bundles from `ui/dist/widgets`.
+It proxies `/v1` with the operator token on the native side and rejects an untrusted browser origin before forwarding a request.
+The shell also serves its local settings routes and the widget bundle routes used by the canvas.
 
 ## Running it
 
+Build the UI before starting the desktop shell:
+
 ```bash
 bun run --cwd ui build
+```
+
+```bash
 cargo run -p farseer-shell
 ```
 
-A stale runtime file outlives a crashed daemon, so the file alone is a claim rather than a fact.
-Both paths check the port actually answers before believing it.
+`cargo run` uses the workspace default and opens the same shell.
+Use `bun run --cwd ui dev` when iterating on the canvas against a separately running `farseer serve` process.
 
-## Not here yet
+## Desktop behavior
 
-- **The widget host.** `/__widgets` still lives in the Vite plugin, so agent-authored widgets mount in `bun run dev` and not in the shell. Porting it means git through `Command`, which farseer already does for worktrees, and esbuild as a sidecar binary.
-- **A tray icon, and a window that remembers its size.**
-- **`tauri build`**, which is what turns this into an installer.
+The shell remembers window geometry through the runtime UI-state API and exposes a tray entry for quota windows.
+The tray displays provider observations and does not duplicate run controls that belong on the canvas.
+The shell does not load widgets from a runtime plugin directory and does not add a plugin ABI.
+
+## Packaging
+
+The packaging command is:
+
+```bash
+bun run --cwd ui build && cargo build --release --workspace && cargo tauri build
+```
+
+The Tauri CLI is a packaging prerequisite outside the normal cargo and bun validation loop.

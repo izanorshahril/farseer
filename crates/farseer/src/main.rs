@@ -59,6 +59,10 @@ enum Command {
     Validate,
     /// Print where the runtime writes its port and token.
     Where,
+    /// Write a consistent record and attachment backup directory.
+    Backup { destination: PathBuf },
+    /// Restore a backup directory into the configured record path.
+    Restore { backup: PathBuf },
     /// Speak ACP on stdio, so an editor can drive a running farseer.
     ///
     /// `16 local api surface` made this an adapter on top of the HTTP surface
@@ -74,6 +78,38 @@ fn main() -> Result<()> {
         Command::Validate => validate(&cli.cells),
         Command::Where => {
             println!("{}", farseer_api::runtime_file_path().display());
+            Ok(())
+        }
+        Command::Backup { destination } => {
+            let record = cli.record.map(Ok).unwrap_or_else(default_record_path)?;
+            let attachments = record
+                .parent()
+                .context("record path has no parent directory")?
+                .join("transcripts");
+            let manifest = Store::open(&record)
+                .with_context(|| format!("opening {}", record.display()))?
+                .backup_to(&destination, &attachments)
+                .with_context(|| format!("backing up to {}", destination.display()))?;
+            println!(
+                "backup: {} attachment reference(s) written to {}",
+                manifest.attachments.len(),
+                destination.display()
+            );
+            Ok(())
+        }
+        Command::Restore { backup } => {
+            let record = cli.record.map(Ok).unwrap_or_else(default_record_path)?;
+            let attachments = record
+                .parent()
+                .context("record path has no parent directory")?
+                .join("transcripts");
+            let manifest = Store::restore_from(&backup, &record, &attachments)
+                .with_context(|| format!("restoring {}", backup.display()))?;
+            println!(
+                "restore: {} attachment reference(s) validated at {}",
+                manifest.attachments.len(),
+                record.display()
+            );
             Ok(())
         }
         Command::Acp => {
@@ -128,6 +164,11 @@ async fn run(
         std::fs::create_dir_all(parent)
             .with_context(|| format!("creating {}", parent.display()))?;
     }
+    let data_dir = record
+        .parent()
+        .context("record path has no parent directory")?;
+    let _lease = farseer_api::security::acquire_data_directory_lease(data_dir)
+        .with_context(|| format!("acquiring data-directory lease for {}", data_dir.display()))?;
     let store = Store::open(&record).with_context(|| format!("opening {}", record.display()))?;
     let runs_dir = record
         .parent()

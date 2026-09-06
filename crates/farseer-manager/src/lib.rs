@@ -1291,9 +1291,9 @@ fn deny_discovered_tools(runner: &str) -> &'static [&'static str] {
     }
 }
 
-/// `contract.runner` selects a native stream-json dialect - Claude Code, Codex,
-/// cursor-agent or Goose - or an ACP runner, which `29 harness protocol` wired
-/// and `20 worker control channel` asked for. Anything else is
+/// `contract.runner` selects one of the verified native and conversational faces:
+/// Claude Code, Codex exec or app-server, cursor-agent, Goose, pi, omp, agy or
+/// an ACP runner, which `29 harness protocol` wired. Anything else is
 /// `UnsupportedRunner`.
 ///
 /// A Claude Code manager bootstraps the goal onto live stdin before exposing its steer handle.

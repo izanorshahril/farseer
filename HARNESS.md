@@ -1,12 +1,12 @@
 # The harness contract
 
-What farseer has learned about coding harnesses by driving eight of them, written as requirements for one that does not exist yet.
+What farseer has learned about coding harnesses by driving eight of them, written as the contract a farseer-native runner must meet.
 
 Every claim here is a captured line from a live run, not a help page - `10 runner inventory`'s rule, **observed, never advertised**.
 Sources are the decision tickets in `.scratch/farseer/issues/`; the ones that carry the evidence are cited inline.
 
-This is not a plan to build that harness now.
-It is the thing to read before building it, and the thing to check a candidate against.
+This is an observed contract and research record, not a list of every adapter enabled in the current build.
+Read the current adapter list in [README.md](README.md) and use this file to check a candidate runner against the captured behavior.
 
 ## Why this document exists
 

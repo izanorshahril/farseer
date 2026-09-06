@@ -1,15 +1,10 @@
 //! Runner adapters: farseer's worker control channel implementations, per `20 worker control channel`.
 //!
-//! `20 worker control channel` and `10 runner inventory` chose two for v1 - an ACP runner as the default path, and a
-//! menu of native runners because "a runner interface with one
-//! implementation is not an interface, it is a wrapper". Four native
-//! runners ship here: **Claude Code** ([`claude_code`], [`invocation`]), the
-//! strongest on `05 run state model`'s contract per `10 runner inventory` - quota and cost both arrive in
-//! band; **Codex** ([`codex`]), `20 worker control channel`'s second choice; **cursor-agent**
-//! ([`cursor_agent`]); and **goose** ([`goose`]), block/goose's own CLI.
-//! None of the three added after Claude Code has its progress mapping
-//! guessed at past its verified terminal shape - each ships only what a
-//! literal captured payload backs.
+//! `20 worker control channel` and `10 runner inventory` chose an ACP path plus
+//! a menu of native runners because "a runner interface with one implementation
+//! is not an interface, it is a wrapper". The verified set now includes Claude
+//! Code, Codex exec and app-server, cursor-agent, Goose, pi, omp, agy and ACP
+//! faces. Each adapter ships only mappings backed by a captured payload.
 //!
 //! What ships here: `PATHEXT`-safe executable resolution ([`resolve`]), each
 //! runner's invocation-building and stream-json mapping, and a

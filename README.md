@@ -3,8 +3,9 @@
 A local-first agent orchestration runtime for Windows.
 One operator, one Rust binary, no required external services.
 
-**Status: the foundation is built, and a Claude Code manager can delegate to a real roster worker.**
-Twenty-eight decision tickets are closed, and the domain model, the record, the local API, four native runners, all four manager verbs from [Run state model and control semantics](.scratch/farseer/issues/05-run-state-model.md), and the MCP face from [Record scope](.scratch/farseer/issues/02-record-scope.md) are implemented against them.
+**Status: `main` contains the current foundation and a Claude Code manager can delegate to a real roster worker.**
+The original v1 decision route is complete through ticket 28, while follow-on tickets through 40 record implementation corrections, shipped surfaces and a small set of open boundaries.
+Use the map and linked tickets as the specification rather than treating the historical research drafts as current plans.
 `POST /v1/cells/{id}/instruct` runs a cell's manager against a goal and returns a `run_id` immediately.
 The operator surface is a separate client under [`ui/`](ui/README.md): a Berd-inspired pale workbench of persisted widgets, an optional clock, one composer addressed to the top manager, and a host bridge that is the only thing a widget may reach.
 
@@ -42,7 +43,7 @@ graph TD
   M0 -->|cell call, in-process| MS
   M0 -.->|ACP| RUN[foreign agent as runner]
   M0 -.->|A2A, off by default| PEER[foreign orchestrator as peer cell]
-  M0 -.->|third-party MCP, not built| TOOL[tools]
+  M0 -.->|third-party MCP, future| TOOL[tools]
   M0 -.->|MCP delegate/read/write| MCPFACE[farseer's own manager face]
   M0 -.->|extension, plain JSON| MCPFACE
   MCPFACE --> W0
@@ -81,7 +82,7 @@ An external protocol is spoken at a boundary, never shaped into internals.
 │  ├─ farseer-core/    domain model: cells, policy, conversations, tasks, sessions, run state and scrubbing. Pure, no I/O
 │  ├─ farseer-store/   SQLite truth: record, work model, session/transcript metadata, memory, UI state and authorized roots
 │  ├─ farseer-api/     loopback HTTP/SSE, work queries and commands, token guard, manager transports and /v1/mcp
-│  ├─ farseer-runner/  runners: Claude Code, Codex, cursor-agent and goose, PATHEXT resolution, Job-Object spawn, stream-json mapping, worktree lifecycle
+│  ├─ farseer-runner/  runner adapters for Claude Code, Codex, cursor-agent, Goose, pi, omp, agy and ACP faces, plus PATHEXT resolution, Job-Object spawn, stream mapping and worktree lifecycle
 │  ├─ farseer-manager/ runs one sealed contract, captures terminal text, and records what happened
 │  ├─ farseer/         the binary: runtime and CLI in one
 │  └─ farseer-shell/   the desktop shell: finds a farseer, serves the canvas and its widgets, holds the token, remembers the window, and puts each provider's quota in the tray
@@ -98,6 +99,8 @@ An external protocol is spoken at a boundary, never shaped into internals.
 │  └─ scripts/         compiles agent widgets into the build, so the desktop app has them too
 ├─ widgets/            agent-authored widgets, in git, compiled and sandboxed by the canvas
 │  ├─ AGENTS.md        the contract a manager reads before writing one
+│  ├─ cost-today/      current cost widget example
+│  ├─ run-tally/       current run-count widget example
 │  └─ sandbox-probe/   tries the seven things a widget must not be able to do, from inside
 ├─ skills/             test skills a cell may declare; never discovered from the operator's home
 ├─ extensions/         runner extensions farseer supplies
@@ -106,13 +109,17 @@ An external protocol is spoken at a boundary, never shaped into internals.
 │  ├─ zero.toml        cell #0, the builder harness
 │  └─ social.toml      the second cell, thinner on purpose
 ├─ runners.toml        machine-wide runner facts: which account each signs in with, and where quota is read
-├─ BRIEF.md            landscape research, Windows failure catalogue, operator questions
-├─ ARCHITECTURE.md     the cell model this map decided on
-├─ HARNESS.md          what eight harnesses taught farseer, written as the contract a farseer-native one would meet
-├─ AGENTS.md           conventions for agents working here (CLAUDE.md points at it)
+├─ BRIEF.md            historical research and the questions that led to the map
+├─ ARCHITECTURE.md     historical proposal with links to the current map
+├─ HARNESS.md          runner contract and harness research
+├─ DESIGN.md           current UI design decisions and production surface
+├─ PRODUCT.md          current product framing and scope
+├─ AGENTS.md           conventions for agents working here
+├─ REVIEW.md           current implementation and documentation status
+├─ CLAUDE.md           pointer to the repository instructions
 └─ .scratch/farseer/
    ├─ map.md           the decision route: destination, decisions, fog, out of scope
-   ├─ issues/          38 decision tickets, one open
+   ├─ issues/          original decisions plus follow-on implementation tickets
    ├─ research/        compaction, hang detection, headless UI boundary
    ├─ prototypes/      one operator turn, end to end
    └─ spikes/          jobspike, wsspike, storebench
@@ -147,7 +154,8 @@ cargo test --workspace
 bun run --cwd ui build && cargo build --release --workspace && cargo tauri build
 ```
 
-In that order, and the order is the whole recipe: `cargo tauri build` bundles `ui/dist` as `canvas` and `cells/` as `cells` beside the executable, and neither exists until the two builds before it have run. The `tauri` CLI is not vendored - `cargo install tauri-cli` or `bunx @tauri-apps/cli` - because nothing in the normal loop needs it.
+In that order, and the order is the whole recipe: `cargo tauri build` bundles `ui/dist` as `canvas` and `cells/` as `cells` beside the executable, and neither exists until the two builds before it have run.
+The `tauri` CLI is an explicit packaging prerequisite and is outside the normal cargo and bun validation loop.
 
 An installed shell looks for its cell definitions in three places, in order: **the working directory**, **beside the executable**, then **its own data directory** next to the record. Nothing is seeded and nothing is copied: `01 cell primitive` makes a definition a plain file the operator edits, and a directory farseer filled with cells nobody wrote is `13 harness build kit`'s warning about opinions nobody asked for. When it finds none, the canvas says which three places it looked.
 
@@ -169,7 +177,8 @@ An EV certificate clears SmartScreen immediately; an OV one clears it after enou
 
 **Windows only, and not as a preference.** `rust-toolchain.toml` pins `x86_64-pc-windows-msvc` as the only target, and the two bugs this project has shipped were both Windows ones - a missing `CREATE_NO_WINDOW` and a console close reaching a whole process group. A green Linux runner would be green for code that cannot run on the machine farseer runs on.
 
-The 27 `#[ignore]`d tests do not run there: they need `pi`, `omp`, `codex`, `goose` and `opencode` installed and they spend a real subscription. CI says so in its own output rather than leaving a green tick to imply otherwise.
+Live-runner tests are `#[ignore]`d by default because they need installed runners and may spend a real subscription.
+Run a focused ignored test only when its runner and account are available.
 
 The daemon can still be driven on its own, which is what CI and the tests do:
 
@@ -188,11 +197,13 @@ Binds `127.0.0.1` only, opens the record, loads the definitions, and writes its 
 
 | Surface | What it does |
 | --- | --- |
+| `GET /v1/health` | report that the local API is alive |
 | `GET /v1/cells`, `/v1/cells/{id}` | read definitions. There is deliberately **no edit path** - they are files in git |
 | `POST /v1/cells/reload` | re-read from disk, reporting broken files rather than dying on them |
 | `POST /v1/cells/{id}/instruct` | run the cell's manager against a goal; current native LLM runners require an explicit shell-capable roster grant; a Claude Code manager gets a generated strict MCP config outside the worktree, a codex-app-server manager gets the same MCP face configured in its `thread/start` handshake with the bearer named as an environment variable, and a pi or omp manager gets farseer's delegation extension and its credentials in the environment, and a goose-acp or opencode-acp manager gets it in `session/new`'s `mcpServers` when the agent says it speaks HTTP MCP - so all four transports may delegate to named roster workers. No manager is ever told its own token: identity comes from the bearer the request already carried; every other manager is told its roster and told it cannot reach it; returns `202` with a `run_id` after setup is accepted |
 | `GET /v1/events?cell=&run=&since=&tail=` | the cursor read. `since` is exclusive, so a client resumes with no gap and no duplicate; `tail=N` reads the **last** N instead, for a surface opening cold with no cursor |
 | `GET /v1/stream` | the same query as SSE, honouring `Last-Event-ID`. Attach and replay are one call with a different cursor |
+| `GET /v1/runs` | list recent runs newest first using the same row shape as the single-run read |
 | `GET /v1/runs/{id}` | a run's row: lifecycle, outcome, cost, tokens, and `18`/`05`'s liveness - `live`/`stalled`/`likely_hung`, or `null` once nothing in memory can answer |
 | `POST /v1/runs/{id}/cancel` | end a run early, recorded as `05`'s `cancelled` outcome, never `failed`. `404` if it already finished or never existed - idempotent, not a silent no-op |
 | `POST /v1/runs/{id}/steer` | send a follow-up message into a run's live process. `400` if the runner has no steering path - Codex, cursor-agent and goose today - `404` if the run is unknown or already finished |
@@ -201,9 +212,16 @@ Binds `127.0.0.1` only, opens the record, loads the definitions, and writes its 
 | `POST /v1/cells/{id}/{pause,resume,archive,restore,delete}` | [17 cell lifecycle](.scratch/farseer/issues/17-cell-lifecycle.md)'s verbs. Pause stops new runs and never suspends a process; archive keeps definition and record; delete keeps the record and takes the binding, and is refused on cell zero |
 | `POST /v1/cells/{id}/purge` | the only irreversible verb farseer owns. Scoped by `from`/`to` in epoch milliseconds, and it appends a tombstone naming what it destroyed |
 | `GET /v1/cells/states` | every cell that is not simply active |
+| `GET /v1/conversations`, `POST /v1/conversations` | list durable conversations or create one |
+| `GET /v1/tasks`, `/v1/tasks/{id}`, `POST /v1/tasks/{id}/transition` | read tasks and record validated lifecycle transitions with actor and reason |
+| `GET /v1/work/graph`, `/v1/work/search` | query durable work edges and scrubbed transcript projections |
+| `GET`/`POST /v1/runs/{id}/transcripts` | read or add transcript custody metadata and derived text |
+| `GET /v1/runs/{id}/control` | read the current attach control state |
+| `POST /v1/runs/{id}/{observe,take-over,release,heartbeat,intervene}` | manage the run's operator lease and record intervention provenance |
 | `GET /.well-known/agent-card.json` | the A2A Agent Card, generated from the loaded cell definitions so it cannot drift from them. `404` until `[a2a]` in `runners.toml` names a peer, because publishing one is a commitment that is hard to walk back |
 | `POST /a2a` | the A2A JSON-RPC face for a foreign orchestrator: `message/send`, `tasks/get`, `tasks/cancel`. Authenticated by a bearer **per peer**, each bound to one cell, so the caller's identity is derived from auth rather than asserted. `tasks/resubscribe` answers `501` and says why - A2A's subscription cannot express `16`'s cursored replay |
 | `GET`/`PUT /v1/ui-state/{key}` | an opaque blob farseer never parses, so a canvas survives a restart. `canvas` holds the widget arrangement and `window` the desktop window's own size and position. `413` above 1 MiB |
+| `GET /v1/projects`, `POST /v1/projects`, `POST`/`DELETE /v1/projects/roots` | manage authorized project roots and project projections |
 | `GET /v1/analytics/{cost,intervention,rework,lessons}` | the four questions from [11 analytics questions](.scratch/farseer/issues/11-analytics-questions.md) |
 | `/v1/mcp` | the streamable-HTTP MCP face nested into this router and guard; all four tools - `read_memory`, `write_memory`, `delegate_to_worker` and `delegate_to_cell` - derive identity from an active manager capability, and no raw event append exists because "an agent that can forge events can rewrite its own history" |
 | `POST /v1/manager/delegate/{worker,cell}` | the same two delegation verbs as plain JSON, for a manager whose runner has no MCP client. It calls the same functions the MCP tools call, so the roster, the worker cap and the budget are one implementation rather than two |
@@ -264,16 +282,16 @@ ntfy is the documented default because it needs no account, no token and no SDK,
 Delivery is best-effort and never in the path of a run.
 See [35 notification plane](.scratch/farseer/issues/35-notification-plane.md).
 
-### What is not built yet
+### Known limits
 
 - **Pre-spend enforcement for bounded native-runner budgets.** Task-root and per-worker caps narrow and draw down as `23 prototype loose ends` requires, but every bounded dimension fails closed before spawn today.
   Claude Code 2.1.233's `--max-budget-usd` exceeded a one-micro-dollar cap by more than five orders of magnitude before reporting `budget_exhausted`, while the other runners report only after spending.
 - Gated actions.
 - **Third-party MCP clients.** The manager process is now an MCP client of farseer's own server, but reaching arbitrary third-party MCP tool servers is still the `M0 -.->|MCP| TOOL` edge on the map above and is not implemented.
-- **A widget an agent wrote that farseer did not compile.** [28 operator surface](.scratch/farseer/issues/28-operator-surface.md)'s three gates are built and the canvas ships - see [ui/README.md](ui/README.md) - but a widget still reaches the screen only through `bun run --cwd ui build`, so a cell that writes one cannot see it without a build.
+- **Immediate display of a newly authored widget in the packaged shell.** [28 operator surface](.scratch/farseer/issues/28-operator-surface.md)'s three gates are built and the canvas ships - see [ui/README.md](ui/README.md) - but the shell serves the compiled `ui/dist/widgets/`, so a new widget requires `bun run --cwd ui build` and a reload.
 - **Cost farseer can trust from every runner.** `pi` reports an API list price against a subscription, which is why it is labelled `at list price, not billed` everywhere it appears, and most runners report nothing at all - so a fleet-wide spend figure would be a number farseer invented.
 
-### The two inbound faces
+### Inbound faces
 
 Farseer answers on three surfaces, and the substrate is the first one: [16 local api surface](.scratch/farseer/issues/16-local-api-surface.md) made the HTTP plus SSE API the transport and the other two adapters on top of it.
 
@@ -307,7 +325,7 @@ Toolchain is `x86_64-pc-windows-msvc`, rustup stable, decided in [19 rust toolch
 ## Where the decisions live
 
 [`.scratch/farseer/map.md`](.scratch/farseer/map.md) is the index.
-It gists every closed ticket in one line and links to the ticket that holds the detail.
+It summarizes the current decision route and links to the ticket that holds the detail.
 
 A decision lives in exactly one place: its ticket.
 Corrections are recorded on the corrected ticket as well as the map, so nobody reads a stale version.

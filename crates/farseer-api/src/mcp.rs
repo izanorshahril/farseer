@@ -8,7 +8,8 @@
 //! [`FarseerMcp::delegate_to_cell`] is the cross-cell half, through a `kind = "cell"` roster entry.
 //! It is fire-and-forget per [What transport carries a cell-to-cell call?]: the caller gets a `call_id` and the callee's `run_id` at once, the callee's own manager runs in the callee's cell with the callee's workspace, runner and tool grants, and the caller keeps the task id so cost nests instead of detaching.
 //! The caller's budget is **reserved** rather than drawn, because a fire-and-forget call has no terminal spend to draw when it returns.
-//! Equivalent verified launch wiring for non-Claude managers remains open.
+//! The same face reaches non-Claude managers through the transports in `31 manager delegation reach`:
+//! Codex app-server handshake configuration, ACP `session/new` MCP servers, and the pi/omp extension.
 //!
 //! [What transport carries a cell-to-cell call?]: ../../../.scratch/farseer/issues/06-cell-transport.md
 //!

@@ -1,6 +1,7 @@
 # Working in this repository
 
-Twenty-eight decision tickets are closed, and the foundation is implemented against them: `farseer-core`, `farseer-store`, `farseer-api`, `farseer-runner`, `farseer-manager`, and the `farseer` binary.
+The original v1 decision route is complete through ticket 28, and the foundation is implemented across `farseer-core`, `farseer-store`, `farseer-api`, `farseer-runner`, `farseer-manager`, and the `farseer` binary.
+Follow-on tickets through 40 record later corrections, shipped surfaces and open boundaries.
 
 ## Scope
 
@@ -14,7 +15,7 @@ No push gate, review pipeline or daemon is part of this project. If one is insta
 `18 hang detection prior art` surveyed their Windows failures and `03 spike job objects` is the answer to them - Job Objects and explicit `.exe`/`.cmd` resolution exist *because* those tools' bugs traced to implementation choices rather than platform walls.
 Reading those names as integration points inverts the finding.
 
-`farseer-runner` resolves `claude`, `codex`, `cursor-agent`, or `goose`, builds each argv, supervises the process under a Job Object, maps verified stream-json shapes, and creates or tears down workspaces according to `04 spike workspace teardown`.
+`farseer-runner` resolves the configured Claude Code, Codex, cursor-agent, Goose, pi, omp, agy and ACP faces, builds each argv or handshake, supervises the process under a Job Object, maps verified stream shapes, and creates or tears down workspaces according to `04 spike workspace teardown`.
 It also speaks **ACP** ([`acp.rs`](crates/farseer-runner/src/acp.rs), [`acp_drive.rs`](crates/farseer-runner/src/acp_drive.rs)), which is one adapter rather than a fifth dialect: `goose-acp` and `opencode-acp` ship today and the same code path admits Gemini CLI, Amp, Droid, Copilot, Qwen, pi and Aider.
 An ACP runner name means an **executable and a subcommand**, because `goose` and `goose-acp` are one binary offering two faces and report different things - the ACP face names a **context window** and no native runner does, and it reports **no subscription window**, which is what `27 quota accounting` runs on.
 Codex maps the locally verified `item.completed` `agent_message` answer but leaves other `item.*` activity-only.
@@ -96,7 +97,7 @@ They are evidence, not a foundation to build on.
 A decision lives in exactly one place: its ticket.
 
 Before answering any question about how farseer should work, check whether a ticket already answers it.
-Twenty-eight of them do, and they carry the reasoning, the rejected alternatives, and what the answer cost.
+The map carries the original decisions and later corrections, while each ticket carries the reasoning, rejected alternatives and implementation status.
 
 When a ticket turns out to be wrong or superseded, **append the correction to that ticket and to the map**, rather than editing the original text in place.
 The map's own list of corrections is how a reader knows a resolution has moved.

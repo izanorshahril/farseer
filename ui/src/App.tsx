@@ -20,7 +20,7 @@ import {
   type Span,
   type WidgetUnit,
 } from "./layout";
-import { onSelection } from "./selection";
+import { onSelection, onSubjectSelection, selectedSubject, type SubjectSelection } from "./selection";
 import { restoreProject } from "./project";
 import { QuotaWidget } from "./widgets/quota";
 import { ClockWidget } from "./widgets/clock";
@@ -36,6 +36,7 @@ import { DelegationWidget } from "./widgets/delegation";
 import { RunWidget } from "./widgets/run";
 import { SandboxWidget } from "./SandboxWidget";
 import { GateBar } from "./GateBar";
+import { WidgetBoundary } from "./WidgetBoundary";
 
 /**
  * The canvas.
@@ -328,6 +329,7 @@ export function App() {
   const saveQueue = useRef(Promise.resolve());
   const [agentWidgets, setAgentWidgets] = useState<AgentWidget[]>([]);
   const [anchor, setAnchor] = useState<Anchor>({ widget: "canvas" });
+  const [subject, setSubject] = useState<SubjectSelection>(selectedSubject());
   const [asking, setAsking] = useState(false);
   const [lastRun, setLastRun] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -387,6 +389,8 @@ export function App() {
       .then(setAgentWidgets)
       .catch(() => setAgentWidgets([]));
   }, []);
+
+  useEffect(() => onSubjectSelection(setSubject), []);
 
   useEffect(() => {
     const closeOverlays = (event: KeyboardEvent) => {
@@ -652,9 +656,9 @@ export function App() {
                   "--h": span.h,
                 } as React.CSSProperties
               }
-              onFocus={() => setAnchor({ widget: widget.title })}
-              onMouseEnter={() => setAnchor({ widget: widget.title })}
-              onPointerDown={() => setAnchor({ widget: widget.title })}
+              // Hover and focus never retarget a request. Context changes only
+              // on an explicit click or context-menu action.
+              onClick={() => setAnchor({ widget: widget.title })}
               onContextMenu={(event) => {
                 event.preventDefault();
                 setAnchor({ widget: widget.title });
@@ -779,19 +783,21 @@ export function App() {
                 </select>
               </div>
               <div className="body">
-                {widget.agent ? (
-                  <SandboxWidget
-                    id={widget.id}
-                    title={widget.title}
-                    bridge={bridge}
-                    {...("cell" in widget && widget.cell ? { cell: widget.cell } : {})}
-                  />
-                ) : (
-                  (() => {
-                    const Render = REGISTRY[widget.id as keyof typeof REGISTRY].render;
-                    return <Render bridge={bridge} />;
-                  })()
-                )}
+                <WidgetBoundary id={widget.id}>
+                  {widget.agent ? (
+                    <SandboxWidget
+                      id={widget.id}
+                      title={widget.title}
+                      bridge={bridge}
+                      {...("cell" in widget && widget.cell ? { cell: widget.cell } : {})}
+                    />
+                  ) : (
+                    (() => {
+                      const Render = REGISTRY[widget.id as keyof typeof REGISTRY].render;
+                      return <Render bridge={bridge} />;
+                    })()
+                  )}
+                </WidgetBoundary>
               </div>
               <ResizeHandle
                 id={id}
@@ -891,6 +897,11 @@ export function App() {
               <span className="route-chip" title="every request goes to the top manager">
                 to top manager
               </span>
+              <span className="route-chip" title="the selected widget is sent as request context">
+                {anchor.widget}
+              </span>
+              {subject.project && <span className="route-chip" title={subject.project}>project: {subject.project.split(/[\\/]/).at(-1)}</span>}
+              {subject.conversation && <span className="route-chip" title={subject.conversation}>conversation: {subject.conversation.slice(0, 8)}</span>}
               <button
                 type="button"
                 className="anchor-chip"
@@ -917,7 +928,7 @@ export function App() {
                     accepted as run <span className="mono">{lastRun.slice(0, 8)}</span>
                   </>
                 ) : (
-                  "Point to a widget to change context."
+                  "Click a widget to pin composer context."
                 )}
               </p>
               <button

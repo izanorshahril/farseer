@@ -76,14 +76,14 @@ jobs:
       - name: Tests
         run: cargo test --workspace --locked
 
-      # The 27 `#[ignore]` tests need runners installed - `pi`, `omp`, `codex`,
+      # Ignored tests need live runners installed - `pi`, `omp`, `codex`,
       # `goose`, `opencode` - and spend a real subscription. They cannot run
       # here, and pretending otherwise by removing the attribute would turn a
       # green suite into a lie. `capability_drift.rs` is the exception in
       # spirit, since it only reads `--help`, but the binaries are still absent.
       - name: Say what was not run
         if: always()
-        run: echo "27 ignored tests need live runners on the developer's machine; see HARNESS.md."
+        run: echo "Ignored tests need live runners on the developer's machine; see HARNESS.md."
 
   canvas:
     runs-on: windows-latest

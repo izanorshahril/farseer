@@ -24,6 +24,22 @@ export type RecordEvent = {
 };
 
 export type Subscription = { close: () => void };
+export type StreamState = "connecting" | "live" | "stale";
+type StateListener = (state: StreamState) => void;
+const stateListeners = new Set<StateListener>();
+let streamState: StreamState = "connecting";
+
+export function onStreamState(listener: StateListener): () => void {
+  stateListeners.add(listener);
+  listener(streamState);
+  return () => stateListeners.delete(listener);
+}
+
+function setStreamState(next: StreamState): void {
+  if (streamState === next) return;
+  streamState = next;
+  for (const listener of [...stateListeners]) listener(next);
+}
 
 /**
  * Follow the log from `since`, reconnecting on its own.
@@ -93,6 +109,7 @@ function connect(
   const controller = new AbortController();
   let cursor = options.since;
   let stopped = false;
+  setStreamState("connecting");
 
   const run = async () => {
     while (!stopped) {
@@ -100,6 +117,7 @@ function connect(
         const query = cursor === undefined ? "" : `?since=${cursor}`;
         const response = await fetch(`/v1/stream${query}`, { signal: controller.signal });
         if (!response.ok || !response.body) throw new Error(`stream: ${response.status}`);
+        setStreamState("live");
         const reader = response.body.pipeThrough(new TextDecoderStream()).getReader();
         let buffer = "";
         while (!stopped) {
@@ -132,6 +150,7 @@ function connect(
         }
       } catch (error) {
         if (stopped || (error as Error).name === "AbortError") return;
+        setStreamState("stale");
       }
       // Reconnect, unhurried. The cursor means nothing is lost by waiting.
       await new Promise((resolve) => setTimeout(resolve, 1_000));

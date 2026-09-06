@@ -1073,6 +1073,7 @@ dependencies = [
  "farseer-runner",
  "farseer-store",
  "http-body-util",
+ "libc",
  "reqwest 0.13.4",
  "rmcp",
  "schemars 1.2.2",
@@ -1150,6 +1151,7 @@ dependencies = [
  "rusqlite",
  "serde",
  "serde_json",
+ "sha2",
  "tempfile",
  "thiserror 2.0.20",
 ]

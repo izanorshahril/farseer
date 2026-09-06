@@ -492,6 +492,14 @@ button {
   padding: 11px 13px;
 }
 
+.widget-failure {
+  display: grid;
+  gap: 8px;
+  align-content: start;
+  min-height: 100%;
+  padding: 8px;
+}
+
 .grip {
   display: inline-grid;
   min-width: 28px;
@@ -909,6 +917,27 @@ button {
 .cells p {
   margin: 0;
 }
+.fleet-detail {
+  margin-top: 3px;
+  border-top: 1px solid var(--line);
+  padding-top: 5px;
+}
+.fleet-detail summary {
+  color: var(--dim);
+  cursor: pointer;
+  font-size: 11px;
+}
+.fleet-detail p {
+  margin: 5px 0 0;
+}
+.fleet-tools {
+  margin: 5px 0 0;
+  padding-left: 16px;
+}
+.fleet-tools li {
+  display: block;
+  margin: 2px 0;
+}
 
 /* The one large number on the surface. It is farseer's own spend - never a
    share of the provider's window, which is not a number anyone can honestly
@@ -1015,6 +1044,10 @@ button {
 .pulse.on {
   background: var(--ok);
   box-shadow: 0 0 0 3px rgba(63, 185, 80, 0.15);
+}
+.pulse.warn {
+  background: var(--warn);
+  box-shadow: 0 0 0 3px rgba(210, 153, 34, 0.15);
 }
 
 /* Run lines. One row per run, verbs on the right where the eye ends up. */

@@ -1,6 +1,6 @@
 # 39 what an installed farseer points at
 
-**Status:** open 2026-08-30.
+**Status:** closed 2026-08-30.
 **Found:** 2026-08-30, packaging the desktop shell. Simulating an installed layout - the executable, its canvas and its daemon in a directory that is not the repository - produced an application that opened, rendered, and had **zero cells**.
 
 ## The finding

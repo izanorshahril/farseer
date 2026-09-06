@@ -5,18 +5,20 @@ Label: `wayfinder:map`
 ## Destination
 
 A locked v1 specification for Farseer as a **cell runtime**: the cell primitive and its recursion rules, the record contract, the three protocol boundaries, and the worker-control and attach semantics.
-Reaching the destination means M0 spikes have answered the scary platform questions and no architectural decision remains open before implementation starts.
-It does not mean any of Farseer is built.
+The original destination was reached when the M0 spikes answered the platform questions and the v1 architecture was locked.
+The repository now implements that foundation, and follow-on tickets record corrections, shipped surfaces and remaining boundaries.
 
 ## Notes
 
 Domain: local-first agent orchestration on Windows, Rust single binary, no required external services.
 
-Source documents:
+Source documents and current-status pointers:
 
 - `BRIEF.md` - landscape research, Windows failure catalogue, 35 operator questions.
 - `ARCHITECTURE.md` - the cell model proposal this map is deciding on.
 - `Inspirationst.txt` - the operator's reference list.
+- `README.md` and `AGENTS.md` - current product behavior and repository constraints.
+- `REVIEW.md` - the current implementation and documentation snapshot.
 
 Standing preferences for this effort:
 
@@ -25,7 +27,7 @@ Standing preferences for this effort:
 - Never use the em dash. Plain dash only.
 - One sentence per line in markdown.
 - Windows native first. mac and Linux are a later subtraction, never a v1 constraint.
-- Planning only. This map produces decisions, not deliverables. The M0 spikes are the single exception, and they exist to unblock decisions, not to become the product.
+- The original map produced decisions, while the repository now carries the implementation. Do not infer current product gaps from an old proposal; check the ticket status, correction notes and source.
 
 ## Decisions so far
 
@@ -228,16 +230,19 @@ graph TD
   class T01,T02,T03,T04,T05,T06,T07,T08,T09,T11,T12,T13,T14,T15,T16,T17,T18,T19,T20,T21,T22,T23,T24,T10,T25,T26,T27,T28 done
 ```
 
-Blue is closed, and everything is blue. No ticket remains open, so there is no frontier left to draw.
+Blue marks the original v1 tickets as closed.
+Follow-on tickets are tracked separately, and the current frontier is the open question in ticket 38.
 A dotted edge is an informing dependency, not a blocking one. `18` supplied mechanisms and numbers to `03`, `05` and `16`; `05` supplied a contract-test list to `20`; `16` handed `06` a question it created; `06` handed `21` a cell call and `12` a composition rule; `02` handed `09` its storage requirements; `08` handed `14` a bad word, `12` a missing dimension and `10` a wider inventory; `11` handed `09` a schema small enough to rule out a graph database; `20` handed `10` two disqualified tools and `13` a reason to emit ACP; `09` handed `17` the purge-leaves-holes problem; `21` handed `12` an unbounded foreign callee and `13` a card to generate; `14` handed `10` a retitle and `13` an authoritative glossary; `17` handed `12` an inward-pointing irreversible verb and `13` a stable id rule; `12` handed `10` a reachability column and `13` its two policy fields; `13` handed `10` the fact that it is a menu, not a survey; `10` handed `20` a corrected test score and `12` a measurement; `15` handed `22` and `23` everything it found; `22` handed `23` a load-bearing budget question and `13` a third roster entry kind; `02` and `16` handed `24` the two boundaries it had to stay inside.
 
 
-**The map is complete. Twenty-eight tickets, all closed, no fog blocking a decision.**
+**The original v1 map is complete.**
+Tickets 01 through 28 are closed, and follow-on tickets through 40 record later implementation work and corrections.
 
 **The v1 specification is locked in every respect the Destination named**: the cell primitive and its recursion rules, the record contract, the three protocol boundaries, and the worker-control and attach semantics.
 Beyond those, this map also settled the store, the vocabulary, the cell lifecycle, the policy model, the cell definition, cell addressing, UI state, memory lifecycle, runner routing, quota accounting and the operator surface.
 
-**Nothing remains to decide before implementation starts.**
+**The original v1 destination is locked.**
+Implementation is active, and any new work must follow the ticket status and current source rather than this historical planning milestone.
 
 **The primitive was falsified against and survived, repeatedly.**
 `08` worked every question a non-coding cell raises and added **zero fields**.

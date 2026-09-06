@@ -36,7 +36,8 @@ A widget displays a cell and never addresses one.
 The runtime stores UI arrangement as an opaque blob and never parses frontend layout.
 The canvas remains the product home and any other product surface remains a widget rather than a second runtime or plugin ABI.
 The accepted home-screen prototype is now the production direction implemented in `ui/`.
-Chat remains deferred to a separate design pass.
+Full chat composition remains deferred to a separate design pass.
+The current Conversation widget and top-manager composer are shipped operator surfaces.
 
 ## Brand Commitments
 

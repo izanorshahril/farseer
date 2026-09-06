@@ -35,7 +35,9 @@ use serde::{Deserialize, Serialize};
 use farseer_core::RunnerConfig;
 use farseer_core::policy::Budget;
 use farseer_core::run::{WorkerContract, WorkerContractSpec, WorkspaceStrategy};
-use farseer_core::{CellDefinition, CellId, LivenessThresholds, NewEvent, RunId, Seq, TaskId};
+use farseer_core::{
+    CellDefinition, CellId, LivenessThresholds, NewEvent, RosterEntry, RunId, Seq, TaskId,
+};
 use farseer_manager::{
     LivenessHandle, MANAGER_CELL_FIELD, RUN_ROLE_FIELD, RunOptions, RunRole, RunSink, SteerHandle,
 };
@@ -52,6 +54,9 @@ pub mod security;
 mod work;
 
 pub use security::{RuntimeToken, runtime_file_path, write_runtime_file};
+
+const API_VERSION: &str = "v1";
+const RUNTIME_FEATURES: &[&str] = &["health", "sse", "commands"];
 
 /// How often the stream looks for new events.
 ///
@@ -70,6 +75,7 @@ pub struct AppState {
     cells: Mutex<BTreeMap<CellId, CellDefinition>>,
     cells_dir: PathBuf,
     token: RuntimeToken,
+    runtime_id: String,
     thresholds: LivenessThresholds,
     /// Where a run's workspace is created - a plain directory under here for
     /// `WorkspaceStrategy::PlainDirectory`, a `git worktree` under here for
@@ -123,8 +129,8 @@ pub struct AppState {
 struct RunHandle {
     cancel: CancelToken,
     liveness: LivenessHandle,
-    /// `None` when this run's runner has no steering path - Codex today,
-    /// per `farseer_manager::start_worker`.
+    /// `None` when this run's runner has no steering path, per
+    /// `farseer_manager::start_worker`.
     steer: Option<SteerHandle>,
 }
 
@@ -270,6 +276,7 @@ impl AppState {
             cells: Mutex::new(BTreeMap::new()),
             cells_dir: cells_dir.into(),
             token,
+            runtime_id: uuid::Uuid::new_v4().to_string(),
             thresholds: LivenessThresholds::default(),
             polled_windows: Mutex::new(Vec::new()),
             runs_dir,
@@ -508,6 +515,7 @@ pub fn router(state: Arc<AppState>) -> Router {
             get(work::list_conversations).post(work::create_conversation),
         )
         .route("/v1/tasks", get(work::list_tasks))
+        .route("/v1/tasks/page", get(work::list_task_page))
         .route("/v1/tasks/{task_id}", get(work::get_task))
         .route(
             "/v1/tasks/{task_id}/transition",
@@ -562,7 +570,23 @@ pub async fn serve(state: Arc<AppState>, port: u16) -> std::io::Result<()> {
     let listener = tokio::net::TcpListener::bind(("127.0.0.1", port)).await?;
     let bound = listener.local_addr()?.port();
     state.set_mcp_endpoint(bound);
-    write_runtime_file(&runtime_file_path(), bound, &state.token)?;
+    let data_dir = state.runs_dir.parent().unwrap_or(&state.runs_dir);
+    let identity = security::RuntimeIdentity {
+        runtime_id: state.runtime_id.clone(),
+        data_dir_fingerprint: security::data_dir_fingerprint(data_dir),
+        api_version: API_VERSION.to_owned(),
+        build_provenance: format!("farseer-api/{}", env!("CARGO_PKG_VERSION")),
+        features: RUNTIME_FEATURES
+            .iter()
+            .map(|feature| (*feature).into())
+            .collect(),
+    };
+    security::write_runtime_file_with_identity(
+        &runtime_file_path(),
+        bound,
+        &state.token,
+        &identity,
+    )?;
     // `35 notification plane`: off unless the operator set a URL, and never in
     // the path of anything - a failed notification must not fail a run.
     notify::spawn(Arc::clone(&state));
@@ -683,10 +707,15 @@ impl IntoResponse for ApiError {
 
 type ApiResult<T> = std::result::Result<T, ApiError>;
 
-async fn health() -> Json<serde_json::Value> {
+async fn health(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
+    let data_dir = state.runs_dir.parent().unwrap_or(&state.runs_dir);
     Json(serde_json::json!({
-        "api_version": "v1",
+        "api_version": API_VERSION,
         "runtime_version": env!("CARGO_PKG_VERSION"),
+        "runtime_id": state.runtime_id,
+        "data_dir_fingerprint": security::data_dir_fingerprint(data_dir),
+        "build_provenance": format!("farseer-api/{}", env!("CARGO_PKG_VERSION")),
+        "features": RUNTIME_FEATURES,
     }))
 }
 
@@ -701,6 +730,7 @@ async fn list_cells(State(state): State<Arc<AppState>>) -> Json<Vec<CellSummary>
                 description: c.description.clone(),
                 version: c.version.clone(),
                 roster_size: c.roster.len(),
+                authority: cell_authority(c),
             })
             .collect(),
     )
@@ -713,6 +743,81 @@ pub struct CellSummary {
     pub description: String,
     pub version: String,
     pub roster_size: usize,
+    pub authority: CellAuthority,
+}
+
+#[derive(Debug, Serialize)]
+pub struct CellAuthority {
+    pub tool_level: farseer_core::ToolLevel,
+    pub shell_grant: bool,
+    pub runners: Vec<RunnerAuthority>,
+    pub tools: Vec<DeclaredTool>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct RunnerAuthority {
+    pub runner: String,
+    /// `enforced` means farseer passes a runner-owned allowlist.
+    /// `not_requested` is the honest meaning of `shell`.
+    /// `refused` means the requested level cannot be imposed on this runner.
+    pub tool_level: &'static str,
+    /// Shell reach is observed only for the runner faces in this table.
+    /// Unknown faces stay unknown rather than being advertised as safe.
+    pub shell_reach: &'static str,
+}
+
+#[derive(Debug, Serialize)]
+pub struct DeclaredTool {
+    pub name: String,
+    pub grants_shell: bool,
+    pub serving_path: bool,
+    pub authority: &'static str,
+}
+
+fn cell_authority(cell: &CellDefinition) -> CellAuthority {
+    let tool_level = cell.manager.tools;
+    let shell_grant = cell.has_shell_grant();
+    let runners = cell
+        .manager
+        .runners
+        .iter()
+        .map(|runner| RunnerAuthority {
+            runner: runner.clone(),
+            tool_level: if tool_level == farseer_core::ToolLevel::Shell {
+                "not_requested"
+            } else if farseer_runner::pi::takes_tool_allowlist(runner) {
+                "enforced"
+            } else {
+                "refused"
+            },
+            shell_reach: if runner_has_shell_reach(runner) {
+                if shell_grant { "authorized" } else { "refused" }
+            } else {
+                "unobserved"
+            },
+        })
+        .collect();
+    let tools = cell
+        .roster
+        .iter()
+        .filter_map(|entry| match entry {
+            RosterEntry::Tool {
+                name, grants_shell, ..
+            } => Some(DeclaredTool {
+                name: name.clone(),
+                grants_shell: *grants_shell,
+                serving_path: false,
+                authority: "recorded_only",
+            }),
+            _ => None,
+        })
+        .collect();
+    CellAuthority {
+        tool_level,
+        shell_grant,
+        runners,
+        tools,
+    }
 }
 
 async fn get_cell(
@@ -949,11 +1054,18 @@ async fn instruct_cell(
     ))
 }
 
-/// `12 autonomy and deny list`: every currently implemented native LLM runner has shell-equivalent reach, so launching one without an explicit shell-capable roster grant would silently widen authority.
+/// Observed runner faces whose default tool set includes shell-equivalent reach.
+/// Keep this list explicit: an unknown face must not be advertised as bounded.
+fn runner_has_shell_reach(runner: &str) -> bool {
+    matches!(
+        runner,
+        "claude-code" | "codex" | "codex-app-server" | "cursor-agent" | "goose" | "pi" | "omp"
+    )
+}
+
+/// `12 autonomy and deny list`: every current shell-capable runner requires an explicit shell-capable roster grant.
 pub(crate) fn ensure_runner_authority(cell: &CellDefinition, runner: &str) -> ApiResult<()> {
-    if matches!(runner, "claude-code" | "codex" | "cursor-agent" | "goose")
-        && !cell.has_shell_grant()
-    {
+    if runner_has_shell_reach(runner) && !cell.has_shell_grant() {
         return Err(ApiError::Policy(format!(
             "runner `{runner}` exposes shell-equivalent reach, but cell `{}` grants no shell-capable tool",
             cell.cell_id
@@ -1683,8 +1795,8 @@ pub struct SteerBody {
 
 /// `05 run state model`'s **steer**: a follow-up message into a run's live process, on the
 /// frame `claude_code::steer_frame`'s 2026-08-23 probe verified.
-/// `400` when the run's runner has no steering path (Codex today) rather
-/// than writing a line nothing reads; `404` when the run is unknown or
+/// `400` when the run's runner has no steering path rather than writing a line
+/// nothing reads; `404` when the run is unknown or
 /// already finished, same as `cancel`.
 /// Mark a run as one a human stepped into, permanently.
 ///
@@ -3273,6 +3385,14 @@ grants_shell = true
         let (status, body) = h.get("/v1/health").await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(body["api_version"], "v1");
+        assert!(body["runtime_id"].as_str().is_some_and(|id| !id.is_empty()));
+        assert!(
+            body["data_dir_fingerprint"]
+                .as_str()
+                .is_some_and(|fingerprint| fingerprint.starts_with("sha256:"))
+        );
+        assert_eq!(body["build_provenance"], "farseer-api/0.1.0");
+        assert_eq!(body["features"], json!(["health", "sse", "commands"]));
     }
 
     #[tokio::test]
@@ -3280,6 +3400,16 @@ grants_shell = true
         let h = harness();
         let (_, list) = h.get("/v1/cells").await;
         assert_eq!(list[0]["cell_id"], "zero");
+        assert_eq!(list[0]["authority"]["shell_grant"], true);
+        assert_eq!(
+            list[0]["authority"]["runners"][0]["shell_reach"],
+            "authorized"
+        );
+        assert_eq!(
+            list[0]["authority"]["tools"][0]["authority"],
+            "recorded_only"
+        );
+        assert_eq!(list[0]["authority"]["tools"][0]["serving_path"], false);
 
         let (status, cell) = h.get("/v1/cells/zero").await;
         assert_eq!(status, StatusCode::OK);
@@ -3658,6 +3788,60 @@ runner = "claude-code"
                 .is_none(),
             "authority refusal must happen before creating a workspace"
         );
+    }
+
+    #[tokio::test]
+    async fn a_pi_manager_without_an_explicit_shell_grant_is_refused_before_workspace_creation() {
+        let h = harness_with_cell(
+            r#"
+cell_id = "zero"
+name = "Cell Zero"
+workspace_strategy = "plain_directory"
+
+[manager]
+runner = "pi"
+"#,
+        );
+        let (status, body) = h
+            .post("/v1/cells/zero/instruct", json!({ "goal": "do the thing" }))
+            .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        assert!(body["error"].as_str().unwrap().contains("shell-equivalent"));
+        assert!(
+            std::fs::read_dir(&h.state.runs_dir)
+                .unwrap()
+                .next()
+                .is_none(),
+            "authority refusal must happen before creating a workspace"
+        );
+    }
+
+    #[test]
+    fn authority_detail_separates_allowlist_enforcement_and_recorded_tools() {
+        let cell = farseer_core::CellDefinition::load(
+            r#"
+cell_id = "detail"
+name = "Detail"
+workspace_strategy = "plain_directory"
+
+[manager]
+runners = ["pi", "goose-acp"]
+tools = "read"
+
+[[roster]]
+kind = "tool"
+name = "post"
+irreversibility = "undoable"
+"#,
+        )
+        .unwrap()
+        .0;
+        let detail = cell_authority(&cell);
+        assert_eq!(detail.tool_level, farseer_core::ToolLevel::Read);
+        assert_eq!(detail.runners[0].tool_level, "enforced");
+        assert_eq!(detail.runners[1].tool_level, "refused");
+        assert_eq!(detail.tools[0].authority, "recorded_only");
+        assert!(!detail.tools[0].serving_path);
     }
 
     #[tokio::test]
@@ -6131,6 +6315,84 @@ runner = "{runner}"
             detail["allowed_transitions"],
             json!(["blocked", "review", "cancelled"])
         );
+    }
+
+    #[tokio::test]
+    async fn task_pages_bound_results_and_reject_scope_reuse() {
+        let h = harness();
+        let now = now_ms();
+        let first = farseer_core::Conversation {
+            conversation_id: farseer_core::ConversationId::new(),
+            title: "First board".into(),
+            project_path: None,
+            manager_runner: Some("claude-code".into()),
+            created_ts: now,
+            updated_ts: now,
+            archived_ts: None,
+        };
+        let second = farseer_core::Conversation {
+            conversation_id: farseer_core::ConversationId::new(),
+            title: "Second board".into(),
+            project_path: None,
+            manager_runner: Some("claude-code".into()),
+            created_ts: now,
+            updated_ts: now,
+            archived_ts: None,
+        };
+        h.state.store().create_conversation(&first).unwrap();
+        h.state.store().create_conversation(&second).unwrap();
+        for (conversation_id, title) in [
+            (first.conversation_id, "first one"),
+            (first.conversation_id, "first two"),
+            (second.conversation_id, "second one"),
+        ] {
+            h.state
+                .store()
+                .create_task(&farseer_core::Task {
+                    task_id: TaskId::new(),
+                    conversation_id,
+                    goal: title.into(),
+                    title: title.into(),
+                    project_path: None,
+                    state: farseer_core::TaskState::Inbox,
+                    priority: 0,
+                    created_ts: now,
+                    updated_ts: now,
+                })
+                .unwrap();
+        }
+
+        let first_id = first.conversation_id;
+        let second_id = second.conversation_id;
+        let (status, page) = h
+            .get(&format!(
+                "/v1/tasks/page?conversation_id={first_id}&limit=1"
+            ))
+            .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(page["tasks"].as_array().unwrap().len(), 1);
+        assert_eq!(page["has_more"], true);
+        assert_eq!(page["freshness"], "eventual");
+        let cursor = page["next_cursor"].as_str().unwrap();
+
+        let (status, next) = h
+            .get(&format!(
+                "/v1/tasks/page?conversation_id={first_id}&limit=1&cursor={cursor}"
+            ))
+            .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(next["tasks"].as_array().unwrap().len(), 1);
+        assert_ne!(
+            page["tasks"][0]["task_id"], next["tasks"][0]["task_id"],
+            "keyset continuation must not repeat the boundary row"
+        );
+
+        let (status, _) = h
+            .get(&format!(
+                "/v1/tasks/page?conversation_id={second_id}&limit=1&cursor={cursor}"
+            ))
+            .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
     }
 
     #[tokio::test]

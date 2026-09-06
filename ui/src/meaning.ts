@@ -23,7 +23,7 @@ export const MEANING: Record<string, string> = {
   "tool level": "How much of the runner's own tool set this run got: read, edit or shell",
   ceiling: "The most irreversible action allowed without asking a person",
   "tool grants":
-    "Cell-level capabilities the roster named. Recorded, and reaching them is not built yet",
+    "Cell-level capability names recorded on the contract. Tool entries describe the runner environment and do not expose a farseer verb",
   skills:
     "Instruction directories handed to the runner by path, never discovered from your home directory",
   budget: "The ceiling on what this run may spend before farseer stops it",

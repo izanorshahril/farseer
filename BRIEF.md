@@ -1,6 +1,7 @@
 # Farseer: Brief and Research Report
 
-Status: draft 2, research only. **The decisions this document deferred are now locked** - see [.scratch/farseer/map.md](.scratch/farseer/map.md) for the route and the 27 closed tickets.
+Status: historical research only. **Do not use this draft as the current product contract or backlog.**
+Current behavior and ticket status are in [README.md](README.md), [AGENTS.md](AGENTS.md), and [.scratch/farseer/map.md](.scratch/farseer/map.md).
 Date: 2026-08-18.
 Scope of this revision: layered priorities (orchestration core, record layer, improvements), plus research on memory / knowledge base / session logs / graph engineering and their Windows failure modes.
 
@@ -55,7 +56,7 @@ The thing that makes farseer more than a launcher, and the thing no existing too
 ### Layer 3: improvements (ship together, not first)
 
 - **Kanban board**: a projection of task state. Optional as a mental model, useful as a UI, not the source of truth.
-- **Auto-router**: seat and model selection from quota, capability, cost. Optional in that the system must work with one hard-coded seat.
+- **Auto-router**: runner and model selection from quota, capability, cost. Optional in that the system must work with one hard-coded runner.
 
 Design rule that follows: Layer 3 must be deletable without breaking Layer 1, and Layer 1 must not need the board or the router to function.
 
@@ -254,7 +255,7 @@ That is the design. Adopt it:
 Proposed entity types for the graph projection (drawing on the repository-knowledge-graph literature, where Users / Commits / Issues / Files with multi-hop analysis is the established core, and KGCompass-style work shows the win comes from linking *repository artifacts* like issues and PRs to code, not just code structure):
 
 ```
-Project, Task, Contract, Run, Seat, Harness, Model
+Project, Task, Contract, Run, Runner, Harness, Model
 File, Symbol, Test, Commit, Branch, PR/MR, Issue
 Artifact (diff, report, log), Decision, Escalation
 Error, Failure mode, Lesson, Convention, Note
@@ -271,7 +272,7 @@ Lesson    --derived_from--> Run(s)
 Lesson    --applies_to-->   Project | File | Harness
 Task      --blocked_by-->   Decision
 Task      --reviewed_by-->  Run
-Seat      --strained_at-->  Time window
+Runner    --strained_at-->  Time window
 Convention--violated_by-->  Run
 ```
 
@@ -279,7 +280,7 @@ Queries this makes cheap, and which are the actual product value:
 
 - Which files repeatedly break, and under which harness or model.
 - Which lessons actually reduced failure rate after being adopted (lesson efficacy, which is how you fight confabulated memory).
-- Cost and token spend per project, per task shape, per seat, over time.
+- Cost and token spend per project, per task shape, per runner, over time.
 - Where the manager escalated versus where it should have.
 - Which contracts were ambiguous, measured by rework rate.
 - Dead ends already explored, so a future worker is told before repeating them.
@@ -376,7 +377,7 @@ farseer/
     scheduler              task queue, concurrency caps, wake events
     supervisor             process lifecycle, Job Objects, health, timeouts
     adapters               per-harness driver (ACP first, headless JSON fallback)
-    router                 seat/quota accounting, model selection (Layer 3)
+    router                 runner/quota accounting, model selection (Layer 3)
     workspace              isolation strategy per project
     manager                the planning agent session, driven like any other harness
   ui (web)                 manager chat, worker attach, diff review, board, graph explorer
@@ -425,16 +426,16 @@ The manager is just another adapter session with a distinct contract:
 
 Two distinct problems. Do not conflate them.
 
-**A. Seat routing (the actual need).** Which harness *account* runs this task, given subscription quota.
-Inputs: rolling-window usage estimates per seat, observed 429 and rate-limit events, weekly cap state, task class.
-Behavior: prefer an unstrained seat; queue rather than silently degrade intelligence; demotion requires standing permission.
+**A. Runner routing (the actual need).** Which harness *account* runs this task, given subscription quota.
+Inputs: rolling-window usage estimates per runner, observed 429 and rate-limit events, weekly cap state, task class.
+Behavior: prefer an unstrained runner; queue rather than silently degrade intelligence; demotion requires standing permission.
 Reality: subscription quota is not exposed as a clean API (Claude Code enforces a 5-hour rolling window plus weekly caps per account), so this is inference from headers, errors and our own token accounting. `pi-antigravity` ships quota diagnostics and OmniRoute does quota-share enforcement, so it is tractable but heuristic.
 
 **B. Token routing (optional, later).** Per-request model selection under a worker. Delegate, do not build.
 **NVIDIA NeMo Switchyard** (open source, announced 11 Aug 2026) is the best fit because its reference server speaks OpenAI, Anthropic and Responses formats, so it can sit under Claude Code and Codex without either knowing. It builds on RouteLLM and adds session-affinity classification, a stage router that reads recent tool activity, and an escalation router that starts cheap and promotes on sustained difficulty. LangChain's eval: 74% cost cut versus Opus 4.8 alone, accuracy 86.0% to 80.0%, which is the honest tradeoff to show the operator.
 LiteLLM is the pragmatic alternative with a documented Claude Code Max subscription path.
 
-Farseer owns (A) and treats (B) as a pluggable base URL per seat.
+Farseer owns (A) and treats (B) as a pluggable base URL per runner.
 
 ### 13.6 Data model sketch
 
@@ -446,9 +447,9 @@ event(id, ts_wall, ts_ingest, actor, subject_type, subject_id, kind, payload_jso
 -- projections (rebuildable)
 project(id, name, path, vcs, delivery_policy, autonomy_grant, isolation_strategy, status)
 task(id, project_id, title, contract_json, status, lane, priority, parent_id, owner_run_id)
-run(id, task_id, seat_id, harness, model, workspace_path, pid, job_handle,
+run(id, task_id, runner_id, harness, model, workspace_path, pid, job_handle,
     started, ended, exit_code, tokens_in, tokens_out, cost, verdict)
-seat(id, harness, account_label, auth_mode, quota_policy, window_state_json, health)
+runner(id, harness, account_label, auth_mode, quota_policy, window_state_json, health)
 decision(id, task_id, question, options_json, answered_by, answer, ts)
 artifact(id, run_id, kind, path, sha256, bytes)
 node(id, type, key, props_json)                 -- graph projection
@@ -465,7 +466,7 @@ lesson_application(id, memory_id, run_id, outcome)   -- efficacy measurement
 Local web UI in the browser or a thin webview. Not a TUI, because the terminal is the thing that hurts today.
 
 - **Manager chat**: one conversation, the only place the operator talks to an agent.
-- **Fleet**: running workers, live status, seat quota gauges, kill switch, and one-click attach.
+- **Fleet**: running workers, live status, runner quota gauges, kill switch, and one-click attach.
 - **Worker attach**: live event tail, injectable input, takeover and detach.
 - **Task detail**: contract, event timeline, diff review, approve / reject / merge.
 - **Escalations**: inbox of decisions only a human can make.
@@ -478,12 +479,12 @@ Local web UI in the browser or a thin webview. Not a TUI, because the terminal i
 - **M1 core, one project, one worker.** Event log, supervisor, one adapter, CLI only, no manager. Task in, diff out, full event trail, attach works.
 - **M2 manager.** Planning agent, contracts, delegation, reviewer-worker task shape, escalations, wake queue. Proof: kill the daemon mid-run and recover with nothing lost.
 - **M3 record.** Normalized session logs, memory with candidate/active promotion, knowledge base, graph projection, replay rebuild, MCP face so other harnesses can read it.
-- **M4 improvements.** Kanban UI, seat registry plus quota heuristics, optional token router, analytics and graph explorer.
+- **M4 improvements.** Kanban UI, runner registry plus quota heuristics, optional token router, analytics and graph explorer.
 - **M5 portability.** mac and Linux, which should be a subtraction of Windows workarounds rather than an addition.
 
 ## 15. Risks and open technical unknowns
 
-1. **Subscription quota is not observable.** Seat routing may reduce to heuristics plus reactive backoff. Needs a spike.
+1. **Subscription quota is not observable.** Runner routing may reduce to heuristics plus reactive backoff. Needs a spike.
 2. **ACP adapter maturity.** `claude-agent-acp` and `codex-acp` are third-party. If they lag, fall back to per-harness headless JSON, which means N adapters to maintain (vibe-kanban's `executors` crate shows the cost).
 3. **Harness format churn.** Gemini CLI was killed on 18 Jun 2026 and replaced by Antigravity CLI. Claude Code's session JSONL is explicitly internal and version-unstable. Adapters need contract tests, and a harness is not trusted until it passes them.
 4. **No Windows sandbox.** v1 cannot claim OS-level isolation. Isolation is workspace separation plus allowlists plus a review gate. Watch MXC.
@@ -530,11 +531,11 @@ Answer whenever; none of these block M0.
 20. Tray app, Windows service, or foreground process the operator starts? Expected sleep and resume behavior?
 21. Graph engine preference: start with **SQLite edge tables plus recursive CTEs** (zero extra dependency), or commit to an embedded graph engine (LadybugDB) now for Cypher and path queries?
 
-**Harnesses and seats**
+**Harnesses and runners**
 
 22. Which harnesses must work at M2, in priority order? Current guess: Claude Code, Codex, Antigravity (`agy`), Pi.
-23. How many seats per harness exist in practice? One each, or multiple accounts to rotate?
-24. Standing policy when the good seat is exhausted: (a) queue and wait, (b) run on a cheaper model flagged as degraded, or (c) ask each time?
+23. How many runners per harness exist in practice? One each, or multiple accounts to rotate?
+24. Standing policy when the good runner is exhausted: (a) queue and wait, (b) run on a cheaper model flagged as degraded, or (c) ask each time?
 25. Are pay-per-token API keys in play as an overflow tier, or subscriptions only?
 26. Token-level router (Switchyard or LiteLLM) in scope for M4, or explicitly deferred?
 

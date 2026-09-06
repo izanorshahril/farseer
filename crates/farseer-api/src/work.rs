@@ -6,6 +6,7 @@
 use std::collections::hash_map::DefaultHasher;
 use std::fmt::Write as _;
 use std::hash::{Hash, Hasher};
+use std::io::Read;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -15,18 +16,24 @@ use axum::http::StatusCode;
 use farseer_core::{
     Actor, Conversation, ConversationId, RunId, Task, TaskId, TaskState, TranscriptCustody,
 };
-use farseer_store::{SimilarityEdge, TaskFilter, TranscriptAttachment};
+use farseer_store::{SimilarityEdge, TaskCursor, TaskFilter, TranscriptAttachment};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::{ApiError, ApiResult, AppState, now_ms};
 
 const TRANSCRIPT_CAP_BYTES: u64 = 16 * 1024 * 1024;
+const TRANSCRIPT_CANDIDATE_CAP: usize = 200;
+const TRANSCRIPT_EDGE_CAP: usize = 20;
+const TRANSCRIPT_TEXT_CAP_BYTES: usize = 32 * 1024 * 1024;
 const REDACTION_VERSION: &str = "farseer-scrub-v1";
 const PROJECTION_VERSION: &str = "hash-tf-v1";
 const EMBEDDING_MODEL: &str = "farseer-hash-tf-64";
 const DIMENSIONS: usize = 64;
 const ALL_ROWS: usize = i64::MAX as usize;
+const TASK_PAGE_DEFAULT: usize = 100;
+const TASK_PAGE_MAX: usize = 500;
+const STRUCTURED_RESPONSE_MAX_BYTES: usize = 1024 * 1024;
 
 #[derive(Debug, Deserialize)]
 pub(super) struct ConversationQuery {
@@ -131,7 +138,177 @@ pub(super) async fn list_tasks(
         project_path: project.as_deref(),
         state: task_state,
         limit: query.limit.unwrap_or(500).min(1_000),
+        after: None,
     })?))
+}
+
+#[derive(Debug, Deserialize)]
+pub(super) struct TaskPageQuery {
+    pub conversation_id: Option<String>,
+    pub project: Option<String>,
+    pub state: Option<String>,
+    pub limit: Option<usize>,
+    pub cursor: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct TaskPageScope {
+    conversation_id: Option<ConversationId>,
+    project_path: Option<String>,
+    state: Option<TaskState>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct TaskPageCursor {
+    version: u8,
+    scope: TaskPageScope,
+    priority: i32,
+    updated_ts: i64,
+    task_id: TaskId,
+}
+
+#[derive(Debug, Serialize)]
+pub(super) struct TaskPage {
+    pub tasks: Vec<Task>,
+    pub next_cursor: Option<String>,
+    pub has_more: bool,
+    /// Task transitions can race a page read; callers should refresh when they
+    /// need a newer projection rather than treating this as a snapshot.
+    pub freshness: &'static str,
+    pub generated_ts: i64,
+}
+
+pub(super) async fn list_task_page(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<TaskPageQuery>,
+) -> ApiResult<Json<TaskPage>> {
+    let scope = task_page_scope(&state, &query)?;
+    let after = query
+        .cursor
+        .as_deref()
+        .map(decode_task_cursor)
+        .transpose()?
+        .map(|cursor| {
+            if cursor.version != 1 || cursor.scope != scope {
+                return Err(ApiError::BadRequest(
+                    "task page cursor does not match this scope",
+                ));
+            }
+            Ok(TaskCursor {
+                priority: cursor.priority,
+                updated_ts: cursor.updated_ts,
+                task_id: cursor.task_id,
+            })
+        })
+        .transpose()?;
+    let limit = query
+        .limit
+        .unwrap_or(TASK_PAGE_DEFAULT)
+        .clamp(1, TASK_PAGE_MAX);
+    let project = scope.project_path.as_deref();
+    let mut tasks = state.store().task_page(&TaskFilter {
+        conversation_id: scope.conversation_id,
+        project_path: project,
+        state: scope.state,
+        limit,
+        after,
+    })?;
+    let has_more = tasks.len() > limit;
+    if has_more {
+        tasks.truncate(limit);
+    }
+    let generated_ts = now_ms();
+    let mut page = TaskPage {
+        tasks,
+        next_cursor: None,
+        has_more,
+        freshness: "eventual",
+        generated_ts,
+    };
+    page.next_cursor = page.tasks.last().filter(|_| page.has_more).map(|task| {
+        encode_task_cursor(&TaskPageCursor {
+            version: 1,
+            scope: scope.clone(),
+            priority: task.priority,
+            updated_ts: task.updated_ts,
+            task_id: task.task_id,
+        })
+    });
+    while serde_json::to_vec(&page)
+        .expect("task page is serializable")
+        .len()
+        > STRUCTURED_RESPONSE_MAX_BYTES
+    {
+        page.tasks.pop().ok_or(ApiError::BadRequest(
+            "a task is too large for the structured page limit",
+        ))?;
+        if page.tasks.is_empty() {
+            return Err(ApiError::BadRequest(
+                "a task is too large for the structured page limit",
+            ));
+        }
+        page.has_more = true;
+        page.next_cursor = page.tasks.last().map(|task| {
+            encode_task_cursor(&TaskPageCursor {
+                version: 1,
+                scope: scope.clone(),
+                priority: task.priority,
+                updated_ts: task.updated_ts,
+                task_id: task.task_id,
+            })
+        });
+    }
+    Ok(Json(page))
+}
+
+fn task_page_scope(state: &AppState, query: &TaskPageQuery) -> ApiResult<TaskPageScope> {
+    let conversation_id = query
+        .conversation_id
+        .as_deref()
+        .map(parse_conversation)
+        .transpose()?;
+    let state_filter = query
+        .state
+        .as_deref()
+        .map(|state| {
+            state
+                .parse::<TaskState>()
+                .map_err(|_| ApiError::BadRequest("unknown task state"))
+        })
+        .transpose()?;
+    let project_path = query
+        .project
+        .as_deref()
+        .map(|path| crate::projects::resolve(state, path))
+        .transpose()?
+        .map(|path| crate::projects::display(&path));
+    Ok(TaskPageScope {
+        conversation_id,
+        project_path,
+        state: state_filter,
+    })
+}
+
+fn encode_task_cursor(cursor: &TaskPageCursor) -> String {
+    let bytes = serde_json::to_vec(cursor).expect("task page cursor is serializable");
+    let mut encoded = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        use std::fmt::Write as _;
+        write!(encoded, "{byte:02x}").expect("writing to a string cannot fail");
+    }
+    encoded
+}
+
+fn decode_task_cursor(value: &str) -> ApiResult<TaskPageCursor> {
+    if value.is_empty() || value.len() > 4096 || !value.len().is_multiple_of(2) {
+        return Err(ApiError::BadRequest("invalid task page cursor"));
+    }
+    let bytes = (0..value.len())
+        .step_by(2)
+        .map(|index| u8::from_str_radix(&value[index..index + 2], 16))
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|_| ApiError::BadRequest("invalid task page cursor"))?;
+    serde_json::from_slice(&bytes).map_err(|_| ApiError::BadRequest("invalid task page cursor"))
 }
 
 #[derive(Debug, Serialize)]
@@ -253,21 +430,24 @@ pub(super) async fn add_transcript(
     };
     let store = state.store();
     store.record_transcript_attachment(&attachment)?;
+    drop(store);
     if let Some(body) = indexed {
         let scrubbed = farseer_core::scrub(&body);
-        store.index_transcript(&digest, &scrubbed, REDACTION_VERSION, PROJECTION_VERSION)?;
-        let documents = store.indexed_transcripts()?;
+        let documents = state.store().indexed_transcripts_bounded(
+            TRANSCRIPT_CANDIDATE_CAP,
+            TRANSCRIPT_TEXT_CAP_BYTES.saturating_sub(scrubbed.len()),
+        )?;
         let current = vector(&scrubbed);
         let edges = documents
             .into_iter()
             .filter(|(other, _)| other != &digest)
-            .map(|(other, body)| {
+            .filter_map(|(other, body)| {
                 let (left, right) = if digest < other {
                     (digest.clone(), other.clone())
                 } else {
                     (other.clone(), digest.clone())
                 };
-                SimilarityEdge {
+                let edge = SimilarityEdge {
                     left_digest: left,
                     right_digest: right,
                     score: cosine(&current, &vector(&body)),
@@ -278,10 +458,28 @@ pub(super) async fn add_transcript(
                     projection_version: PROJECTION_VERSION.into(),
                     source_digest: digest.clone(),
                     evidence: vec![digest.clone(), other],
-                }
+                };
+                (edge.score > 0.0).then_some(edge)
             })
             .collect::<Vec<_>>();
-        store.replace_similarity_edges(&digest, &edges)?;
+        let mut edges = edges;
+        edges.sort_by(|left, right| right.score.total_cmp(&left.score));
+        edges.truncate(TRANSCRIPT_EDGE_CAP);
+        if let Some(stored_path) = &attachment.stored_path {
+            let stored = read_bounded(Path::new(stored_path))?;
+            if sha256(&stored) != digest {
+                return Err(ApiError::Transcript(
+                    "copied transcript changed before indexing".into(),
+                ));
+            }
+        }
+        state.store().commit_transcript_projection(
+            &attachment,
+            &scrubbed,
+            REDACTION_VERSION,
+            PROJECTION_VERSION,
+            &edges,
+        )?;
     }
     Ok((StatusCode::CREATED, Json(attachment)))
 }
@@ -306,6 +504,7 @@ pub(super) struct SearchQuery {
 pub(super) struct SearchHit {
     pub digest: String,
     pub excerpt: String,
+    pub coverage: &'static str,
 }
 
 pub(super) async fn search_transcripts(
@@ -318,12 +517,13 @@ pub(super) async fn search_transcripts(
     }
     let hits = state
         .store()
-        .indexed_transcripts()?
+        .indexed_transcripts_bounded(TRANSCRIPT_CANDIDATE_CAP, TRANSCRIPT_TEXT_CAP_BYTES)?
         .into_iter()
         .filter_map(|(digest, body)| {
             body.to_lowercase().contains(&needle).then(|| SearchHit {
                 digest,
                 excerpt: body.chars().take(160).collect(),
+                coverage: "restricted",
             })
         })
         .take(50)
@@ -394,15 +594,7 @@ fn copy_transcript(
     source: &Path,
     index: bool,
 ) -> ApiResult<(String, Option<String>, Option<String>)> {
-    let metadata = std::fs::metadata(source)
-        .map_err(|_| ApiError::BadRequest("transcript path is not a readable file"))?;
-    if !metadata.is_file() || metadata.len() > TRANSCRIPT_CAP_BYTES {
-        return Err(ApiError::BadRequest(
-            "transcript file exceeds the 16 MiB copy cap",
-        ));
-    }
-    let bytes = std::fs::read(source)
-        .map_err(|_| ApiError::BadRequest("transcript path is not a readable file"))?;
+    let bytes = read_bounded(source)?;
     let digest = sha256(&bytes);
     std::fs::create_dir_all(&state.transcript_dir)
         .map_err(|error| ApiError::Transcript(error.to_string()))?;
@@ -419,6 +611,38 @@ fn copy_transcript(
             None
         };
     Ok((digest, Some(target.display().to_string()), text))
+}
+
+fn read_bounded(source: &Path) -> ApiResult<Vec<u8>> {
+    let mut file = std::fs::File::open(source)
+        .map_err(|_| ApiError::BadRequest("transcript path is not a readable file"))?;
+    let before = file
+        .metadata()
+        .map_err(|_| ApiError::BadRequest("transcript path is not a readable file"))?;
+    if !before.is_file() || before.len() > TRANSCRIPT_CAP_BYTES {
+        return Err(ApiError::BadRequest(
+            "transcript file exceeds the 16 MiB copy cap",
+        ));
+    }
+    let mut bytes = Vec::with_capacity(before.len() as usize);
+    (&mut file)
+        .take(TRANSCRIPT_CAP_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|_| ApiError::BadRequest("transcript path is not a readable file"))?;
+    let after = file
+        .metadata()
+        .map_err(|_| ApiError::BadRequest("transcript path is not a readable file"))?;
+    if bytes.len() as u64 > TRANSCRIPT_CAP_BYTES {
+        return Err(ApiError::BadRequest(
+            "transcript file exceeds the 16 MiB copy cap",
+        ));
+    }
+    if before.len() != after.len() || after.len() != bytes.len() as u64 {
+        return Err(ApiError::BadRequest(
+            "transcript source changed while it was being read; retry",
+        ));
+    }
+    Ok(bytes)
 }
 
 fn sha256(bytes: &[u8]) -> String {

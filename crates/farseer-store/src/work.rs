@@ -20,6 +20,15 @@ pub struct TaskFilter<'a> {
     pub project_path: Option<&'a str>,
     pub state: Option<TaskState>,
     pub limit: usize,
+    pub after: Option<TaskCursor>,
+}
+
+/// The last row in the stable task ordering used by bounded board reads.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TaskCursor {
+    pub priority: i32,
+    pub updated_ts: i64,
+    pub task_id: TaskId,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -192,6 +201,16 @@ impl Store {
     }
 
     pub fn tasks(&self, filter: &TaskFilter<'_>) -> Result<Vec<Task>> {
+        self.select_tasks(filter, false)
+    }
+
+    /// Read one bounded keyset page, fetching one sentinel row to report whether
+    /// another page exists.
+    pub fn task_page(&self, filter: &TaskFilter<'_>) -> Result<Vec<Task>> {
+        self.select_tasks(filter, true)
+    }
+
+    fn select_tasks(&self, filter: &TaskFilter<'_>, with_sentinel: bool) -> Result<Vec<Task>> {
         let mut sql = String::from("SELECT task_id FROM tasks WHERE 1 = 1");
         let mut values: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
         if let Some(id) = filter.conversation_id {
@@ -206,9 +225,24 @@ impl Store {
             values.push(Box::new(state.as_str().to_owned()));
             sql.push_str(&format!(" AND state = ?{}", values.len()));
         }
-        values.push(Box::new(filter.limit.max(1) as i64));
+        if let Some(after) = filter.after {
+            values.push(Box::new(after.priority));
+            let priority = values.len();
+            values.push(Box::new(after.updated_ts));
+            let updated = values.len();
+            values.push(Box::new(after.task_id.as_bytes().to_vec()));
+            let task_id = values.len();
+            sql.push_str(&format!(
+                " AND (priority < ?{priority} OR (priority = ?{priority} AND (updated_ts < ?{updated} OR (updated_ts = ?{updated} AND task_id < ?{task_id}))))"
+            ));
+        }
+        let limit = filter
+            .limit
+            .max(1)
+            .saturating_add(usize::from(with_sentinel));
+        values.push(Box::new(limit.min(i64::MAX as usize) as i64));
         sql.push_str(&format!(
-            " ORDER BY priority DESC, updated_ts DESC, rowid DESC LIMIT ?{}",
+            " ORDER BY priority DESC, updated_ts DESC, task_id DESC LIMIT ?{}",
             values.len()
         ));
         let mut statement = self.conn().prepare(&sql)?;
@@ -537,6 +571,116 @@ impl Store {
         Ok(())
     }
 
+    /// Read only a bounded candidate set and bounded UTF-8 prefixes.
+    ///
+    /// The byte budget is applied to the bytes returned by SQLite, so a large
+    /// collection of large projections cannot be materialized before the
+    /// caller gets a chance to stop.
+    pub fn indexed_transcripts_bounded(
+        &self,
+        candidate_limit: usize,
+        byte_limit: usize,
+    ) -> Result<Vec<(String, String)>> {
+        if candidate_limit == 0 || byte_limit == 0 {
+            return Ok(Vec::new());
+        }
+        let digests = {
+            let mut statement = self
+                .conn()
+                .prepare_cached("SELECT digest FROM transcript_index ORDER BY digest LIMIT ?1")?;
+            statement
+                .query_map([candidate_limit.min(i64::MAX as usize) as i64], |row| {
+                    row.get::<_, String>(0)
+                })?
+                .collect::<std::result::Result<Vec<_>, _>>()?
+        };
+        let mut used = 0usize;
+        let mut documents = Vec::with_capacity(digests.len());
+        for digest in digests {
+            let remaining = byte_limit.saturating_sub(used);
+            if remaining == 0 {
+                break;
+            }
+            let bytes = self.conn().query_row(
+                "SELECT substr(CAST(body AS BLOB), 1, ?2) FROM transcript_index WHERE digest = ?1",
+                rusqlite::params![digest, remaining.min(i64::MAX as usize) as i64],
+                |row| row.get::<_, Vec<u8>>(0),
+            )?;
+            let body = valid_utf8_prefix(bytes);
+            used = used.saturating_add(body.len());
+            documents.push((digest, body));
+        }
+        Ok(documents)
+    }
+
+    /// Commit one projection and its edges only if its attachment is still the
+    /// same row that was read before analysis.
+    pub fn commit_transcript_projection(
+        &self,
+        attachment: &TranscriptAttachment,
+        body: &str,
+        redaction: &str,
+        projection: &str,
+        edges: &[SimilarityEdge],
+    ) -> Result<()> {
+        let transaction = self.conn().unchecked_transaction()?;
+        let current = transaction
+            .query_row(
+                "SELECT custody, source, stored_path FROM transcript_attachments
+                 WHERE digest = ?1 AND run_id = ?2",
+                rusqlite::params![attachment.digest, &attachment.run_id.as_bytes()[..]],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, Option<String>>(2)?,
+                    ))
+                },
+            )
+            .optional()?;
+        let Some((custody, source, stored_path)) = current else {
+            return Err(StoreError::StaleTranscriptProjection);
+        };
+        if custody != attachment.custody.as_str()
+            || source != attachment.source
+            || stored_path != attachment.stored_path
+        {
+            return Err(StoreError::StaleTranscriptProjection);
+        }
+        transaction.execute(
+            "INSERT OR REPLACE INTO transcript_index
+             (digest, body, redaction_version, projection_version)
+             VALUES (?1, ?2, ?3, ?4)",
+            rusqlite::params![attachment.digest, body, redaction, projection],
+        )?;
+        transaction.execute(
+            "DELETE FROM similarity_edges WHERE left_digest = ?1 OR right_digest = ?1",
+            [&attachment.digest],
+        )?;
+        for edge in edges {
+            transaction.execute(
+                "INSERT OR REPLACE INTO similarity_edges
+                   (left_digest, right_digest, score, embedding_model, dimensions, distance_metric,
+                    redaction_version, projection_version, source_digest, evidence)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                rusqlite::params![
+                    edge.left_digest,
+                    edge.right_digest,
+                    edge.score,
+                    edge.embedding_model,
+                    edge.dimensions,
+                    edge.distance_metric,
+                    edge.redaction_version,
+                    edge.projection_version,
+                    edge.source_digest,
+                    serde_json::to_string(&edge.evidence)?
+                ],
+            )?;
+        }
+        transaction.commit()?;
+        Ok(())
+    }
+
     pub fn indexed_transcripts(&self) -> Result<Vec<(String, String)>> {
         let mut statement = self
             .conn()
@@ -615,6 +759,17 @@ impl Store {
     }
 }
 
+fn valid_utf8_prefix(bytes: Vec<u8>) -> String {
+    match String::from_utf8(bytes) {
+        Ok(text) => text,
+        Err(error) => {
+            let valid = error.utf8_error().valid_up_to();
+            String::from_utf8(error.into_bytes()[..valid].to_vec())
+                .expect("the prefix reported valid by UTF-8 is valid")
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -668,6 +823,56 @@ mod tests {
             .unwrap();
         assert_eq!(global, project);
         assert_eq!(global, [task]);
+    }
+
+    #[test]
+    fn task_pages_use_a_stable_keyset_order_and_scope() {
+        let store = Store::open_in_memory().unwrap();
+        let conversation = conversation();
+        store.create_conversation(&conversation).unwrap();
+        let mut tasks = Vec::new();
+        for (priority, updated_ts, project_path) in [
+            (2, 3, Some("D:/one")),
+            (2, 2, Some("D:/one")),
+            (1, 9, Some("D:/two")),
+        ] {
+            let mut task = task(conversation.conversation_id);
+            task.priority = priority;
+            task.updated_ts = updated_ts;
+            task.project_path = project_path.map(str::to_owned);
+            task.task_id = TaskId::new();
+            store.create_task(&task).unwrap();
+            tasks.push(task);
+        }
+
+        let first = store
+            .task_page(&TaskFilter {
+                project_path: Some("D:/one"),
+                limit: 1,
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(first.len(), 2, "one sentinel row reports another page");
+        let after = TaskCursor {
+            priority: first[0].priority,
+            updated_ts: first[0].updated_ts,
+            task_id: first[0].task_id,
+        };
+        let second = store
+            .task_page(&TaskFilter {
+                project_path: Some("D:/one"),
+                limit: 1,
+                after: Some(after),
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(second[0].task_id, tasks[1].task_id);
+        assert_eq!(first[0].project_path.as_deref(), Some("D:/one"));
+        assert!(
+            second
+                .iter()
+                .all(|task| task.project_path.as_deref() == Some("D:/one"))
+        );
     }
 
     #[test]
@@ -740,5 +945,41 @@ mod tests {
 
         assert_eq!(store.transcript_attachments(Some(first)).unwrap().len(), 1);
         assert_eq!(store.transcript_attachments(Some(second)).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn bounded_transcript_candidates_cap_rows_and_bytes() {
+        let store = Store::open_in_memory().unwrap();
+        for (digest, body) in [("a", "12345"), ("b", "67890"), ("c", "extra")] {
+            store
+                .index_transcript(digest, body, "redaction", "projection")
+                .unwrap();
+        }
+        let rows = store.indexed_transcripts_bounded(2, 7).unwrap();
+        assert!(rows.len() <= 2);
+        assert!(rows.iter().map(|(_, body)| body.len()).sum::<usize>() <= 7);
+    }
+
+    #[test]
+    fn projection_commit_rejects_a_replaced_attachment() {
+        let store = Store::open_in_memory().unwrap();
+        let run_id = RunId::new();
+        let old = TranscriptAttachment {
+            digest: "digest".into(),
+            run_id,
+            custody: TranscriptCustody::CopyPlusIndex,
+            source: "old.jsonl".into(),
+            stored_path: Some("stored".into()),
+            created_ts: 1,
+        };
+        store.record_transcript_attachment(&old).unwrap();
+        let mut replacement = old.clone();
+        replacement.source = "new.jsonl".into();
+        store.record_transcript_attachment(&replacement).unwrap();
+        assert!(matches!(
+            store.commit_transcript_projection(&old, "safe", "redaction", "projection", &[]),
+            Err(crate::StoreError::StaleTranscriptProjection)
+        ));
+        assert!(store.indexed_transcripts().unwrap().is_empty());
     }
 }

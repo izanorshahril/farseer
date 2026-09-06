@@ -104,8 +104,8 @@ A widget written to attack the host reached the bridge and nothing else; the tab
 
 Adding `allow-same-origin` would hand a widget the host's origin and undo every one of those properties at once.
 
-## Not built yet
+## Known limits
 
-- **Response shapes in the contract.** [`widgets/AGENTS.md`](../widgets/AGENTS.md) lists the paths a widget may read but not what they return, and the first widget cell zero wrote guessed wrong about `/analytics/cost`.
+- **The widget contract is intentionally read-focused.** [`widgets/AGENTS.md`](../widgets/AGENTS.md) now records the response shapes used by the shipped examples, but the bridge forwards new read endpoints without generating a separate widget SDK.
 - **Auto-height in a real window.** A frame reports its own layout as `0` under a hidden browser pane, so the check that would prove it has not run anywhere that composites.
 - **A rendered stream inside the attach.** `07 attach semantics`'s control axis is on the run line now - `observe`, `take over`, `release`, and `intervene` once a run is taken over - but observing still means reading the Activity widget beside it rather than a stream scoped to the run the operator attached to.

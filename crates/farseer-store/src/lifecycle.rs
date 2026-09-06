@@ -182,6 +182,40 @@ impl Store {
             "DELETE FROM memories WHERE cell_id = ?1 AND ts BETWEEN ?2 AND ?3",
             rusqlite::params![cell_id.as_str(), from, to],
         )?;
+        // Transcript projections are disposable and must not survive the run
+        // rows they describe. Keep a shared digest while another attachment
+        // still references it, but remove every edge touching purged data.
+        tx.execute(
+            "DELETE FROM similarity_edges
+             WHERE left_digest IN (
+                 SELECT digest FROM transcript_attachments
+                 WHERE run_id IN (
+                     SELECT run_id FROM runs WHERE cell_id = ?1 AND started_ts BETWEEN ?2 AND ?3
+                 )
+             )
+                OR right_digest IN (
+                 SELECT digest FROM transcript_attachments
+                 WHERE run_id IN (
+                     SELECT run_id FROM runs WHERE cell_id = ?1 AND started_ts BETWEEN ?2 AND ?3
+                 )
+             )",
+            rusqlite::params![cell_id.as_str(), from, to],
+        )?;
+        tx.execute(
+            "DELETE FROM transcript_attachments
+             WHERE run_id IN (
+                 SELECT run_id FROM runs WHERE cell_id = ?1 AND started_ts BETWEEN ?2 AND ?3
+             )",
+            rusqlite::params![cell_id.as_str(), from, to],
+        )?;
+        tx.execute(
+            "DELETE FROM transcript_index
+             WHERE NOT EXISTS (
+                 SELECT 1 FROM transcript_attachments
+                 WHERE transcript_attachments.digest = transcript_index.digest
+             )",
+            [],
+        )?;
         // The runs go too. Purge is not delete: `02 record scope` section 7
         // keeps the record when a *cell* is deleted, but this verb exists for
         // content that must not exist, and leaving the cost and intervention
