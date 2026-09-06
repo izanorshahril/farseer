@@ -7976,6 +7976,159 @@ runner = "{runner}"
         assert_eq!(scoped["rows"].as_array().unwrap().len(), 3);
     }
 
+    /// `11 session explorer`: a desktop restart must reopen the durable record
+    /// and preserve provider-owned identifiers from more than one protocol.
+    #[tokio::test]
+    async fn the_session_explorer_survives_restart_with_two_harness_protocols() {
+        let cells = tempfile::tempdir().unwrap();
+        std::fs::write(
+            cells.path().join("zero.toml"),
+            r#"
+cell_id = "zero"
+name = "Cell Zero"
+workspace_strategy = "plain_directory"
+
+[manager]
+runner = "claude-code"
+"#,
+        )
+        .unwrap();
+        let runs_dir = tempfile::tempdir().unwrap();
+        let repo = git_repo_with_a_commit();
+        let record_dir = tempfile::tempdir().unwrap();
+        let record = record_dir.path().join("record.sqlite3");
+        let first_token = RuntimeToken::generate();
+        let first_state = Arc::new(AppState::new(
+            Store::open(&record).unwrap(),
+            cells.path(),
+            first_token.clone(),
+            runs_dir.path(),
+            repo.path(),
+        ));
+        first_state.reload();
+        let first = Harness {
+            router: router(first_state.clone()),
+            token: first_token,
+            state: first_state.clone(),
+            _dir: cells,
+            _runs_dir: runs_dir,
+            _repo: repo,
+        };
+        let now = now_ms();
+        for (runner, kind, identifier) in [
+            ("claude-code", "thread", "thread-restart"),
+            ("goose-acp", "acp-session", "acp-restart"),
+        ] {
+            let conversation_id = farseer_core::ConversationId::new();
+            let task_id = TaskId::new();
+            let run_id = RunId::new();
+            first
+                .state
+                .store()
+                .create_conversation(&farseer_core::Conversation {
+                    conversation_id,
+                    title: format!("Restart {runner}"),
+                    project_path: None,
+                    manager_runner: Some(runner.into()),
+                    created_ts: now,
+                    updated_ts: now,
+                    archived_ts: None,
+                })
+                .unwrap();
+            first
+                .state
+                .store()
+                .create_task(&farseer_core::Task {
+                    task_id,
+                    conversation_id,
+                    goal: format!("Observe {runner}"),
+                    title: format!("Observe {runner}"),
+                    project_path: None,
+                    state: farseer_core::TaskState::Done,
+                    priority: 0,
+                    created_ts: now,
+                    updated_ts: now,
+                })
+                .unwrap();
+            first
+                .state
+                .store()
+                .upsert_run(&RunRow {
+                    run_id,
+                    task_id,
+                    cell_id: CellId::new("zero"),
+                    runner: runner.into(),
+                    model: format!("{runner}-model"),
+                    outcome: Some("ok".into()),
+                    usd_micros: 0,
+                    tokens: 0,
+                    operator_touched: false,
+                    started_ts: now,
+                    finished_ts: Some(now + 1),
+                })
+                .unwrap();
+            first
+                .state
+                .store()
+                .observe_harness_session(&farseer_core::HarnessSession {
+                    run_id,
+                    identifier_kind: kind.into(),
+                    identifier: identifier.into(),
+                    log_pointer: None,
+                    observed_ts: now,
+                })
+                .unwrap();
+        }
+        drop(first);
+
+        let second_cells = tempfile::tempdir().unwrap();
+        std::fs::write(
+            second_cells.path().join("zero.toml"),
+            r#"
+cell_id = "zero"
+name = "Cell Zero"
+workspace_strategy = "plain_directory"
+
+[manager]
+runner = "claude-code"
+"#,
+        )
+        .unwrap();
+        let second_runs = tempfile::tempdir().unwrap();
+        let second_repo = git_repo_with_a_commit();
+        let second_token = RuntimeToken::generate();
+        let second_state = Arc::new(AppState::new(
+            Store::open(&record).unwrap(),
+            second_cells.path(),
+            second_token.clone(),
+            second_runs.path(),
+            second_repo.path(),
+        ));
+        second_state.reload();
+        let second = Harness {
+            router: router(second_state.clone()),
+            token: second_token,
+            state: second_state,
+            _dir: second_cells,
+            _runs_dir: second_runs,
+            _repo: second_repo,
+        };
+        let (status, page) = second.get("/v1/work/sessions?limit=10").await;
+        assert_eq!(status, StatusCode::OK, "{page}");
+        let rows = page["rows"].as_array().unwrap();
+        assert_eq!(rows.len(), 2);
+        assert!(
+            rows.iter()
+                .any(|row| row["session"]["identifier"] == "thread-restart")
+        );
+        assert!(
+            rows.iter()
+                .any(|row| row["session"]["identifier"] == "acp-restart")
+        );
+        assert!(rows.iter().any(|row| row["runner"] == "claude-code"));
+        assert!(rows.iter().any(|row| row["runner"] == "goose-acp"));
+    }
+
     #[tokio::test]
     async fn task_usage_counts_parent_and_child_runs_once_each() {
         let h = harness();
