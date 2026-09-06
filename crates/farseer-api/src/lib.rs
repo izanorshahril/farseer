@@ -4172,6 +4172,12 @@ kind = "cell"
 name = "abroad"
 cell_id = "abroad"
 max_autonomy_ceiling = "reversible"
+
+[[roster]]
+kind = "cell"
+name = "other"
+cell_id = "other"
+max_autonomy_ceiling = "reversible"
 "#;
         const SOCIAL: &str = r#"
 cell_id = "social"
@@ -4189,11 +4195,20 @@ workspace_strategy = "plain_directory"
 [manager]
 runner = "farseer-test-missing-runner"
 "#;
+        const OTHER: &str = r#"
+cell_id = "other"
+name = "Other"
+workspace_strategy = "plain_directory"
+
+[manager]
+runner = "farseer-test-missing-runner"
+"#;
 
         let h = harness_with_cells(&[
             ("zero", ZERO_WITH_TEAM),
             ("social", SOCIAL),
             ("abroad", ABROAD),
+            ("other", OTHER),
         ]);
         let root = tempfile::tempdir().unwrap();
         let project = root.path().join("project");
@@ -4207,7 +4222,7 @@ runner = "farseer-test-missing-runner"
         std::fs::write(
             project.join(project_profiles::PROFILE_PATH),
             format!(
-                "version = 1\nproject_path = {:?}\ncoordinating_cell = \"zero\"\nspecialist_cells = [\"social\"]\n",
+                "version = 1\nproject_path = {:?}\ncoordinating_cell = \"zero\"\nspecialist_cells = [\"social\", \"abroad\"]\n",
                 projects::display(&project)
             ),
         )
@@ -4248,10 +4263,14 @@ runner = "farseer-test-missing-runner"
             .iter()
             .find(|event| event.kind == EventKind::CELL_CALLED.into())
             .expect("accepted specialist call is recorded");
-        assert_eq!(called.payload["project_specialists"], json!(["social"]));
+        assert_eq!(
+            called.payload["project_specialists"],
+            json!(["social", "abroad"])
+        );
+        assert_eq!(called.payload["call"]["autonomy_ceiling"], "reversible");
         let accepted_run_id = accepted["run_id"].as_str().unwrap();
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
-        let run_count = loop {
+        let run_count_after_first = loop {
             let rows = h.state.store().recent_runs(100).unwrap();
             if rows
                 .iter()
@@ -4270,7 +4289,31 @@ runner = "farseer-test-missing-runner"
             .filter(|event| event.kind == EventKind::CELL_CALLED.into())
             .count();
 
-        let (status, refused) = h.send(request("abroad")).await;
+        let (status, accepted_second) = h.send(request("abroad")).await;
+        assert_eq!(status, StatusCode::OK, "{accepted_second}");
+        let events_after_second = h
+            .state
+            .store()
+            .scan(0, 100, &ScanFilter::default())
+            .unwrap();
+        let accepted_calls = events_after_second
+            .iter()
+            .filter(|event| event.kind == EventKind::CELL_CALLED.into())
+            .collect::<Vec<_>>();
+        assert_eq!(accepted_calls.len(), call_count + 1);
+        assert_eq!(accepted_calls[1].payload["call"]["to_cell"], "abroad");
+        assert_eq!(
+            accepted_calls[1].payload["project_specialists"],
+            json!(["social", "abroad"])
+        );
+        assert_eq!(
+            accepted_calls[1].payload["call"]["autonomy_ceiling"],
+            "reversible"
+        );
+        let run_count_after_second = h.state.store().recent_runs(100).unwrap().len();
+        assert!(run_count_after_second > run_count_after_first);
+
+        let (status, refused) = h.send(request("other")).await;
         assert_eq!(status, StatusCode::BAD_REQUEST, "{refused}");
         assert!(
             refused["error"]
@@ -4286,8 +4329,11 @@ runner = "farseer-test-missing-runner"
             .iter()
             .filter(|event| event.kind == EventKind::CELL_CALLED.into())
             .count();
-        assert_eq!(h.state.store().recent_runs(100).unwrap().len(), run_count);
-        assert_eq!(call_count_after, call_count);
+        assert_eq!(
+            h.state.store().recent_runs(100).unwrap().len(),
+            run_count_after_second
+        );
+        assert_eq!(call_count_after, call_count + 1);
     }
 
     #[tokio::test]

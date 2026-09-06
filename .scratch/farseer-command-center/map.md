@@ -92,3 +92,7 @@ The responsive canvas acceptance demo covers keyboard movement, accessible resiz
 Privacy acceptance evidence combines masking, copy/export, notification, and browser screenshot checks.
 The project-team specialist regression remains deterministic and refuses an ineligible cell before creating a second run; a live multi-cell cap demonstration remains open.
 The remaining unchecked acceptance items are startup child-cleanup/capability demonstrations and the widget render/read/runtime-continuity E2E demonstration.
+
+## Status correction, 2026-09-06 implementation wave 8
+
+The project-team regression now accepts two nominated specialist cell calls, records each call's autonomy cap and specialist set, and refuses a third callable cell before creating work.
