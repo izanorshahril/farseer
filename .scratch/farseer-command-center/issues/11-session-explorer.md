@@ -29,6 +29,7 @@ The additive `/v1/work/search/page` route now returns bounded scrubbed excerpts,
 Search pagination filters in SQLite before applying the offset, and advances by rows actually emitted when the byte cap ends a page, so non-matching or truncated projections cannot hide later matches.
 The public session-page regression test now proves bounded paging, provider identifier kind, runner/model facts, distinct referenced, rotated, and unavailable log pointers across protocol-shaped sessions, and project/conversation/task/run filters.
 The same public fixture now opens `/v1/work/session` and verifies the originating task/run, parent topology, transcript custody, projection status, and scrubbed indexed excerpt.
+Session detail now applies the 32-row relationship and attachment cap in SQLite before decoding rows, so a large run cannot materialize its full parent or transcript archive before the API limit.
 The two-protocol restart demo and a dedicated search face remain open.
 
 **Exclusions:** No automatic transcript copying, private harness-directory guessing, external embeddings service, or raw log viewer without explicit custody.

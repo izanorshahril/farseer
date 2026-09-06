@@ -66,6 +66,27 @@ pub struct TranscriptProjection {
     pub updated_ts: i64,
 }
 
+type TranscriptAttachmentRow = (String, Vec<u8>, String, String, Option<String>, i64);
+
+fn decode_transcript_attachment(row: TranscriptAttachmentRow) -> Result<TranscriptAttachment> {
+    Ok(TranscriptAttachment {
+        digest: row.0,
+        run_id: RunId::from_bytes(uuid_bytes(&row.1, "transcript_attachment.run_id")?),
+        custody: row
+            .2
+            .parse()
+            .map_err(
+                |error: farseer_core::UnknownTranscriptCustody| StoreError::Corrupt {
+                    field: "transcript_attachment.custody",
+                    value: error.0,
+                },
+            )?,
+        source: row.3,
+        stored_path: row.4,
+        created_ts: row.5,
+    })
+}
+
 /// Mutable supervision/provenance for a staged artifact.
 /// The deterministic artifact bytes are kept at `final_path` only after the
 /// worker has completed successfully.
@@ -595,6 +616,35 @@ impl Store {
                 row.get::<_, String>(2)?,
             ))
         })?;
+        rows.map(|row| {
+            let row = row?;
+            Ok(RunParent {
+                run_id: RunId::from_bytes(uuid_bytes(&row.0, "run_parent.run_id")?),
+                parent_run_id: RunId::from_bytes(uuid_bytes(&row.1, "run_parent.parent")?),
+                kind: row.2,
+            })
+        })
+        .collect()
+    }
+
+    /// Read only the parent edges touching one run, with a hard row bound.
+    /// Session detail uses this instead of materializing the entire graph.
+    pub fn run_parents_for_run(&self, run_id: RunId, limit: usize) -> Result<Vec<RunParent>> {
+        let mut statement = self.conn().prepare_cached(
+            "SELECT run_id, parent, kind FROM run_parents
+             WHERE run_id = ?1 OR parent = ?1
+             ORDER BY rowid LIMIT ?2",
+        )?;
+        let rows = statement.query_map(
+            rusqlite::params![&run_id.as_bytes()[..], limit as i64],
+            |row| {
+                Ok((
+                    row.get::<_, Vec<u8>>(0)?,
+                    row.get::<_, Vec<u8>>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            },
+        )?;
         rows.map(|row| {
             let row = row?;
             Ok(RunParent {
@@ -1182,23 +1232,39 @@ impl Store {
                 .query_map([], map)?
                 .collect::<std::result::Result<Vec<_>, _>>()?,
         };
-        rows.into_iter()
-            .map(|row| {
-                Ok(TranscriptAttachment {
-                    digest: row.0,
-                    run_id: RunId::from_bytes(uuid_bytes(&row.1, "transcript_attachment.run_id")?),
-                    custody: row.2.parse().map_err(
-                        |error: farseer_core::UnknownTranscriptCustody| StoreError::Corrupt {
-                            field: "transcript_attachment.custody",
-                            value: error.0,
-                        },
-                    )?,
-                    source: row.3,
-                    stored_path: row.4,
-                    created_ts: row.5,
-                })
-            })
-            .collect()
+        rows.into_iter().map(decode_transcript_attachment).collect()
+    }
+
+    /// Read only a bounded page of attachments for one run.
+    /// Session detail uses this to keep both row and projection work bounded.
+    pub fn transcript_attachments_bounded(
+        &self,
+        run_id: RunId,
+        limit: usize,
+    ) -> Result<Vec<TranscriptAttachment>> {
+        let mut statement = self.conn().prepare_cached(
+            "SELECT digest, run_id, custody, source, stored_path, created_ts
+             FROM transcript_attachments
+             WHERE run_id = ?1
+             ORDER BY created_ts, digest
+             LIMIT ?2",
+        )?;
+        let rows = statement
+            .query_map(
+                rusqlite::params![&run_id.as_bytes()[..], limit as i64],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, Vec<u8>>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                        row.get::<_, Option<String>>(4)?,
+                        row.get::<_, i64>(5)?,
+                    ))
+                },
+            )?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        rows.into_iter().map(decode_transcript_attachment).collect()
     }
 
     pub fn index_transcript(
@@ -1785,6 +1851,33 @@ mod tests {
 
         assert_eq!(store.transcript_attachments(Some(first)).unwrap().len(), 1);
         assert_eq!(store.transcript_attachments(Some(second)).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn session_detail_relationship_reads_are_bounded_at_the_store() {
+        let store = Store::open_in_memory().unwrap();
+        let run_id = RunId::new();
+        for index in 0..3 {
+            store
+                .record_run_parent(RunId::new(), run_id, "rerun")
+                .unwrap();
+            store
+                .record_transcript_attachment(&TranscriptAttachment {
+                    digest: format!("digest-{index}"),
+                    run_id,
+                    custody: TranscriptCustody::Copy,
+                    source: "transcript.jsonl".into(),
+                    stored_path: Some(format!("objects/digest-{index}")),
+                    created_ts: index,
+                })
+                .unwrap();
+        }
+
+        let parents = store.run_parents_for_run(run_id, 2).unwrap();
+        let attachments = store.transcript_attachments_bounded(run_id, 2).unwrap();
+        assert_eq!(parents.len(), 2);
+        assert_eq!(attachments.len(), 2);
+        assert!(attachments[0].created_ts <= attachments[1].created_ts);
     }
 
     #[test]

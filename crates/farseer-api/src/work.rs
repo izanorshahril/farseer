@@ -531,15 +531,10 @@ pub(super) async fn get_session_detail(
         })
         .ok_or(ApiError::NotFound("session"))?;
     let task = store.task(row.task_id)?.ok_or(ApiError::NotFound("task"))?;
-    let parents = store
-        .run_parents()?
-        .into_iter()
-        .filter(|parent| parent.run_id == run_id || parent.parent_run_id == run_id)
-        .take(32)
-        .collect();
+    let parents = store.run_parents_for_run(run_id, 32)?;
     let mut attachments = Vec::new();
     let mut excerpts = Vec::new();
-    for attachment in store.transcript_attachments(Some(run_id))? {
+    for attachment in store.transcript_attachments_bounded(run_id, 32)? {
         let projection = store.transcript_projection(&attachment.digest, run_id)?;
         attachments.push(TranscriptAttachmentView {
             attachment: attachment.clone(),
