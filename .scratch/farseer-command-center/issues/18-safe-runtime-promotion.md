@@ -20,11 +20,11 @@ Use an isolated installation/data fixture for development and tests.
 
 ## Acceptance criteria
 
-- [ ] An explicitly authorized fixture candidate is staged, backed up, activated, and health-verified with recorded phase and version identities.
-- [ ] A changed candidate identity, failed drain, failed backup, or migration failure prevents unsafe activation and reports the recovery state.
+- [x] An explicitly authorized fixture candidate is staged, backed up, activated, and health-verified with recorded phase and version identities.
+- [x] A changed candidate identity, failed drain, failed backup, or migration failure prevents unsafe activation and reports the recovery state.
 - [ ] Candidate startup/smoke failure restores the prior matched binary/data and resumes admission only after verification.
 - [ ] The rollback command works while the candidate cannot start; injected restore failure remains stopped with concrete recovery instructions.
-- [ ] No running executable is overwritten in place and no old binary is opened against incompatible new-schema data.
+- [x] No running executable is overwritten in place and no old binary is opened against incompatible new-schema data.
 
 **Exclusions:** Multi-host rollout, live operator installation changes in the test, silent hot patching, and an automatic agent judgment as the promotion gate.
 **Test seam/demo:** Use a disposable versioned installation with a deliberately failing candidate; observe automatic bounded recovery and query the restored task record.
