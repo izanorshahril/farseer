@@ -122,3 +122,9 @@ Ticket 12 now has explicit parent/child de-duplication coverage; its broader two
 Ticket 15 now serializes terminal leases and ignores naturally exited sessions when deciding teardown; the ConPTY/manual demonstration remains open.
 Ticket 16 remains implemented after backup consistency and restore publication hardening.
 Ticket 19 acceptance evidence is complete.
+
+## Status correction, 2026-09-06 implementation wave 2
+
+Ticket 03 now has public global/project scope coverage and additive per-card run summaries for repeated or delegated runs; its manual empty/loading/failure demonstration remains open.
+Ticket 11 now labels referenced, rotated, and unavailable logs and verifies project/conversation/task/run filters plus search pagination; session-detail topology and restart demonstration remain open.
+Ticket 14 now exposes manager and roster details and refuses missing specialist cells before work creation; solo/multi-cell transition history and board demonstration remain open.

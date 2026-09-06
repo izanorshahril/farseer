@@ -77,3 +77,6 @@ The earlier implementation-state sentence calling verified startup fully impleme
 The authenticated handshake and timeout diagnostics are implemented, while launch convergence, child-owned cleanup, and desktop smoke evidence remain open.
 The current branch also hardened recoverable backup publication, terminal workspace leases, anchor-only project context, session-to-task navigation, parent/child usage accounting, and the honest authority acceptance evidence.
 Those increments do not close the remaining browser, live-runner, maintenance, promotion, and resource-monitor demonstrations.
+
+The current implementation wave adds additive task-card run summaries, public global/project board scope coverage, SQLite-filtered transcript search paging, explicit rotated-log labels, and project-team roster display/refusal coverage.
+These close the corresponding bounded read and profile acceptance items while session-detail topology, multi-cell profile switching, and browser/live demonstrations remain open.

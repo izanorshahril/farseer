@@ -16,8 +16,11 @@ type Task = {
   priority: number;
   updated_ts: number;
 };
+type BoardTask = Task & {
+  run_summary: { run_count: number; active_runs: number; latest_outcome?: string };
+};
 type TaskPage = {
-  tasks: Task[];
+  tasks: BoardTask[];
   next_cursor?: string;
   has_more: boolean;
   freshness: "eventual";
@@ -42,7 +45,7 @@ type Run = {
   cost_basis?: "reported" | "estimated" | "unknown";
 };
 type Session = { run_id: string; identifier_kind: string; identifier: string; log_pointer?: string };
-type SessionRow = { session: Session & { observed_ts: number }; task_id: string; runner: string; model: string; project_path?: string; log_available: boolean };
+type SessionRow = { session: Session & { observed_ts: number }; task_id: string; runner: string; model: string; project_path?: string; log_available: boolean; log_status: "referenced" | "rotated" | "unavailable" };
 type SessionPage = { rows: SessionRow[]; next_offset?: number };
 type SearchHit = { digest: string; excerpt: string; coverage: string; projection_version?: string };
 type SearchPage = { rows: SearchHit[]; next_offset?: number };
@@ -85,7 +88,7 @@ export function WorkWidget({ bridge }: { bridge: Bridge }) {
   const privacy = usePrivacy();
   const [face, setFace] = useState<Face>("board");
   const [expanded, setExpanded] = useState(false);
-  const [tasks, setTasks] = useState<Task[]>([]);
+  const [tasks, setTasks] = useState<BoardTask[]>([]);
   const [nextCursor, setNextCursor] = useState<string | undefined>();
   const [loadingMore, setLoadingMore] = useState(false);
   const loadVersion = useRef(0);
@@ -183,6 +186,9 @@ export function WorkWidget({ bridge }: { bridge: Bridge }) {
     try {
       const params = new URLSearchParams({ limit: "100", offset: String(offset) });
       if (projectScope) params.set("project", projectScope);
+      if (subject.run) params.set("run_id", subject.run);
+      else if (subject.task) params.set("task_id", subject.task);
+      else if (subject.conversation) params.set("conversation_id", subject.conversation);
       const page = await bridge.read<SessionPage>(`/work/sessions?${params}`);
       setSessions((current) => offset ? [...current, ...page.rows] : page.rows);
       setSessionOffset(page.next_offset);
@@ -192,7 +198,7 @@ export function WorkWidget({ bridge }: { bridge: Bridge }) {
     } finally {
       setSessionsLoading(false);
     }
-  }, [bridge, projectScope]);
+  }, [bridge, projectScope, subject.run, subject.task, subject.conversation]);
 
   const loadSearch = useCallback(async (offset = 0) => {
     if (!searchQuery.trim()) {
@@ -362,7 +368,9 @@ export function WorkWidget({ bridge }: { bridge: Bridge }) {
                 <h4>{stateLabel(state)} <span>{grouped[state].length}</span></h4>
                 {grouped[state].map((task) => (
                   <button key={task.task_id} className={subject.task === task.task_id ? "work-card selected" : "work-card"} onClick={() => chooseTask(task)}>
-                    <b>{task.title}</b><small>{task.project_path ? mask(task.project_path, "path", privacy) : "fleet"}</small>
+                    <b>{task.title}</b>
+                    <small>{task.project_path ? mask(task.project_path, "path", privacy) : "fleet"}</small>
+                    <small>{task.run_summary.run_count} run{task.run_summary.run_count === 1 ? "" : "s"} · {task.run_summary.active_runs} active · {task.run_summary.latest_outcome ?? "pending"}</small>
                   </button>
                 ))}
               </section>
@@ -405,7 +413,7 @@ export function WorkWidget({ bridge }: { bridge: Bridge }) {
               <li key={`${row.session.identifier_kind}:${row.session.identifier}:${row.session.run_id}`}>
                 <button className="row-button" onClick={() => selectSubject({ task: row.task_id, run: row.session.run_id, project: row.project_path ?? null })}>
                   <b>{mask(row.session.identifier, "session", privacy)}</b>
-                  <small>{row.runner} · {row.model || "model unavailable"} · {row.log_available ? "log available" : "log unavailable"}</small>
+                  <small>{row.runner} · {row.model || "model unavailable"} · log {row.log_status}</small>
                   <span className="mono">{row.session.identifier_kind} · {new Date(row.session.observed_ts).toLocaleString()}</span>
                 </button>
               </li>

@@ -101,6 +101,7 @@ pub struct SessionRow {
     pub model: String,
     pub project_path: Option<String>,
     pub log_available: bool,
+    pub log_status: &'static str,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -932,6 +933,9 @@ impl Store {
         limit: usize,
         offset: usize,
         project_path: Option<&str>,
+        conversation_id: Option<ConversationId>,
+        task_id: Option<TaskId>,
+        run_id: Option<RunId>,
     ) -> Result<(Vec<SessionRow>, Option<usize>)> {
         let limit = limit.clamp(1, 500);
         let mut stmt = self.conn.prepare_cached(
@@ -940,13 +944,24 @@ impl Store {
              FROM harness_sessions h
              JOIN runs r ON r.run_id = h.run_id
              JOIN tasks t ON t.task_id = r.task_id
+             JOIN conversations c ON c.conversation_id = t.conversation_id
              WHERE (?1 IS NULL OR t.project_path = ?1)
+               AND (?2 IS NULL OR c.conversation_id = ?2)
+               AND (?3 IS NULL OR t.task_id = ?3)
+               AND (?4 IS NULL OR h.run_id = ?4)
              ORDER BY h.observed_ts DESC, h.run_id DESC
-             LIMIT ?2 OFFSET ?3",
+             LIMIT ?5 OFFSET ?6",
         )?;
         let raw = stmt
             .query_map(
-                rusqlite::params![project_path, (limit + 1) as i64, offset as i64],
+                rusqlite::params![
+                    project_path,
+                    conversation_id.map(|id| id.as_bytes().to_vec()),
+                    task_id.map(|id| id.as_bytes().to_vec()),
+                    run_id.map(|id| id.as_bytes().to_vec()),
+                    (limit + 1) as i64,
+                    offset as i64
+                ],
                 |row| {
                     Ok((
                         row.get::<_, Vec<u8>>(0)?,
@@ -966,6 +981,11 @@ impl Store {
             .into_iter()
             .map(|row| {
                 let log_available = row.3.is_some();
+                let log_status = match row.3.as_deref() {
+                    None => "unavailable",
+                    Some(pointer) if pointer.starts_with("rotated:") => "rotated",
+                    Some(_) => "referenced",
+                };
                 Ok(SessionRow {
                     session: HarnessSession {
                         run_id: RunId::from_bytes(uuid_bytes(&row.0, "session.run_id")?),
@@ -979,6 +999,7 @@ impl Store {
                     model: row.7,
                     project_path: row.8,
                     log_available,
+                    log_status,
                 })
             })
             .collect::<Result<Vec<_>>>()?;
@@ -1245,20 +1266,58 @@ impl Store {
         offset: usize,
         byte_limit: usize,
     ) -> Result<(Vec<IndexedTranscript>, Option<usize>)> {
+        self.indexed_transcript_page_matching(None, limit, offset, byte_limit)
+    }
+
+    /// Read a bounded page of scrubbed transcript projections that match a
+    /// query in SQLite before pagination, so an offset cannot skip matching
+    /// documents hidden among non-matching rows.
+    pub fn indexed_transcript_search_page(
+        &self,
+        needle: &str,
+        limit: usize,
+        offset: usize,
+        byte_limit: usize,
+    ) -> Result<(Vec<IndexedTranscript>, Option<usize>)> {
+        self.indexed_transcript_page_matching(Some(needle), limit, offset, byte_limit)
+    }
+
+    fn indexed_transcript_page_matching(
+        &self,
+        needle: Option<&str>,
+        limit: usize,
+        offset: usize,
+        byte_limit: usize,
+    ) -> Result<(Vec<IndexedTranscript>, Option<usize>)> {
         if limit == 0 || byte_limit == 0 {
             return Ok((Vec::new(), None));
         }
         let limit = limit.min(500);
-        let mut statement = self.conn().prepare_cached(
-            "SELECT digest, projection_version
-             FROM transcript_index ORDER BY digest LIMIT ?1 OFFSET ?2",
-        )?;
-        let rows = statement
-            .query_map(
-                rusqlite::params![(limit + 1) as i64, offset as i64],
-                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
-            )?
-            .collect::<std::result::Result<Vec<_>, _>>()?;
+        let rows = if let Some(needle) = needle {
+            let mut statement = self.conn().prepare_cached(
+                "SELECT digest, projection_version
+                 FROM transcript_index
+                 WHERE instr(lower(body), lower(?1)) > 0
+                 ORDER BY digest LIMIT ?2 OFFSET ?3",
+            )?;
+            statement
+                .query_map(
+                    rusqlite::params![needle, (limit + 1) as i64, offset as i64],
+                    |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+                )?
+                .collect::<std::result::Result<Vec<_>, _>>()?
+        } else {
+            let mut statement = self.conn().prepare_cached(
+                "SELECT digest, projection_version
+                 FROM transcript_index ORDER BY digest LIMIT ?1 OFFSET ?2",
+            )?;
+            statement
+                .query_map(
+                    rusqlite::params![(limit + 1) as i64, offset as i64],
+                    |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+                )?
+                .collect::<std::result::Result<Vec<_>, _>>()?
+        };
         let has_more = rows.len() > limit;
         let mut documents = Vec::with_capacity(rows.len().min(limit));
         let mut used = 0usize;
@@ -1766,6 +1825,26 @@ mod tests {
         assert_eq!(next, Some(1));
         let (rows, next) = store.indexed_transcript_page(1, 1, 64).unwrap();
         assert_eq!(rows[0].digest, "b");
+        assert_eq!(next, None);
+    }
+
+    #[test]
+    fn transcript_search_paginates_matches_before_applying_the_offset() {
+        let store = Store::open_in_memory().unwrap();
+        for (digest, body) in [("a", "unrelated"), ("b", "needle one"), ("c", "needle two")] {
+            store
+                .index_transcript(digest, body, "redact-v1", "hash-tf-v1")
+                .unwrap();
+        }
+        let (rows, next) = store
+            .indexed_transcript_search_page("needle", 1, 0, 64)
+            .unwrap();
+        assert_eq!(rows[0].digest, "b");
+        assert_eq!(next, Some(1));
+        let (rows, next) = store
+            .indexed_transcript_search_page("needle", 1, 1, 64)
+            .unwrap();
+        assert_eq!(rows[0].digest, "c");
         assert_eq!(next, None);
     }
 

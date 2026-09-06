@@ -30,7 +30,7 @@ type TeamProfile = {
   source: "file" | "default";
   coordinating_cell: string;
   specialist_cells: string[];
-  cell?: { name: string; manager: { runners: string[] }; roster: { name: string; kind: string }[] };
+  cell?: { name: string; manager: { runners: string[] }; roster: { name: string; kind: string; runner?: string }[] };
   error?: string;
 };
 type Project = { name: string; path: string; git: boolean; profile?: TeamProfile };
@@ -406,10 +406,7 @@ export function ProjectsWidget({ bridge }: { bridge: Bridge }) {
                     >
                       <span className="project-name">{project.name}</span>
                       {project.profile?.valid && project.profile.cell && (
-                        <span
-                          className="dim small"
-                          title={`manager ${project.profile.cell.manager.runners.join(", ")}`}
-                        >
+                        <span className="dim small" title={`manager ${project.profile.cell.manager.runners.join(", ")}`}>
                           {project.profile.cell.name} · {project.profile.cell.roster.length} roster
                         </span>
                       )}
@@ -427,6 +424,21 @@ export function ProjectsWidget({ bridge }: { bridge: Bridge }) {
                         </span>
                       )}
                     </button>
+                    {on && project.profile?.valid && project.profile.cell && (
+                      <details className="project-team-detail">
+                        <summary className="dim small">team details</summary>
+                        <p className="dim small">
+                          manager: {project.profile.cell.manager.runners.join(", ") || "none"}
+                        </p>
+                        <ul className="plain-list">
+                          {project.profile.cell.roster.map((entry) => (
+                            <li key={`${entry.kind}:${entry.name}`} className="dim small">
+                              {entry.kind}: {entry.name}{entry.runner ? ` · ${entry.runner}` : ""}
+                            </li>
+                          ))}
+                        </ul>
+                      </details>
+                    )}
                   </li>
                 );
               })}

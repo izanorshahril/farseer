@@ -3933,6 +3933,8 @@ grants_shell = true
         assert_eq!(body["source"], "file");
         assert_eq!(body["coordinating_cell"], "zero");
         assert_eq!(body["cell"]["manager"]["runners"], json!(["claude-code"]));
+        assert_eq!(body["cell"]["roster"][0]["name"], "shell");
+        assert_eq!(body["specialist_cells"], json!([]));
     }
 
     #[tokio::test]
@@ -3970,6 +3972,53 @@ grants_shell = true
             .await;
         assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
         assert!(body["error"].as_str().unwrap().contains("repair"));
+        assert!(
+            h.state
+                .store()
+                .scan(0, 100, &ScanFilter::default())
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn a_missing_specialist_profile_is_visible_and_refused_before_work() {
+        let h = harness();
+        let root = tempfile::tempdir().unwrap();
+        let project = root.path().join("project");
+        std::fs::create_dir(&project).unwrap();
+        std::fs::create_dir(project.join(".farseer")).unwrap();
+        let project = std::fs::canonicalize(project).unwrap();
+        h.state
+            .store()
+            .authorize_root(
+                &projects::display(&std::fs::canonicalize(root.path()).unwrap()),
+                0,
+            )
+            .unwrap();
+        std::fs::write(
+            project.join(project_profiles::PROFILE_PATH),
+            format!(
+                "version = 1\nproject_path = {:?}\ncoordinating_cell = \"zero\"\nspecialist_cells = [\"missing\"]\n",
+                projects::display(&project)
+            ),
+        )
+        .unwrap();
+
+        let (status, projection) = h
+            .get(&format!("/v1/projects/profile?path={}", project.display()))
+            .await;
+        assert_eq!(status, StatusCode::OK, "{projection}");
+        assert_eq!(projection["valid"], false);
+        assert!(projection["error"].as_str().unwrap().contains("specialist"));
+
+        let (status, body) = h
+            .post(
+                "/v1/cells/zero/instruct",
+                json!({ "goal": "must be refused", "project": project.display().to_string() }),
+            )
+            .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
         assert!(
             h.state
                 .store()
@@ -7474,6 +7523,12 @@ runner = "{runner}"
     async fn the_session_explorer_page_preserves_protocol_and_log_availability() {
         let h = harness();
         let now = now_ms();
+        let project_root = tempfile::tempdir().unwrap();
+        let project_path = std::fs::canonicalize(project_root.path()).unwrap();
+        h.state
+            .store()
+            .authorize_root(&projects::display(&project_path), now)
+            .unwrap();
         let conversation_id = farseer_core::ConversationId::new();
         let task_id = TaskId::new();
         let run_id = RunId::new();
@@ -7482,7 +7537,7 @@ runner = "{runner}"
             .create_conversation(&farseer_core::Conversation {
                 conversation_id,
                 title: "Session explorer fixture".into(),
-                project_path: Some("C:\\fixture".into()),
+                project_path: Some(projects::display(&project_path)),
                 manager_runner: Some("claude-code".into()),
                 created_ts: now,
                 updated_ts: now,
@@ -7496,7 +7551,7 @@ runner = "{runner}"
                 conversation_id,
                 goal: "Inspect sessions".into(),
                 title: "Inspect sessions".into(),
-                project_path: Some("C:\\fixture".into()),
+                project_path: Some(projects::display(&project_path)),
                 state: farseer_core::TaskState::Done,
                 priority: 0,
                 created_ts: now,
@@ -7522,6 +7577,12 @@ runner = "{runner}"
         for (kind, identifier, log_pointer, observed_ts) in [
             ("thread", "thread-1", Some("C:\\logs\\thread-1.jsonl"), now),
             ("session", "session-2", None, now + 1),
+            (
+                "session",
+                "session-3",
+                Some("rotated:C:\\logs\\session-3.jsonl"),
+                now + 2,
+            ),
         ] {
             h.state
                 .store()
@@ -7534,22 +7595,73 @@ runner = "{runner}"
                 })
                 .unwrap();
         }
+        h.state
+            .store()
+            .index_transcript(
+                "digest-one",
+                "scrubbed needle excerpt",
+                "farseer-scrub-v1",
+                "hash-tf-v1",
+            )
+            .unwrap();
 
         let (status, page) = h.get("/v1/work/sessions?limit=1").await;
         assert_eq!(status, StatusCode::OK, "{page}");
         assert_eq!(page["rows"].as_array().unwrap().len(), 1);
-        assert_eq!(page["rows"][0]["session"]["identifier_kind"], "session");
+        assert_eq!(page["rows"][0]["session"]["identifier"], "session-3");
         assert_eq!(page["rows"][0]["task_id"], task_id.to_string());
         assert_eq!(page["rows"][0]["runner"], "claude-code");
         assert_eq!(page["rows"][0]["model"], "model-a");
-        assert_eq!(page["rows"][0]["log_available"], false);
+        assert_eq!(page["rows"][0]["log_available"], true);
+        assert_eq!(page["rows"][0]["log_status"], "rotated");
         assert_eq!(page["next_offset"], 1);
 
         let (status, next) = h.get("/v1/work/sessions?limit=1&offset=1").await;
         assert_eq!(status, StatusCode::OK, "{next}");
-        assert_eq!(next["rows"][0]["session"]["identifier_kind"], "thread");
-        assert_eq!(next["rows"][0]["log_available"], true);
-        assert!(next["next_offset"].is_null());
+        assert_eq!(next["rows"][0]["session"]["identifier"], "session-2");
+        assert_eq!(next["rows"][0]["log_available"], false);
+        assert_eq!(next["rows"][0]["log_status"], "unavailable");
+        assert_eq!(next["next_offset"], 2);
+
+        let (status, referenced) = h.get("/v1/work/sessions?limit=1&offset=2").await;
+        assert_eq!(status, StatusCode::OK, "{referenced}");
+        assert_eq!(referenced["rows"][0]["session"]["identifier"], "thread-1");
+        assert_eq!(referenced["rows"][0]["log_status"], "referenced");
+        assert!(referenced["next_offset"].is_null());
+
+        let (status, scoped) = h
+            .get(&format!("/v1/work/sessions?task_id={task_id}&limit=10"))
+            .await;
+        assert_eq!(status, StatusCode::OK, "{scoped}");
+        assert_eq!(scoped["rows"].as_array().unwrap().len(), 3);
+
+        let (status, search) = h.get("/v1/work/search/page?q=needle&limit=1").await;
+        assert_eq!(status, StatusCode::OK, "{search}");
+        assert_eq!(search["rows"][0]["digest"], "digest-one");
+        assert_eq!(search["rows"][0]["projection_version"], "hash-tf-v1");
+
+        let (status, scoped) = h
+            .get(&format!("/v1/work/sessions?run_id={run_id}&limit=10"))
+            .await;
+        assert_eq!(status, StatusCode::OK, "{scoped}");
+        assert_eq!(scoped["rows"].as_array().unwrap().len(), 3);
+
+        let (status, scoped) = h
+            .get(&format!(
+                "/v1/work/sessions?project={}&limit=10",
+                projects::display(&project_path)
+            ))
+            .await;
+        assert_eq!(status, StatusCode::OK, "{scoped}");
+        assert_eq!(scoped["rows"].as_array().unwrap().len(), 3);
+
+        let (status, scoped) = h
+            .get(&format!(
+                "/v1/work/sessions?conversation_id={conversation_id}&limit=10"
+            ))
+            .await;
+        assert_eq!(status, StatusCode::OK, "{scoped}");
+        assert_eq!(scoped["rows"].as_array().unwrap().len(), 3);
     }
 
     #[tokio::test]
@@ -7619,6 +7731,17 @@ runner = "{runner}"
         assert_eq!(body["usage"]["failed_runs"], 1);
         assert_eq!(body["usage"]["tokens"], 12);
         assert_eq!(body["usage"]["usd_micros"], 5_000);
+        let (status, board) = h.get("/v1/tasks/page?limit=10").await;
+        assert_eq!(status, StatusCode::OK, "{board}");
+        let card = board["tasks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|card| card["task_id"] == task_id.to_string())
+            .unwrap();
+        assert_eq!(card["run_summary"]["run_count"], 2);
+        assert_eq!(card["run_summary"]["active_runs"], 0);
+        assert_eq!(card["run_summary"]["latest_outcome"], "failed");
     }
 
     #[tokio::test]
@@ -7697,6 +7820,87 @@ runner = "{runner}"
             ))
             .await;
         assert_eq!(status, StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn task_board_scopes_global_and_project_rows_without_changing_task_facts() {
+        let h = harness();
+        let now = now_ms();
+        let root = tempfile::tempdir().unwrap();
+        let alpha = root.path().join("alpha");
+        let beta = root.path().join("beta");
+        std::fs::create_dir_all(&alpha).unwrap();
+        std::fs::create_dir_all(&beta).unwrap();
+        let root_path = std::fs::canonicalize(root.path()).unwrap();
+        let alpha_path = std::fs::canonicalize(&alpha).unwrap();
+        let beta_path = std::fs::canonicalize(&beta).unwrap();
+        h.state
+            .store()
+            .authorize_root(&projects::display(&root_path), now)
+            .unwrap();
+        let conversation_id = farseer_core::ConversationId::new();
+        h.state
+            .store()
+            .create_conversation(&farseer_core::Conversation {
+                conversation_id,
+                title: "Scoped board fixture".into(),
+                project_path: Some(projects::display(&alpha_path)),
+                manager_runner: Some("claude-code".into()),
+                created_ts: now,
+                updated_ts: now,
+                archived_ts: None,
+            })
+            .unwrap();
+        let alpha_task = TaskId::new();
+        let beta_task = TaskId::new();
+        for (task_id, title, project_path) in [
+            (alpha_task, "Alpha task", &alpha_path),
+            (beta_task, "Beta task", &beta_path),
+        ] {
+            h.state
+                .store()
+                .create_task(&farseer_core::Task {
+                    task_id,
+                    conversation_id,
+                    goal: title.into(),
+                    title: title.into(),
+                    project_path: Some(projects::display(project_path)),
+                    state: farseer_core::TaskState::Inbox,
+                    priority: 0,
+                    created_ts: now,
+                    updated_ts: now,
+                })
+                .unwrap();
+        }
+
+        let (status, global) = h.get("/v1/tasks/page?limit=10").await;
+        assert_eq!(status, StatusCode::OK, "{global}");
+        assert_eq!(global["tasks"].as_array().unwrap().len(), 2);
+        let (status, scoped) = h
+            .get(&format!(
+                "/v1/tasks/page?project={}&limit=10",
+                projects::display(&alpha_path)
+            ))
+            .await;
+        assert_eq!(status, StatusCode::OK, "{scoped}");
+        assert_eq!(scoped["tasks"].as_array().unwrap().len(), 1);
+        let global_alpha = global["tasks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|task| task["task_id"] == alpha_task.to_string())
+            .unwrap();
+        let scoped_alpha = &scoped["tasks"][0];
+        for field in [
+            "task_id",
+            "conversation_id",
+            "goal",
+            "title",
+            "project_path",
+            "state",
+        ] {
+            assert_eq!(global_alpha[field], scoped_alpha[field], "field {field}");
+        }
     }
 
     #[tokio::test]

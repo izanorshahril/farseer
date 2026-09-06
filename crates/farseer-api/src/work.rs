@@ -174,8 +174,22 @@ struct TaskPageCursor {
 }
 
 #[derive(Debug, Serialize)]
+pub(super) struct TaskRunSummary {
+    pub run_count: usize,
+    pub active_runs: usize,
+    pub latest_outcome: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub(super) struct TaskCard {
+    #[serde(flatten)]
+    pub task: Task,
+    pub run_summary: TaskRunSummary,
+}
+
+#[derive(Debug, Serialize)]
 pub(super) struct TaskPage {
-    pub tasks: Vec<Task>,
+    pub tasks: Vec<TaskCard>,
     pub next_cursor: Option<String>,
     pub has_more: bool,
     /// Task transitions can race a page read; callers should refresh when they
@@ -223,6 +237,21 @@ pub(super) async fn list_task_page(
     if has_more {
         tasks.truncate(limit);
     }
+    let tasks = tasks
+        .into_iter()
+        .map(|task| {
+            let runs = state.store().runs_for_task(task.task_id)?;
+            let summary = TaskRunSummary {
+                run_count: runs.len(),
+                active_runs: runs.iter().filter(|run| run.outcome.is_none()).count(),
+                latest_outcome: runs.last().and_then(|run| run.outcome.clone()),
+            };
+            Ok(TaskCard {
+                task,
+                run_summary: summary,
+            })
+        })
+        .collect::<farseer_store::Result<Vec<_>>>()?;
     let generated_ts = now_ms();
     let mut page = TaskPage {
         tasks,
@@ -231,7 +260,8 @@ pub(super) async fn list_task_page(
         freshness: "eventual",
         generated_ts,
     };
-    page.next_cursor = page.tasks.last().filter(|_| page.has_more).map(|task| {
+    page.next_cursor = page.tasks.last().filter(|_| page.has_more).map(|card| {
+        let task = &card.task;
         encode_task_cursor(&TaskPageCursor {
             version: 1,
             scope: scope.clone(),
@@ -254,7 +284,8 @@ pub(super) async fn list_task_page(
             ));
         }
         page.has_more = true;
-        page.next_cursor = page.tasks.last().map(|task| {
+        page.next_cursor = page.tasks.last().map(|card| {
+            let task = &card.task;
             encode_task_cursor(&TaskPageCursor {
                 version: 1,
                 scope: scope.clone(),
@@ -416,6 +447,9 @@ pub(crate) struct ProjectionRequest {
 #[derive(Debug, Default, Deserialize)]
 pub(super) struct SessionsQuery {
     pub project: Option<String>,
+    pub conversation_id: Option<String>,
+    pub task_id: Option<String>,
+    pub run_id: Option<String>,
     pub limit: Option<usize>,
     pub offset: Option<usize>,
 }
@@ -438,10 +472,20 @@ pub(super) async fn list_sessions(
         .map(|path| crate::projects::resolve(&state, path))
         .transpose()?
         .map(|path| crate::projects::display(&path));
+    let conversation_id = query
+        .conversation_id
+        .as_deref()
+        .map(parse_conversation)
+        .transpose()?;
+    let task_id = query.task_id.as_deref().map(parse_task).transpose()?;
+    let run_id = query.run_id.as_deref().map(parse_run).transpose()?;
     let (rows, next_offset) = state.store().harness_session_page(
         query.limit.unwrap_or(100).min(500),
         query.offset.unwrap_or(0),
         project.as_deref(),
+        conversation_id,
+        task_id,
+        run_id,
     )?;
     Ok(Json(SessionPage { rows, next_offset }))
 }
@@ -864,24 +908,26 @@ pub(super) async fn search_transcript_page(
     }
     let limit = query.limit.unwrap_or(50).clamp(1, 100);
     let offset = query.offset.unwrap_or(0);
-    let (documents, next_offset) =
-        state
-            .store()
-            .indexed_transcript_page(limit, offset, TRANSCRIPT_TEXT_CAP_BYTES)?;
+    let (documents, next_offset) = state.store().indexed_transcript_search_page(
+        &needle,
+        limit,
+        offset,
+        TRANSCRIPT_TEXT_CAP_BYTES,
+    )?;
     let hits = documents
         .into_iter()
-        .filter_map(|document| {
+        .map(|document| {
             let farseer_store::IndexedTranscript {
                 digest,
                 body,
                 projection_version,
             } = document;
-            body.to_lowercase().contains(&needle).then(|| SearchHit {
+            SearchHit {
                 digest,
                 excerpt: body.chars().take(160).collect(),
                 coverage: "restricted",
                 projection_version: Some(projection_version),
-            })
+            }
         })
         .collect();
     Ok(Json(SearchPage {
