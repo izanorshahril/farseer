@@ -55,10 +55,26 @@ describe("canvas layout", () => {
       sidebarCollapsed: true,
       focused: "conversation",
       focusPane: "navigation",
+      focusOrigin: {
+        widget: "conversation",
+        anchor: "Work",
+        subject: {
+          conversation: "conversation-1",
+          task: "task-1",
+          run: null,
+          project: "D:\\Dev\\project",
+          managerRunner: "goose",
+        },
+      },
     }, fallback)).toMatchObject({
       sidebarCollapsed: true,
       focused: "conversation",
       focusPane: "navigation",
+      focusOrigin: {
+        widget: "conversation",
+        anchor: "Work",
+        subject: { task: "task-1" },
+      },
     });
   });
 

@@ -107,7 +107,7 @@ This is the current branch status, not a claim that every acceptance item is com
 
 Tickets 06, 07, 08, 09, 10, 11, 12, 13, and 14 retain their bounded implementation increments and their named browser or policy evidence gaps.
 Ticket 15 now has the optional terminal API and supervised profile adapter, with the ConPTY and workspace-lease follow-ups still open.
-Ticket 20 now has the deterministic local manifest worker, durable artifact rows, cancellation, and Work task display, with ordinary-route and live cancellation demonstrations still open.
+Ticket 20 now has the deterministic local manifest worker, durable artifact rows, cancellation, Work task display, and an ordinary-route completion regression test; the live cancellation demonstration remains open.
 Ticket 21 now has first/final Windows Job Object samples, durable retention, a public run-resource read, and run-detail labels, with periodic sampling, a runtime toggle, and PID-reuse fixtures still open.
 Tickets 17 and 18 remain bounded store primitives without public maintenance task or promotion commands.
 No ticket is marked complete solely from source presence; acceptance checkboxes record the verified boundary and the remaining demonstration.

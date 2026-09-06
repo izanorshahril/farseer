@@ -14,21 +14,12 @@
  */
 
 import { currentProject } from "./project";
-import { selectSubject, selectedSubject } from "./selection";
+import { selectSubject, type ComposerContext } from "./selection";
 
 /** Which cell farseer's operator talks to. `01 cell primitive` made it the address. */
 const TOP_MANAGER = "zero";
 
-export type Anchor = {
-  /** The widget the operator was looking at when they typed. */
-  widget: string;
-  /** What it was showing, if anything - a cell, a run, an account. */
-  subject?: string;
-  project?: string | null;
-  conversation?: string | null;
-  task?: string | null;
-  managerRunner?: string | null;
-};
+export type Anchor = ComposerContext;
 
 export type Bridge = {
   /** Read any `/v1` resource. Reads are safe. */
@@ -56,7 +47,7 @@ export type Bridge = {
    * Returns the run id farseer accepted, not an answer: `16 local api surface`
    * made an instruction fire-and-forget, and the answer arrives on the stream.
    */
-  ask: (anchor: Anchor, text: string) => Promise<string>;
+  ask: (context: ComposerContext, text: string) => Promise<string>;
   /** Read this widget's slice of the canvas blob. Opaque to farseer per `24`. */
   loadState: <T>(key: string) => Promise<T | null>;
   saveState: (key: string, value: unknown) => Promise<void>;
@@ -137,9 +128,8 @@ export function createBridge(): Bridge {
       }
     },
 
-    ask: async (anchor, text) => {
-      const where = anchor.subject ? `${anchor.widget}, showing ${anchor.subject}` : anchor.widget;
-      const subject = selectedSubject();
+    ask: async (context, text) => {
+      const where = context.subject ? `${context.widget}, showing ${context.subject}` : context.widget;
       const body = await json<{ run_id: string; task_id: string; conversation_id: string }>(
         `/v1/cells/${TOP_MANAGER}/instruct`,
         {
@@ -147,17 +137,17 @@ export function createBridge(): Bridge {
           headers: { "content-type": "application/json" },
           body: JSON.stringify({
             goal: `[from the ${where} widget]\n${text}`,
-            project: subject.project ?? currentProject(),
-            conversation_id: subject.conversation,
-            task_id: anchor.task ?? subject.task,
-            manager_runner: anchor.managerRunner ?? subject.managerRunner,
+            project: context.project ?? currentProject(),
+            conversation_id: context.conversation,
+            task_id: context.task,
+            manager_runner: context.managerRunner,
             anchor: {
-              widget: anchor.widget,
-              subject: anchor.subject,
-              project: anchor.project ?? subject.project ?? currentProject(),
-              conversation: anchor.conversation ?? subject.conversation,
-              task: anchor.task ?? subject.task,
-              manager_runner: anchor.managerRunner ?? subject.managerRunner,
+              widget: context.widget,
+              subject: context.subject,
+              project: context.project ?? currentProject(),
+              conversation: context.conversation,
+              task: context.task,
+              manager_runner: context.managerRunner,
             },
           }),
         },
@@ -166,7 +156,7 @@ export function createBridge(): Bridge {
         conversation: body.conversation_id,
         task: body.task_id,
         run: body.run_id,
-        project: subject.project ?? currentProject(),
+        project: context.project ?? currentProject(),
       });
       return body.run_id;
     },

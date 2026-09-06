@@ -24,7 +24,7 @@ An active run workspace cannot be torn down while an authorized terminal lease h
 - [x] The operator can open Git Bash, PowerShell, and cmd profiles with an explicit project or run workspace through the terminal API.
 - [x] Switching shell profiles creates a new session and never mutates an existing process or run contract.
 - [x] Resize, input, bounded scrollback, cwd/profile/owner, and termination state work through the adapter, including spaces and non-ASCII paths.
-- [ ] Closing a view/desktop preserves the terminal for reconnect; explicit End session reaps it, releases its workspace lease, and lets deferred workspace cleanup complete.
+- [x] Closing a view/desktop preserves the terminal for reconnect; explicit End session reaps it, releases its workspace lease, and lets deferred workspace cleanup complete.
 - [x] A profile with unavailable executable, invalid workspace, or denied authority fails before process creation.
 
 **Exclusions:** No PTY in the core manager contract, shell command approval gateway, remote shell, WSL requirement, or implicit shell substitution.
@@ -34,6 +34,7 @@ An active run workspace cannot be torn down while an authorized terminal lease h
 ## Evidence
 
 `crates/farseer-runner/src/terminal.rs` resolves the three named profiles before spawn, validates dimensions and cwd, supervises each process through the existing Job Object, and bounds scrollback to 10,000 lines and 1 MiB.
+`TerminalManager` records a workspace lease for every live session, defers run teardown while a session owns that cwd, and completes the deferred delete after explicit End; the Unicode terminal test covers the lease and cleanup ordering.
 `crates/farseer-api/src/terminals.rs` exposes profile discovery, open, reconnect, input, resize, and explicit end routes with authorized project or active-run workspace checks.
 The runtime owns the in-memory session manager, so closing the desktop window leaves sessions available while the runtime remains alive.
 The first slice intentionally retains resize state at the adapter seam and does not claim ConPTY or durable recovery after a runtime process restart.

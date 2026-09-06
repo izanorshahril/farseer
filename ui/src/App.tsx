@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { createBridge, type Anchor } from "./bridge";
+import { createBridge } from "./bridge";
 import {
   DEFAULT_WIDGET_SPAN,
   DEFAULT_WIDGET_UNIT,
@@ -17,10 +17,11 @@ import {
   resized,
   toggleMounted,
   type CanvasLayout,
+  type FocusOrigin,
   type Span,
   type WidgetUnit,
 } from "./layout";
-import { onSelection, onSubjectSelection, selectSubject, selectedSubject, type SubjectSelection } from "./selection";
+import { onSelection, onSubjectSelection, selectSubject, selectedSubject, snapshotComposerContext, type ComposerAnchor, type SubjectSelection } from "./selection";
 import { restoreProject } from "./project";
 import { QuotaWidget } from "./widgets/quota";
 import { ClockWidget } from "./widgets/clock";
@@ -101,6 +102,10 @@ type WidgetId = string;
  * import allowlist at compile, the sandboxed render, and keep-or-undo per turn.
  */
 type AgentWidget = { id: string; title: string; subtitle: string; cell?: string };
+type ProjectRoot = { projects: { name: string; path: string }[] };
+type ContextConversation = { conversation_id: string; title: string; project_path?: string; manager_runner?: string };
+type ContextTask = { task_id: string; title: string; conversation_id: string; project_path?: string };
+type ManagerCell = { manager: { runners: string[] } };
 
 
 const LAYOUT_VERSION = 8;
@@ -329,8 +334,12 @@ export function App() {
   const layoutRef = useRef<CanvasLayout | null>(null);
   const saveQueue = useRef(Promise.resolve());
   const [agentWidgets, setAgentWidgets] = useState<AgentWidget[]>([]);
-  const [anchor, setAnchor] = useState<Anchor>({ widget: "canvas" });
+  const [anchor, setAnchor] = useState<ComposerAnchor>({ widget: "canvas" });
   const [subject, setSubject] = useState<SubjectSelection>(selectedSubject());
+  const [contextProjects, setContextProjects] = useState<{ name: string; path: string }[]>([]);
+  const [contextConversations, setContextConversations] = useState<ContextConversation[]>([]);
+  const [contextTasks, setContextTasks] = useState<ContextTask[]>([]);
+  const [managerRunners, setManagerRunners] = useState<string[]>([]);
   const [asking, setAsking] = useState(false);
   const [lastRun, setLastRun] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -342,6 +351,8 @@ export function App() {
   const [focusPane, setFocusPane] = useState<"navigation" | "main" | "inspector" | "comparison">("inspector");
   const [comparisonId, setComparisonId] = useState<WidgetId | null>(null);
   const focusReturn = useRef<HTMLButtonElement | null>(null);
+  const focusOpenButtons = useRef<Record<string, HTMLButtonElement | null>>({});
+  const pendingFocusWidget = useRef<string | null>(null);
   // Pointer capture works in both Chromium and the desktop WebView2. Native
   // HTML drag-and-drop did not: WebView2 emitted dragover but no drop for the
   // same grip gesture that completed in the browser.
@@ -399,6 +410,11 @@ export function App() {
         setFocusedId(next.focused ?? null);
         setFocusPane(next.focusPane ?? "inspector");
         setComparisonId(next.comparison ?? null);
+        if (next.focusOrigin) {
+          selectSubject(next.focusOrigin.subject);
+          setAnchor({ widget: next.focusOrigin.anchor });
+          pendingFocusWidget.current = next.focusOrigin.widget;
+        }
       })
       .catch(() => {
         layoutRef.current = DEFAULT_LAYOUT;
@@ -414,6 +430,20 @@ export function App() {
       .then((response) => response.json() as Promise<AgentWidget[]>)
       .then(setAgentWidgets)
       .catch(() => setAgentWidgets([]));
+  }, []);
+
+  useEffect(() => {
+    Promise.all([
+      bridge.read<ProjectRoot[]>("/projects"),
+      bridge.read<ContextConversation[]>("/conversations?limit=500"),
+      bridge.read<{ tasks: ContextTask[] }>("/tasks/page?limit=500"),
+      bridge.read<ManagerCell>("/cells/zero"),
+    ]).then(([roots, conversations, page, cell]) => {
+      setContextProjects(roots.flatMap((root) => root.projects));
+      setContextConversations(conversations);
+      setContextTasks(page.tasks);
+      setManagerRunners(cell.manager.runners);
+    }).catch(() => undefined);
   }, []);
 
   useEffect(() => onSubjectSelection(setSubject), []);
@@ -439,11 +469,27 @@ export function App() {
   }, []);
 
   const leaveFocus = useCallback(() => {
+    const origin = layoutRef.current?.focusOrigin;
+    if (origin) {
+      selectSubject(origin.subject);
+      setAnchor({ widget: origin.anchor });
+    }
     setFocusedId(null);
-    persist((current) => current.focused == null ? current : { ...current, focused: null });
+    persist((current) => current.focused == null && current.focusOrigin == null
+      ? current
+      : { ...current, focused: null, focusOrigin: null });
     const target = focusReturn.current;
-    requestAnimationFrame(() => target?.focus());
+    requestAnimationFrame(() => target?.focus() ?? (origin && focusOpenButtons.current[origin.widget]?.focus()));
   }, [persist]);
+
+  useEffect(() => {
+    const widget = pendingFocusWidget.current;
+    if (!widget || !focusedId) return;
+    const target = focusOpenButtons.current[widget];
+    if (!target) return;
+    pendingFocusWidget.current = null;
+    requestAnimationFrame(() => target.focus());
+  }, [focusedId, layout]);
 
   useEffect(() => {
     const closeOverlays = (event: KeyboardEvent) => {
@@ -491,17 +537,18 @@ export function App() {
 
   const ask = useCallback(
     async (text: string) => {
+      const context = snapshotComposerContext(anchor, subject);
       setAsking(true);
       setError(null);
       try {
-        setLastRun(await bridge.ask(anchor, text));
+        setLastRun(await bridge.ask(context, text));
       } catch (e) {
         setError((e as Error).message);
       } finally {
         setAsking(false);
       }
     },
-    [anchor],
+    [anchor, subject],
   );
 
   if (!layout) return <main className="loading">loading the canvas...</main>;
@@ -833,8 +880,14 @@ export function App() {
                     focusReturn.current = event.currentTarget;
                     setFocusedId(id);
                     setFocusPane("inspector");
-                    persist((current) => ({ ...current, focused: id, focusPane: "inspector" }));
+                    const origin: FocusOrigin = {
+                      widget: id,
+                      anchor: anchor.widget,
+                      subject: { ...subject },
+                    };
+                    persist((current) => ({ ...current, focused: id, focusPane: "inspector", focusOrigin: origin }));
                   }}
+                  ref={(node) => { focusOpenButtons.current[id] = node; }}
                 >
                   focus
                 </button>
@@ -1031,6 +1084,89 @@ export function App() {
               >
                 {anchor.widget === "canvas" ? "global context" : `clear ${anchor.widget}`}
               </button>
+            </div>
+            <div className="composer-pickers" aria-label="Explicit composer context">
+              <label>
+                <span>face</span>
+                <select
+                  aria-label="composer face"
+                  value={anchor.widget}
+                  onChange={(event) => setAnchor({ widget: event.currentTarget.value })}
+                >
+                  <option value="canvas">canvas</option>
+                  {available.map((widget) => <option key={widget.id} value={widget.title}>{widget.title}</option>)}
+                </select>
+              </label>
+              <label>
+                <span>project</span>
+                <select
+                  aria-label="composer project"
+                  value={subject.project ?? ""}
+                  onChange={(event) => {
+                    const project = event.currentTarget.value || null;
+                    const conversation = contextConversations.find((item) => item.conversation_id === subject.conversation);
+                    if (conversation?.project_path && conversation.project_path !== project) {
+                      selectSubject({ project, conversation: null, task: null });
+                    } else {
+                      selectSubject({ project, task: null });
+                    }
+                  }}
+                >
+                  <option value="">global</option>
+                  {contextProjects.map((project) => <option key={project.path} value={project.path}>{mask(project.name, "path", privacy)}</option>)}
+                  {subject.project && !contextProjects.some((project) => project.path === subject.project) && <option value={subject.project}>{mask(subject.project, "path", privacy)}</option>}
+                </select>
+              </label>
+              <label>
+                <span>conversation</span>
+                <select
+                  aria-label="composer conversation"
+                  value={subject.conversation ?? ""}
+                  onChange={(event) => {
+                    const conversation = contextConversations.find((item) => item.conversation_id === event.currentTarget.value);
+                    selectSubject({
+                      conversation: conversation?.conversation_id ?? null,
+                      project: conversation?.project_path ?? subject.project,
+                      task: null,
+                      managerRunner: conversation?.manager_runner ?? subject.managerRunner,
+                    });
+                  }}
+                >
+                  <option value="">none</option>
+                  {contextConversations.map((conversation) => <option key={conversation.conversation_id} value={conversation.conversation_id}>{conversation.title}</option>)}
+                  {subject.conversation && !contextConversations.some((conversation) => conversation.conversation_id === subject.conversation) && <option value={subject.conversation}>{subject.conversation.slice(0, 8)}</option>}
+                </select>
+              </label>
+              <label>
+                <span>task</span>
+                <select
+                  aria-label="composer task"
+                  value={subject.task ?? ""}
+                  onChange={(event) => {
+                    const task = contextTasks.find((item) => item.task_id === event.currentTarget.value);
+                    selectSubject({
+                      task: task?.task_id ?? null,
+                      conversation: task?.conversation_id ?? subject.conversation,
+                      project: task?.project_path ?? subject.project,
+                    });
+                  }}
+                >
+                  <option value="">none</option>
+                  {contextTasks.map((task) => <option key={task.task_id} value={task.task_id}>{task.title}</option>)}
+                  {subject.task && !contextTasks.some((task) => task.task_id === subject.task) && <option value={subject.task}>{subject.task.slice(0, 8)}</option>}
+                </select>
+              </label>
+              <label>
+                <span>manager</span>
+                <select
+                  aria-label="composer manager runner"
+                  value={subject.managerRunner ?? ""}
+                  onChange={(event) => selectSubject({ managerRunner: event.currentTarget.value || null })}
+                >
+                  <option value="">automatic</option>
+                  {managerRunners.map((runner) => <option key={runner}>{runner}</option>)}
+                </select>
+              </label>
             </div>
             <textarea
               name="ask"

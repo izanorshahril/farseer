@@ -454,7 +454,6 @@ pub(super) async fn get_task(
     let store = state.store();
     let task = store.task(task_id)?.ok_or(ApiError::NotFound("task"))?;
     let rows = store.runs_for_task(task_id)?;
-    let usage = task_usage(&state, &rows);
     let mut sessions = Vec::new();
     let mut attachments = Vec::new();
     for row in &rows {
@@ -481,6 +480,10 @@ pub(super) async fn get_task(
         .filter(|to| *to != task.state && task.state.allows(*to))
         .collect();
     drop(store);
+    // `run_view` and `task_usage` read the store again for cost, title, and
+    // control provenance.  Release the outer guard first or this route
+    // deadlocks while a worker-completed task is being opened (ticket 20).
+    let usage = task_usage(&state, &rows);
     let runs = rows
         .into_iter()
         .map(|row| crate::run_view(&state, row))

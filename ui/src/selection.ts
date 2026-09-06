@@ -32,6 +32,31 @@ export type SubjectSelection = {
   managerRunner: string | null;
 };
 
+export type ComposerAnchor = {
+  widget: string;
+  subject?: string;
+  project?: string | null;
+  conversation?: string | null;
+  task?: string | null;
+  managerRunner?: string | null;
+};
+
+/**
+ * The exact context submitted with one composer request.
+ *
+ * This is a value snapshot rather than a live selection reference: the user
+ * may click another card while the request is being sent, but that cannot
+ * change the context recorded for the request already in flight.
+ */
+export type ComposerContext = Readonly<{
+  widget: string;
+  subject: string | null;
+  project: string | null;
+  conversation: string | null;
+  task: string | null;
+  managerRunner: string | null;
+}>;
+
 type SubjectListener = (selection: SubjectSelection) => void;
 
 let subject: SubjectSelection = {
@@ -46,6 +71,24 @@ const subjectListeners = new Set<SubjectListener>();
 /** Shared first-party subject context from `40 work model and session explorer`. */
 export function selectedSubject(): SubjectSelection {
   return subject;
+}
+
+export function snapshotComposerContext(
+  anchor: ComposerAnchor,
+  current: SubjectSelection = selectedSubject(),
+): ComposerContext {
+  return Object.freeze({
+    widget: anchor.widget || "canvas",
+    subject: anchor.subject ?? null,
+    // Subject selection is the one authoritative source for explicit
+    // project/conversation/task pins. The anchor only identifies the face the
+    // operator was looking at, which prevents stale widget-local fields from
+    // winning over a newer picker choice.
+    project: current.project,
+    conversation: current.conversation,
+    task: current.task,
+    managerRunner: current.managerRunner,
+  });
 }
 
 export function selectSubject(change: Partial<SubjectSelection>): void {

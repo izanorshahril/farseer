@@ -109,6 +109,7 @@ export function RevealField({
 }): ReactNode {
   const visible = useRevealed(fieldKey);
   const display = visible ? value : mask(value, kind);
+  const copyValue = visible ? value : presentationValue(value, kind);
   if (!privacyEnabled() || !value) return <span>{display}</span>;
   return (
     <span className="reveal-field">
@@ -117,7 +118,7 @@ export function RevealField({
         type="button"
         className="chip"
         aria-label={`Copy ${label}`}
-        onClick={() => void navigator.clipboard?.writeText(display)}
+        onClick={() => void navigator.clipboard?.writeText(copyValue)}
       >
         copy
       </button>

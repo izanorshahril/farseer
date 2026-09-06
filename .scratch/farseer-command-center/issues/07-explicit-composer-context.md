@@ -18,11 +18,11 @@
 Widget context is an anchor, never an alternate execution address.
 Runner or model selection is permitted only when declared by the cell and recorded in the resulting run contract.
 
-- [ ] Hovering or traversing cards never changes the active composer target.
-- [ ] Click, keyboard command, or accessible picker explicitly pins and clears project, conversation, task, and widget anchor context.
-- [ ] The composer shows explicit context or the valid global default; stale/unauthorized context fails clearly, and valid submission needs no extra confirmation.
-- [ ] A conversation harness pin accepts only a declared candidate and creates a new manager run when changed.
-- [ ] The accepted request records project, conversation, anchor, selected runner, and actor provenance.
+- [x] Hovering or traversing cards never changes the active composer target.
+- [x] Click, keyboard command, or accessible picker explicitly pins and clears project, conversation, task, and widget anchor context.
+- [x] The composer shows explicit context or the valid global default; stale/unauthorized context fails clearly, and valid submission needs no extra confirmation.
+- [x] A conversation harness pin accepts only a declared candidate and creates a new manager run when changed.
+- [x] The accepted request records project, conversation, anchor, selected runner, and actor provenance.
 
 **Exclusions:** No arbitrary installed-runner picker, model migration claim, second per-widget agent address, or hidden routing through UI state.
 
@@ -30,6 +30,9 @@ Runner or model selection is permitted only when declared by the cell and record
 
 ## Evidence
 
-The current increment makes widget context change on explicit click or context-menu action only, keeps hover and focus inert, and displays the pinned widget, project, and conversation beside the top-manager route.
-The existing Work subject picker and bridge request contract continue to carry project, conversation, task, anchor, and manager runner.
-Automated browser interaction coverage and stale-context refusal remain open.
+`ui/src/selection.ts` now creates an immutable `ComposerContext` snapshot at submission time, so a later selection cannot retarget an in-flight request.
+The composer exposes accessible face, project, conversation, task, and manager-runner pickers with explicit clear values.
+`ui/src/SandboxWidget.tsx` stamps the same snapshot at the host bridge boundary, while hover remains inert.
+`crates/farseer-api/src/lib.rs` rejects contradictory body and anchor identifiers before creating conversations, tasks, or runs.
+`ui/tests/composer-context.test.ts` covers immutable capture and stale optional-anchor fields, and `a_contradictory_operator_anchor_is_refused_before_creating_work` proves the public refusal path leaves the store unchanged.
+Automated browser interaction coverage remains open because the UI test harness has no browser renderer.

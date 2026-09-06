@@ -948,7 +948,8 @@ impl IntoResponse for ApiError {
                 | farseer_runner::terminal::TerminalError::Ended => StatusCode::BAD_REQUEST,
                 farseer_runner::terminal::TerminalError::Input(_)
                 | farseer_runner::terminal::TerminalError::Spawn(_)
-                | farseer_runner::terminal::TerminalError::Reader(_) => {
+                | farseer_runner::terminal::TerminalError::Reader(_)
+                | farseer_runner::terminal::TerminalError::Cleanup(_) => {
                     StatusCode::INTERNAL_SERVER_ERROR
                 }
             },
@@ -1270,6 +1271,7 @@ async fn instruct_cell(
     if goal.is_empty() {
         return Err(ApiError::BadRequest("goal must not be empty"));
     }
+    validate_operator_anchor(&state, &body)?;
 
     let requested_conversation = body
         .conversation_id
@@ -1531,6 +1533,49 @@ async fn instruct_cell(
             conversation_id: conversation_id.to_string(),
         }),
     ))
+}
+
+/// Reject a request whose displayed anchor disagrees with its explicit body
+/// fields before any conversation, task, or run row is created.
+fn validate_operator_anchor(state: &AppState, body: &InstructBody) -> ApiResult<()> {
+    let Some(anchor) = body.anchor.as_ref() else {
+        return Ok(());
+    };
+    if let (Some(body_project), Some(anchor_project)) =
+        (body.project.as_deref(), anchor.project.as_deref())
+    {
+        let body_project = projects::resolve(state, body_project)?;
+        let anchor_project = projects::resolve(state, anchor_project)?;
+        if body_project != anchor_project {
+            return Err(ApiError::BadRequest(
+                "anchor project does not match request project",
+            ));
+        }
+    }
+    for (label, outer, inner) in [
+        (
+            "conversation",
+            body.conversation_id.as_deref(),
+            anchor.conversation.as_deref(),
+        ),
+        ("task", body.task_id.as_deref(), anchor.task.as_deref()),
+        (
+            "manager runner",
+            body.manager_runner.as_deref(),
+            anchor.manager_runner.as_deref(),
+        ),
+    ] {
+        if let (Some(outer), Some(inner)) = (outer, inner)
+            && outer != inner
+        {
+            return Err(ApiError::BadRequest(match label {
+                "manager runner" => "anchor manager runner does not match request runner",
+                "conversation" => "anchor conversation does not match request conversation",
+                _ => "anchor task does not match request task",
+            }));
+        }
+    }
+    Ok(())
 }
 
 /// Observed runner faces whose default tool set includes shell-equivalent reach.
@@ -2057,8 +2102,9 @@ pub(crate) fn spawn_run(
         Err(error) => {
             let _ = std::fs::remove_file(security::manager_config_path(&run_id.to_string()));
             let _ = std::fs::remove_file(security::manager_prompt_path(&run_id.to_string()));
-            let _ =
-                farseer_runner::workspace::teardown_workspace(&cwd, repo_for_teardown.as_deref());
+            let _ = state
+                .terminals()
+                .defer_workspace_cleanup(&cwd, repo_for_teardown.as_deref());
             state.release_run();
             return Err(error);
         }
@@ -2120,8 +2166,9 @@ pub(crate) fn spawn_run(
             .remove(&run_id);
         drop(result);
 
-        if let Err(e) =
-            farseer_runner::workspace::teardown_workspace(&cwd, repo_for_teardown.as_deref())
+        if let Err(e) = background_state
+            .terminals()
+            .defer_workspace_cleanup(&cwd, repo_for_teardown.as_deref())
         {
             eprintln!("workspace teardown for run {run_id} did not complete: {e}");
         }
@@ -4759,6 +4806,42 @@ grants_shell = true
     }
 
     #[test]
+    fn every_bounded_dimension_is_rejected_before_spawn_when_unenforceable() {
+        for (budget, dimension) in [
+            (
+                Budget {
+                    tokens: Some(1),
+                    ..Budget::default()
+                },
+                "tokens",
+            ),
+            (
+                Budget {
+                    wall_secs: Some(1),
+                    ..Budget::default()
+                },
+                "wall-clock",
+            ),
+            (
+                Budget {
+                    usd_micros: Some(1),
+                    ..Budget::default()
+                },
+                "currency",
+            ),
+        ] {
+            assert_eq!(
+                unenforceable_budget_dimension("claude-code", budget),
+                Some(dimension)
+            );
+        }
+        assert_eq!(
+            unenforceable_budget_dimension("claude-code", Budget::default()),
+            None
+        );
+    }
+
+    #[test]
     fn manager_mcp_config_is_outside_the_git_worktree() {
         let h = harness_with_cell(CELL_WITH_A_WORKER);
         h.state.set_mcp_endpoint(8787);
@@ -5043,6 +5126,32 @@ grants_shell = true
             vec!["taken_over", "autonomous"],
             "who took the wheel and when is exactly what `07` asks the record to carry"
         );
+    }
+
+    #[tokio::test]
+    async fn a_contradictory_operator_anchor_is_refused_before_creating_work() {
+        let h = harness();
+        let before = h.state.store().conversations(100).unwrap().len();
+        let (status, body) = h
+            .post(
+                "/v1/cells/zero/instruct",
+                json!({
+                    "goal": "this must not create a task",
+                    "conversation_id": "conversation-a",
+                    "anchor": {
+                        "widget": "Work",
+                        "conversation": "conversation-b"
+                    }
+                }),
+            )
+            .await;
+
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(
+            body["error"],
+            "anchor conversation does not match request conversation"
+        );
+        assert_eq!(h.state.store().conversations(100).unwrap().len(), before);
     }
 
     /// `07` section 7: detaching without releasing must auto-release, because a
@@ -7299,6 +7408,136 @@ runner = "{runner}"
             detail["allowed_transitions"],
             json!(["blocked", "review", "cancelled"])
         );
+    }
+
+    #[tokio::test]
+    async fn the_public_manifest_route_records_and_finishes_a_local_artifact() {
+        let h = harness();
+        let root = tempfile::tempdir().unwrap();
+        let project = root.path().join("project");
+        let input = project.join("input");
+        std::fs::create_dir_all(&input).unwrap();
+        std::fs::write(input.join("z.txt"), b"same").unwrap();
+        std::fs::write(input.join("a.txt"), b"bytes").unwrap();
+        let root_path = std::fs::canonicalize(root.path()).unwrap();
+        let project_path = std::fs::canonicalize(&project).unwrap();
+        let input_path = std::fs::canonicalize(&input).unwrap();
+        h.state
+            .store()
+            .authorize_root(&projects::display(&root_path), now_ms())
+            .unwrap();
+
+        let (status, response) = h
+            .post(
+                "/v1/artifacts/manifests",
+                json!({
+                    "project": projects::display(&project_path),
+                    "input": projects::display(&input_path),
+                }),
+            )
+            .await;
+        assert_eq!(status, StatusCode::ACCEPTED, "{response}");
+        let run_id = response["run_id"].as_str().unwrap();
+        let task_id = response["task_id"].as_str().unwrap();
+        let row = h
+            .wait_for_finished(run_id, std::time::Duration::from_secs(5))
+            .await;
+        assert_eq!(row["outcome"], "ok");
+
+        let (status, detail) = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            h.get(&format!("/v1/tasks/{task_id}")),
+        )
+        .await
+        .expect("task detail route should not hang");
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(detail["artifacts"][0]["status"], "complete");
+        let manifest = detail["artifacts"][0]["final_path"].as_str().unwrap();
+        assert!(std::path::Path::new(manifest).is_file());
+        let bytes = std::fs::read(manifest).unwrap();
+        assert!(String::from_utf8_lossy(&bytes).contains("a.txt"));
+        assert!(String::from_utf8_lossy(&bytes).contains("z.txt"));
+    }
+
+    #[tokio::test]
+    async fn the_session_explorer_page_preserves_protocol_and_log_availability() {
+        let h = harness();
+        let now = now_ms();
+        let conversation_id = farseer_core::ConversationId::new();
+        let task_id = TaskId::new();
+        let run_id = RunId::new();
+        h.state
+            .store()
+            .create_conversation(&farseer_core::Conversation {
+                conversation_id,
+                title: "Session explorer fixture".into(),
+                project_path: Some("C:\\fixture".into()),
+                manager_runner: Some("claude-code".into()),
+                created_ts: now,
+                updated_ts: now,
+                archived_ts: None,
+            })
+            .unwrap();
+        h.state
+            .store()
+            .create_task(&farseer_core::Task {
+                task_id,
+                conversation_id,
+                goal: "Inspect sessions".into(),
+                title: "Inspect sessions".into(),
+                project_path: Some("C:\\fixture".into()),
+                state: farseer_core::TaskState::Done,
+                priority: 0,
+                created_ts: now,
+                updated_ts: now,
+            })
+            .unwrap();
+        h.state
+            .store()
+            .upsert_run(&RunRow {
+                run_id,
+                task_id,
+                cell_id: CellId::new("zero"),
+                runner: "claude-code".into(),
+                model: "model-a".into(),
+                outcome: Some("ok".into()),
+                usd_micros: 0,
+                tokens: 0,
+                operator_touched: false,
+                started_ts: now,
+                finished_ts: Some(now + 1),
+            })
+            .unwrap();
+        for (kind, identifier, log_pointer, observed_ts) in [
+            ("thread", "thread-1", Some("C:\\logs\\thread-1.jsonl"), now),
+            ("session", "session-2", None, now + 1),
+        ] {
+            h.state
+                .store()
+                .observe_harness_session(&farseer_core::HarnessSession {
+                    run_id,
+                    identifier_kind: kind.into(),
+                    identifier: identifier.into(),
+                    log_pointer: log_pointer.map(str::to_string),
+                    observed_ts,
+                })
+                .unwrap();
+        }
+
+        let (status, page) = h.get("/v1/work/sessions?limit=1").await;
+        assert_eq!(status, StatusCode::OK, "{page}");
+        assert_eq!(page["rows"].as_array().unwrap().len(), 1);
+        assert_eq!(page["rows"][0]["session"]["identifier_kind"], "session");
+        assert_eq!(page["rows"][0]["runner"], "claude-code");
+        assert_eq!(page["rows"][0]["model"], "model-a");
+        assert_eq!(page["rows"][0]["log_available"], false);
+        assert_eq!(page["next_offset"], 1);
+
+        let (status, next) = h.get("/v1/work/sessions?limit=1&offset=1").await;
+        assert_eq!(status, StatusCode::OK, "{next}");
+        assert_eq!(next["rows"][0]["session"]["identifier_kind"], "thread");
+        assert_eq!(next["rows"][0]["log_available"], true);
+        assert!(next["next_offset"].is_null());
     }
 
     #[tokio::test]

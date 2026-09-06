@@ -31,3 +31,11 @@ git show df90320b0e7215d2ec82df5d285e5d731c8537ed:ARCHITECTURE.md
 
 Keep future temporary exports, generated spike targets, PID captures, and tool metadata out of the workspace.
 Remove superseded snapshots after their useful findings are recorded in tickets; use Git for recovery instead of maintaining another archive tree.
+
+## Load policy
+
+Start with the active command-center map and open only the selected ticket plus its named blockers.
+Use the original Farseer map and a specific issue only when the implementation touches an existing runtime contract.
+Treat research, prototypes, spikes, and completed tickets as evidence to open on demand, not as a prompt bundle.
+Completed does not mean obsolete when source comments or API documentation still link the decision.
+Delete generated output under ignored paths when it is no longer useful; do not delete a retained document solely because its ticket is closed.

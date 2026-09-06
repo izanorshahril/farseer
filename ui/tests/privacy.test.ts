@@ -20,6 +20,13 @@ describe("presentation privacy", () => {
     expect(presentationValue("C:\\work\\farseer", "path")).toBe("path hidden");
   });
 
+  test("copy/export presentation keeps the source value unchanged", () => {
+    const source = "C:\\private\\farseer";
+    expect(presentationValue(source, "path", true)).toBe("path hidden");
+    expect(presentationValue(source, "path", false)).toBe(source);
+    expect(source).toBe("C:\\private\\farseer");
+  });
+
   test("reveals one field briefly and clears it when privacy is re-enabled", () => {
     setPrivacy(true);
     expect(isFieldRevealed("quota:one")).toBe(false);

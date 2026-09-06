@@ -1059,7 +1059,9 @@ dependencies = [
  "farseer-core",
  "farseer-store",
  "reqwest 0.12.28",
+ "rusqlite",
  "serde_json",
+ "tempfile",
  "tokio",
 ]
 

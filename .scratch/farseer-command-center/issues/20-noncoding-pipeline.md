@@ -3,7 +3,7 @@
 **Parent:** [Command-center decision map](../map.md).
 **What to build:** Run a deterministic local artifact-manifest job in an authorized plain-directory project using existing task/run and worker supervision.
 **Blocked by:** [Project team profiles](14-project-teams.md), [Honest tool authority](19-honest-tool-authority.md).
-**Status:** in-progress.
+**Status:** bounded slice implemented; live cancellation demonstration remains open.
 **Execution:** package approved; verify named blockers before implementation.
 **Review refs:** R12; R13 applies as targeted cleanup.
 **Decision:** [Self-maintenance and domain integration](../decisions/05-maintenance.md).
@@ -37,4 +37,5 @@ The worker sorts relative files, records byte sizes and SHA-256 digests, writes 
 Cancellation is an atomic flag observed during traversal and writing; the artifact row and task transition become cancelled while the partial file remains visibly incomplete.
 `GET /v1/tasks/{task_id}` and the Work widget expose artifact status and failure text.
 The runtime admits at most two manifest workers at once and refuses trees above 100,000 file entries or 8 MiB of path metadata before unbounded memory growth.
-The remaining live demonstration is a larger fixture through the public HTTP route; this slice owns no child process, so cancellation is worker cancellation rather than process reaping.
+The public HTTP route now has a regression test that waits for completion, opens task detail, and verifies the final manifest bytes.
+The remaining live demonstration is cancellation of a larger fixture through the public HTTP route; this slice owns no child process, so cancellation is worker cancellation rather than process reaping.

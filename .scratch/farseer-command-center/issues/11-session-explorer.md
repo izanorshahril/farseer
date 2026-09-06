@@ -26,6 +26,7 @@ Use event replay as the reliable fallback when harness logs are absent.
 
 **Evidence:** The API exposes a bounded `/v1/work/sessions` projection, the Work widget has a paged Sessions face, and task detail includes session and transcript-projection references.
 The additive `/v1/work/search/page` route now returns bounded scrubbed excerpts, source digests, projection versions, and cursors.
+The public session-page regression test now proves bounded paging, provider identifier kind, runner/model facts, and distinct available versus missing log pointers across two protocol-shaped sessions.
 The two-protocol restart demo and a dedicated search face remain open.
 
 **Exclusions:** No automatic transcript copying, private harness-directory guessing, external embeddings service, or raw log viewer without explicit custody.

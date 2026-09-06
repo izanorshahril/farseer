@@ -21,11 +21,12 @@ No docking library is required.
 
 - [x] Conversation, Work, Fleet, and Capacity expose the same titlebar convention for opening a focused face.
 - [x] Navigation/main/inspector toggles work for a selected task and run, with an optional comparison pane; hidden panes do not alter execution state.
-- [ ] Back restores the originating face, subject, and keyboard focus, including after restart.
+- [x] Back restores the originating face, subject, and keyboard focus, including after restart.
 - [x] Inactive faces are removed from accessibility navigation and reduced-motion mode remains understandable.
 - [x] A focused workspace failure returns to the last valid face without affecting runtime execution.
 
-**Evidence:** `ui/src/App.tsx` gives each face the same focus action, persists focus, pane, and comparison state in the canvas document, restores focus on Back or Escape, masks inspector identities, and clears stale focused faces.
+**Evidence:** `ui/src/App.tsx` gives each face the same focus action, persists focus, pane, comparison state, and the originating subject/anchor in the canvas document, restores the subject and focus button after restart, restores focus on Back or Escape, masks inspector identities, and clears stale focused faces.
+`ui/src/layout.ts` validates the persisted focus origin, and `ui/tests/layout.test.ts` covers its round trip.
 `ui/src/style.css` hides inactive faces from the accessibility tree through layout removal and supplies responsive navigation and reduced-motion behavior.
 Browser-level focus restoration demos remain open.
 

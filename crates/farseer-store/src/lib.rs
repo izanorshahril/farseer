@@ -179,7 +179,7 @@ impl Store {
         Self::from_connection(Connection::open_in_memory()?)
     }
 
-    fn from_connection(conn: Connection) -> Result<Self> {
+    fn from_connection(mut conn: Connection) -> Result<Self> {
         let found: i64 = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
         if found > STORE_FORMAT_VERSION {
             return Err(StoreError::UnsupportedSchemaVersion {
@@ -188,13 +188,37 @@ impl Store {
             });
         }
         conn.execute_batch(schema::PRAGMAS)?;
-        conn.execute_batch(schema::SCHEMA)?;
-        Self::migrate_transcript_attachments(&conn)?;
-        conn.execute_batch(&format!("PRAGMA user_version = {STORE_FORMAT_VERSION};"))?;
+        Self::migrate_schema(&mut conn, found)?;
         Ok(Self {
             conn,
             caps: MemoryCaps::default(),
         })
+    }
+
+    /// Apply ordered, recoverable schema steps as one transaction.
+    ///
+    /// `schema::SCHEMA` stays idempotent because older binaries already
+    /// stamped databases with version one while later slices added tables;
+    /// the explicit dispatch keeps the next incompatible change reviewable
+    /// rather than hiding it in an ever-growing open path.
+    fn migrate_schema(conn: &mut Connection, found: i64) -> Result<()> {
+        conn.execute_batch("BEGIN IMMEDIATE;")?;
+        let result = (|| {
+            conn.execute_batch(schema::SCHEMA)?;
+            match found {
+                0 | 1 => Self::migrate_transcript_attachments(conn)?,
+                _ => unreachable!("future schema versions are rejected before migration"),
+            }
+            conn.execute_batch(&format!("PRAGMA user_version = {STORE_FORMAT_VERSION};"))?;
+            Ok(())
+        })();
+        match result {
+            Ok(()) => conn.execute_batch("COMMIT;").map_err(Into::into),
+            Err(error) => {
+                let _ = conn.execute_batch("ROLLBACK;");
+                Err(error)
+            }
+        }
     }
 
     /// Write a consistent SQLite snapshot and all copied transcript bytes to a new directory.
@@ -393,8 +417,7 @@ impl Store {
             return Ok(());
         }
         conn.execute_batch(
-            "BEGIN IMMEDIATE;
-         DROP INDEX IF EXISTS transcript_attachments_run;
+            "DROP INDEX IF EXISTS transcript_attachments_run;
          ALTER TABLE transcript_attachments RENAME TO transcript_attachments_legacy;
          CREATE TABLE transcript_attachments (
              digest       TEXT NOT NULL,
@@ -410,8 +433,7 @@ impl Store {
          SELECT digest, run_id, custody, source, stored_path, created_ts
          FROM transcript_attachments_legacy;
          DROP TABLE transcript_attachments_legacy;
-         CREATE INDEX transcript_attachments_run ON transcript_attachments(run_id);
-         COMMIT;",
+         CREATE INDEX transcript_attachments_run ON transcript_attachments(run_id);",
         )?;
         Ok(())
     }
@@ -1194,6 +1216,166 @@ mod tests {
 
         assert_eq!(store.transcript_attachments(Some(first)).unwrap().len(), 1);
         assert_eq!(store.transcript_attachments(Some(second)).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn a_migrated_store_reopens_without_losing_work_lineage_or_associations() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("record.sqlite3");
+        let first_run = RunId::new();
+        let attachment = "same-content";
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE transcript_attachments (
+                     digest TEXT PRIMARY KEY,
+                     run_id BLOB NOT NULL,
+                     custody TEXT NOT NULL,
+                     source TEXT NOT NULL,
+                     stored_path TEXT,
+                     created_ts INTEGER NOT NULL
+                 );",
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO transcript_attachments
+                     (digest, run_id, custody, source, stored_path, created_ts)
+                 VALUES (?1, ?2, 'copy', 'legacy.jsonl', NULL, 1)",
+                rusqlite::params![attachment, &first_run.as_bytes()[..]],
+            )
+            .unwrap();
+        }
+
+        let task_id = TaskId::new();
+        let conversation_id = farseer_core::ConversationId::new();
+        let second_run = RunId::new();
+        {
+            let store = Store::open(&path).unwrap();
+            store
+                .create_conversation(&farseer_core::Conversation {
+                    conversation_id,
+                    title: "migrated".into(),
+                    project_path: None,
+                    manager_runner: Some("goose".into()),
+                    created_ts: 1,
+                    updated_ts: 1,
+                    archived_ts: None,
+                })
+                .unwrap();
+            store
+                .create_task(&farseer_core::Task {
+                    task_id,
+                    conversation_id,
+                    goal: "preserve lineage".into(),
+                    title: "preserve lineage".into(),
+                    project_path: None,
+                    state: farseer_core::TaskState::Inbox,
+                    priority: 0,
+                    created_ts: 1,
+                    updated_ts: 1,
+                })
+                .unwrap();
+            store
+                .upsert_run(&RunRow {
+                    run_id: second_run,
+                    task_id,
+                    cell_id: CellId::new("zero"),
+                    runner: "goose".into(),
+                    model: "model".into(),
+                    outcome: Some("ok".into()),
+                    usd_micros: 1,
+                    tokens: 2,
+                    operator_touched: false,
+                    started_ts: 1,
+                    finished_ts: Some(2),
+                })
+                .unwrap();
+            store
+                .record_transcript_attachment(&TranscriptAttachment {
+                    digest: attachment.into(),
+                    run_id: second_run,
+                    custody: farseer_core::TranscriptCustody::Copy,
+                    source: "second.jsonl".into(),
+                    stored_path: None,
+                    created_ts: 2,
+                })
+                .unwrap();
+            store
+                .append(&event("zero", second_run, "lineage", 2))
+                .unwrap();
+        }
+
+        let reopened = Store::open(&path).unwrap();
+        assert_eq!(
+            reopened.task(task_id).unwrap().unwrap().conversation_id,
+            conversation_id
+        );
+        assert_eq!(reopened.run(second_run).unwrap().unwrap().task_id, task_id);
+        assert_eq!(reopened.transcript_attachments(None).unwrap().len(), 2);
+        assert_eq!(reopened.latest_seq().unwrap(), 1);
+        let version: i64 = reopened
+            .conn
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, STORE_FORMAT_VERSION);
+    }
+
+    #[test]
+    fn a_failed_migration_rolls_back_to_the_original_fixture() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("record.sqlite3");
+        let run = RunId::new();
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE transcript_attachments (
+                     digest TEXT NOT NULL,
+                     run_id BLOB NOT NULL,
+                     custody TEXT NOT NULL,
+                     source TEXT NOT NULL,
+                     stored_path TEXT,
+                     created_ts INTEGER NOT NULL
+                 );",
+            )
+            .unwrap();
+            for source in ["one.jsonl", "two.jsonl"] {
+                conn.execute(
+                    "INSERT INTO transcript_attachments
+                         (digest, run_id, custody, source, stored_path, created_ts)
+                     VALUES ('duplicate', ?1, 'copy', ?2, NULL, 1)",
+                    rusqlite::params![&run.as_bytes()[..], source],
+                )
+                .unwrap();
+            }
+        }
+
+        assert!(matches!(Store::open(&path), Err(StoreError::Sqlite(_))));
+        let conn = Connection::open(&path).unwrap();
+        let rows: i64 = conn
+            .query_row("SELECT COUNT(*) FROM transcript_attachments", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(rows, 2);
+        let legacy: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE name = 'transcript_attachments_legacy'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(legacy, 0);
+        let events: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE name = 'events'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            events, 0,
+            "failed migration must not publish new schema tables"
+        );
     }
 
     #[test]

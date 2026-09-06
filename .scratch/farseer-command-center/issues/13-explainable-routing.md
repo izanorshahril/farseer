@@ -22,13 +22,14 @@ Explicit unsupported pins fail instead of silently falling through; zero automat
 - [x] A run is sealed with the selected runner, model policy, candidate list, budget, and selection reason before spawn.
 - [x] Exhausted, overage, unknown, and available states produce deterministic candidate ordering without introducing undeclared runners.
 - [x] Every fallback records preferred candidate, selected candidate, observed pressure, actor, and estimated or reported cost basis.
-- [ ] Each requested bounded dimension retains its existing enforceability check; post-run accounting never substitutes for verified pre-spend enforcement.
+- [x] Each requested bounded dimension retains its existing enforceability check; post-run accounting never substitutes for verified pre-spend enforcement.
 - [x] Replaying the same input and observations produces the same selection and provenance.
 
 **Evidence:** New instructions honor explicit and conversation runner pins, select the first non-exhausted declared candidate, and record a preferred-runner fallback event.
 `routing_sealed` is now appended before admission and process creation for API-launched runs, with the selected runner, declared candidate order, observed pressure, preferred candidate, model and effort policy, budget, cost basis, retry policy, and selection reason.
 Delegated worker contracts emit the same bounded record before their workspace is created.
 The routing projection has a deterministic replay test covering an exhausted preferred account and an unknown fallback candidate.
+The API now has a table-driven guard test for token, wall-clock, and currency bounds, plus an end-to-end currency refusal that proves no workspace is created before the check.
 The full acceptance demo and analytics attribution read model remain open.
 
 **Exclusions:** No token-level router, opaque LLM judge, arbitrary installed model picker, or vendor gateway in the core.

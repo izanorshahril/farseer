@@ -9,7 +9,7 @@
 //! bounded scrollback, reconnect and explicit termination.
 
 use std::collections::{HashMap, VecDeque};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::thread;
 
@@ -158,6 +158,8 @@ pub enum TerminalError {
     Spawn(#[from] crate::spawn::SpawnError),
     #[error("terminal reader thread failed: {0}")]
     Reader(#[source] std::io::Error),
+    #[error("deferred workspace cleanup failed: {0}")]
+    Cleanup(String),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -347,6 +349,7 @@ impl Drop for TerminalSession {
 #[derive(Default)]
 pub struct TerminalManager {
     sessions: Mutex<HashMap<Uuid, Arc<TerminalSession>>>,
+    pending_cleanup: Mutex<HashMap<PathBuf, Option<PathBuf>>>,
 }
 
 impl TerminalManager {
@@ -369,6 +372,38 @@ impl TerminalManager {
             .ok_or_else(|| TerminalError::NotFound(id.to_string()))
     }
 
+    pub fn holds_workspace(&self, workspace: &Path) -> bool {
+        let workspace =
+            std::fs::canonicalize(workspace).unwrap_or_else(|_| workspace.to_path_buf());
+        self.sessions
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .values()
+            .any(|session| session.cwd == workspace)
+    }
+
+    /// Defer run-workspace teardown while a terminal's cwd still holds it.
+    /// The last explicit terminal End releases the lease and performs the
+    /// pending cleanup, preserving the workspace ordering rule from ticket 15.
+    pub fn defer_workspace_cleanup(
+        &self,
+        workspace: &Path,
+        repo: Option<&Path>,
+    ) -> Result<bool, TerminalError> {
+        let workspace =
+            std::fs::canonicalize(workspace).unwrap_or_else(|_| workspace.to_path_buf());
+        if self.holds_workspace(&workspace) {
+            self.pending_cleanup
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .insert(workspace, repo.map(Path::to_path_buf));
+            return Ok(false);
+        }
+        crate::workspace::teardown_workspace(&workspace, repo)
+            .map(|()| true)
+            .map_err(|error| TerminalError::Cleanup(error.to_string()))
+    }
+
     pub fn end(&self, id: &str) -> Result<(), TerminalError> {
         let session = self.reconnect(id)?;
         session.end();
@@ -376,6 +411,36 @@ impl TerminalManager {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .remove(&session.id);
+        drop(session);
+        self.cleanup_ready()?;
+        Ok(())
+    }
+
+    fn cleanup_ready(&self) -> Result<(), TerminalError> {
+        let ready = {
+            let mut pending = self
+                .pending_cleanup
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            let paths = pending
+                .keys()
+                .filter(|path| !self.holds_workspace(path))
+                .cloned()
+                .collect::<Vec<_>>();
+            paths
+                .into_iter()
+                .filter_map(|path| pending.remove(&path).map(|repo| (path, repo)))
+                .collect::<Vec<_>>()
+        };
+        for (workspace, repo) in ready {
+            if let Err(error) = crate::workspace::teardown_workspace(&workspace, repo.as_deref()) {
+                self.pending_cleanup
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .insert(workspace, repo);
+                return Err(TerminalError::Cleanup(error.to_string()));
+            }
+        }
         Ok(())
     }
 }
@@ -437,12 +502,17 @@ mod tests {
             .expect("cmd should be available on Windows");
         let id = session.id();
         let reconnected = manager.reconnect(&id).unwrap();
+        assert!(manager.holds_workspace(&workspace));
         assert_eq!(
             reconnected.snapshot().cwd,
             workspace.canonicalize().unwrap().display().to_string()
         );
 
+        assert!(!manager.defer_workspace_cleanup(&workspace, None).unwrap());
+        assert!(workspace.exists(), "a held workspace must remain until End");
+
         manager.end(&id).unwrap();
+        assert!(!workspace.exists(), "End releases the deferred cleanup");
         assert!(matches!(
             manager.reconnect(&id),
             Err(TerminalError::NotFound(_))

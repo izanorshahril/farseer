@@ -30,6 +30,17 @@ export const MAX_H = 2;
 
 export type Span = { w: number; h: number };
 export type WidgetUnit = { width: number; height: number };
+export type FocusOrigin = {
+  widget: string;
+  anchor: string;
+  subject: {
+    conversation: string | null;
+    task: string | null;
+    run: string | null;
+    project: string | null;
+    managerRunner: string | null;
+  };
+};
 export type CanvasLayout = {
   v: number;
   mounted: string[];
@@ -40,6 +51,7 @@ export type CanvasLayout = {
   focused?: string | null;
   focusPane?: "navigation" | "main" | "inspector" | "comparison";
   comparison?: string | null;
+  focusOrigin?: FocusOrigin | null;
 };
 
 /** The first standard size is the default for every newly mounted widget. */
@@ -54,6 +66,25 @@ export const MAX_UNIT_HEIGHT = 500;
 
 const record = (value: unknown): value is Record<string, unknown> =>
   typeof value === "object" && value !== null && !Array.isArray(value);
+
+function focusOrigin(value: unknown): FocusOrigin | null | undefined {
+  if (value === null) return null;
+  if (!record(value) || typeof value.widget !== "string" || typeof value.anchor !== "string" || !record(value.subject)) return undefined;
+  const subject = value.subject;
+  const fields = ["conversation", "task", "run", "project", "managerRunner"] as const;
+  if (!fields.every((field) => typeof subject[field] === "string" || subject[field] === null)) return undefined;
+  return {
+    widget: value.widget,
+    anchor: value.anchor,
+    subject: {
+      conversation: subject.conversation as string | null,
+      task: subject.task as string | null,
+      run: subject.run as string | null,
+      project: subject.project as string | null,
+      managerRunner: subject.managerRunner as string | null,
+    },
+  };
+}
 
 /** Normalize the operator-configurable pixel metric for one widget unit. */
 export function normalizeUnit(value: unknown): WidgetUnit {
@@ -124,6 +155,7 @@ export function normalizeLayout(value: unknown, fallback: CanvasLayout): CanvasL
       : {}),
     ...(typeof value.comparison === "string" ? { comparison: value.comparison } : {}),
     ...(value.comparison === null ? { comparison: null } : {}),
+    ...(focusOrigin(value.focusOrigin) !== undefined ? { focusOrigin: focusOrigin(value.focusOrigin) } : {}),
   };
 }
 
