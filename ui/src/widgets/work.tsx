@@ -261,7 +261,7 @@ export function WorkWidget({ bridge }: { bridge: Bridge }) {
     [projectScope, tasks],
   );
   const grouped = useMemo(
-    () => Object.fromEntries(STATES.map((state) => [state, visibleTasks.filter((task) => task.state === state)])) as Record<TaskState, Task[]>,
+    () => Object.fromEntries(STATES.map((state) => [state, visibleTasks.filter((task) => task.state === state)])) as Record<TaskState, BoardTask[]>,
     [visibleTasks],
   );
 
@@ -325,7 +325,7 @@ export function WorkWidget({ bridge }: { bridge: Bridge }) {
             onChange={(event) => setProjectScope(event.currentTarget.value)}
           >
             <option value="">all projects</option>
-            {projectPaths.map((project) => <option key={project} value={project}>{project}</option>)}
+            {projectPaths.map((project) => <option key={project} value={project}>{mask(project, "path", privacy)}</option>)}
           </select>
         )}
         {face === "graph" && (
@@ -460,7 +460,7 @@ export function WorkWidget({ bridge }: { bridge: Bridge }) {
       {detail && (
         <aside className="task-detail" aria-label="Selected task detail">
           <div className="row"><b>{detail.task.title}</b><span className="badge">{stateLabel(detail.task.state)}</span><button className="chip" onClick={() => selectSubject({ task: null, run: null })}>close</button></div>
-          <p>{detail.task.goal}</p>
+          <p>{mask(detail.task.goal, "diagnostic", privacy)}</p>
           {detail.usage && <div className="meta" aria-label="task usage">
             <span><i>usage scope</i><b>task</b></span>
             <span><i>runs</i><b>{detail.usage.runs}</b></span>
@@ -471,7 +471,7 @@ export function WorkWidget({ bridge }: { bridge: Bridge }) {
           </div>}
           <div className="task-actions">{detail.allowed_transitions.map((state) => <button key={state} className="chip" onClick={() => transition(state).catch((failure: Error) => setError(failure.message))}>{stateLabel(state)}</button>)}</div>
           <div className="task-runs">{detail.runs.map((run) => <button key={run.run_id} className="chip" onClick={() => selectSubject({ run: run.run_id })}>{short(run.run_id)} · {run.runner} · {run.model ?? "model not reported"} · {run.outcome ?? "running"}</button>)}</div>
-          {detail.artifacts?.map((artifact) => <p key={artifact.artifact_id} className="mono small">{artifact.kind} · {artifact.status} · {mask(artifact.input_path, "path", privacy)}{artifact.error ? ` · ${artifact.error}` : ""}</p>)}
+          {detail.artifacts?.map((artifact) => <p key={artifact.artifact_id} className="mono small">{artifact.kind} · {artifact.status} · {mask(artifact.input_path, "path", privacy)}{artifact.error ? ` · ${mask(artifact.error, "diagnostic", privacy)}` : ""}</p>)}
           {detail.sessions.map((session) => <p key={`${session.identifier_kind}:${session.identifier}`} className="mono small">{session.identifier_kind} {mask(session.identifier, "session", privacy)}{session.log_pointer ? ` · ${mask(session.log_pointer, "path", privacy)}` : ""}</p>)}
           <form className="transcript-form" onSubmit={(event) => { event.preventDefault(); addTranscript().catch((failure: Error) => setError(failure.message)); }}>
             <select aria-label="transcript custody" value={transcriptMode} onChange={(event) => setTranscriptMode(event.currentTarget.value)}><option>reference</option><option>copy</option><option>copy-plus-index</option></select>
@@ -480,7 +480,7 @@ export function WorkWidget({ bridge }: { bridge: Bridge }) {
           </form>
           {detail.attachments.map((attachment) => <p key={attachment.digest} className="mono small">
             {attachment.custody} · {mask(short(attachment.digest), "session", privacy)} · {mask(attachment.source, "path", privacy)}
-            {attachment.projection && <> · {attachment.projection.status}{attachment.projection.error ? `: ${attachment.projection.error}` : ""}
+            {attachment.projection && <> · {attachment.projection.status}{attachment.projection.error ? `: ${mask(attachment.projection.error, "diagnostic", privacy)}` : ""}
               {attachment.projection.status === "pending" && <button className="chip" onClick={() => updateTranscript(attachment, "cancel").catch((failure: Error) => setError(failure.message))}>cancel analysis</button>}
               {(attachment.projection.status === "failed" || attachment.projection.status === "cancelled") && <button className="chip" onClick={() => updateTranscript(attachment, "retry").catch((failure: Error) => setError(failure.message))}>retry analysis</button>}
             </>}
