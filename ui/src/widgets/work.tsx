@@ -53,6 +53,14 @@ type SearchPage = { rows: SearchHit[]; next_offset?: number };
 type Projection = { status: "pending" | "complete" | "truncated" | "failed" | "cancelled"; error?: string; coverage: string; updated_ts: number };
 type Attachment = { digest: string; run_id: string; custody: string; source: string; projection?: Projection };
 type Artifact = { artifact_id: string; run_id: string; kind: string; status: string; input_path: string; staged_path: string; final_path?: string; error?: string; created_ts: number; finished_ts?: number };
+type ValidationEvidence = { command: string; outcome: string; exit_code?: number; detail?: string };
+type MaintenanceProposal = {
+  proposal_id: string;
+  source_revision: string;
+  previous_revision: string;
+  status: "open" | "succeeded" | "failed" | "cancelled";
+  candidate?: { artifact: string; branch?: string; reproducer?: string; validation: ValidationEvidence[] };
+};
 type TaskUsage = {
   scope: "task";
   runs: number;
@@ -65,7 +73,7 @@ type TaskUsage = {
   duration_ms: number;
   cost_basis: "reported" | "estimated" | "mixed" | "unknown";
 };
-type TaskDetail = { task: Task; usage?: TaskUsage; allowed_transitions: TaskState[]; runs: Run[]; sessions: Session[]; attachments: Attachment[]; artifacts?: Artifact[]; transitions: { from: TaskState; to: TaskState; actor: string; reason: string; ts: number }[] };
+type TaskDetail = { task: Task; usage?: TaskUsage; allowed_transitions: TaskState[]; runs: Run[]; sessions: Session[]; attachments: Attachment[]; artifacts?: Artifact[]; maintenance_proposal?: MaintenanceProposal; transitions: { from: TaskState; to: TaskState; actor: string; reason: string; ts: number }[] };
 type GraphNode = { id: string; kind: string; label: string; project_path?: string; runner?: string; target?: string; parent?: string };
 type GraphEdge = { from: string; to: string; kind: string; source?: string; projection?: string; score?: number; evidence: string[] };
 type Graph = {
@@ -506,6 +514,14 @@ export function WorkWidget({ bridge }: { bridge: Bridge }) {
           <div className="task-actions">{detail.allowed_transitions.map((state) => <button key={state} className="chip" onClick={() => transition(state).catch((failure: Error) => setError(failure.message))}>{stateLabel(state)}</button>)}</div>
           <div className="task-runs">{detail.runs.map((run) => <button key={run.run_id} className="chip" onClick={() => selectSubject({ run: run.run_id })}>{mask(short(run.run_id), "session", privacy)} · {run.runner} · {run.model ?? "model not reported"} · {run.outcome ?? "running"}</button>)}</div>
           {detail.artifacts?.map((artifact) => <p key={artifact.artifact_id} className="mono small">{artifact.kind} · {artifact.status} · {mask(artifact.input_path, "path", privacy)}{artifact.error ? ` · ${mask(artifact.error, "diagnostic", privacy)}` : ""}</p>)}
+          {detail.maintenance_proposal && <section className="task-maintenance" aria-label="Maintenance proposal evidence">
+            <p><b>maintenance proposal</b> · {detail.maintenance_proposal.status} · {mask(detail.maintenance_proposal.proposal_id, "diagnostic", privacy)}</p>
+            <p className="mono small">source <RevealField value={detail.maintenance_proposal.source_revision} kind="path" fieldKey={`maintenance-source:${detail.maintenance_proposal.proposal_id}`} label="maintenance source revision" /> · previous <RevealField value={detail.maintenance_proposal.previous_revision} kind="path" fieldKey={`maintenance-previous:${detail.maintenance_proposal.proposal_id}`} label="maintenance previous revision" /></p>
+            {detail.maintenance_proposal.candidate && <>
+              <p className="mono small">candidate <RevealField value={detail.maintenance_proposal.candidate.artifact} kind="path" fieldKey={`maintenance-artifact:${detail.maintenance_proposal.proposal_id}`} label="maintenance candidate artifact" />{detail.maintenance_proposal.candidate.branch && <> · branch <RevealField value={detail.maintenance_proposal.candidate.branch} kind="path" fieldKey={`maintenance-branch:${detail.maintenance_proposal.proposal_id}`} label="maintenance candidate branch" /></>}{detail.maintenance_proposal.candidate.reproducer && <> · reproducer <RevealField value={detail.maintenance_proposal.candidate.reproducer} kind="path" fieldKey={`maintenance-reproducer:${detail.maintenance_proposal.proposal_id}`} label="maintenance reproducer" /></>}</p>
+              {detail.maintenance_proposal.candidate.validation.map((validation, index) => <p key={`${validation.command}:${index}`} className="mono small">validation · <RevealField value={`${validation.command} -> ${validation.outcome}${validation.exit_code === undefined ? "" : ` (${validation.exit_code})`}${validation.detail ? `: ${validation.detail}` : ""}`} kind="diagnostic" fieldKey={`maintenance-validation:${detail.maintenance_proposal!.proposal_id}:${index}`} label="maintenance validation evidence" /></p>)}
+            </>}
+          </section>}
           {detail.sessions.map((session) => <p key={`${session.identifier_kind}:${session.identifier}`} className="mono small">{session.identifier_kind} {mask(session.identifier, "session", privacy)}{session.log_pointer ? ` · ${mask(session.log_pointer, "path", privacy)}` : ""}</p>)}
           <form className="transcript-form" onSubmit={(event) => { event.preventDefault(); addTranscript().catch((failure: Error) => setError(failure.message)); }}>
             <select aria-label="transcript custody" value={transcriptMode} onChange={(event) => setTranscriptMode(event.currentTarget.value)}><option>reference</option><option>copy</option><option>copy-plus-index</option></select>

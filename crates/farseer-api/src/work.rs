@@ -16,6 +16,7 @@ use axum::http::StatusCode;
 use farseer_core::{
     Actor, Conversation, ConversationId, RunId, Task, TaskId, TaskState, TranscriptCustody,
 };
+use farseer_store::maintenance::ProposalMetadata;
 use farseer_store::{
     GraphEdge, GraphFilter, GraphNode, RunParent, SessionRow, SimilarityEdge, TaskCursor,
     TaskFilter, TranscriptAttachment, TranscriptProjection,
@@ -358,6 +359,7 @@ pub(super) struct TaskDetail {
     pub sessions: Vec<farseer_core::HarnessSession>,
     pub attachments: Vec<TranscriptAttachmentView>,
     pub artifacts: Vec<farseer_store::ArtifactRow>,
+    pub maintenance_proposal: Option<ProposalMetadata>,
 }
 
 #[derive(Debug, Serialize)]
@@ -597,6 +599,7 @@ pub(super) async fn get_task(
         .filter(|to| *to != task.state && task.state.allows(*to))
         .collect();
     drop(store);
+    let maintenance_proposal = crate::maintenance::for_task(&state, task_id)?;
     // `run_view` and `task_usage` read the store again for cost, title, and
     // control provenance.  Release the outer guard first or this route
     // deadlocks while a worker-completed task is being opened (ticket 20).
@@ -614,6 +617,7 @@ pub(super) async fn get_task(
         sessions,
         attachments,
         artifacts,
+        maintenance_proposal,
     }))
 }
 

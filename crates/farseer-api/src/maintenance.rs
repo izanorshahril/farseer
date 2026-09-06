@@ -360,6 +360,23 @@ pub(super) async fn cancel(
         .map(Json)
 }
 
+/// Return the maintenance proposal linked to an ordinary task.
+///
+/// `17 bounded maintenance source proposals` keeps proposal metadata in its
+/// bounded ledger while task detail remains the operator's single work view.
+pub(super) fn for_task(
+    state: &AppState,
+    task_id: farseer_core::TaskId,
+) -> ApiResult<Option<ProposalMetadata>> {
+    let _gate = state.maintenance_gate();
+    let ledger = load(state)?;
+    let task_id = task_id.to_string();
+    Ok(ledger
+        .proposals
+        .into_iter()
+        .find(|proposal| proposal.task_id.as_deref() == Some(task_id.as_str())))
+}
+
 fn load(state: &AppState) -> ApiResult<ProposalLedger> {
     if !state.maintenance_path().is_file() {
         return Ok(ProposalLedger::default());

@@ -23,7 +23,7 @@ Normal project execution remains possible while maintenance is disabled.
 - [x] A seeded reproducible issue becomes one ordinary maintenance task with trigger, actor, source revision, scope, and bounded attempt evidence.
 - [ ] The worker creates a candidate source artifact/branch plus reproducer and validation results; the active runtime remains on its prior version.
 - [x] Duplicate triggers, restart, and self-generated events preserve one lineage and never create an unbounded task loop.
-- [ ] Work detail exposes the candidate, validation outcome, and previous revision using existing task/run/artifact views.
+- [x] Work detail exposes the candidate, validation outcome, and previous revision using existing task/run/artifact views.
 - [ ] Failure or cancellation leaves an inspectable outcome and no promotion; disabling maintenance leaves unrelated work usable.
 
 **Exclusions:** New proposal status engines, automatic merge/promotion, credential changes, and permanent background LLM reasoning.
@@ -34,5 +34,6 @@ Normal project execution remains possible while maintenance is disabled.
 `farseer-store::maintenance::ProposalLedger` now persists proposal metadata, trigger and lineage identity, one bounded attempt, candidate source metadata, and validation evidence.
 Duplicate triggers return the existing proposal, a different trigger is refused while one proposal is open, and self-lineage events are suppressible after reload through the JSON ledger.
 The operator API now admits a proposal as an ordinary in-progress conversation/task, links the proposal to that task, records one candidate/reproducer/branch and validation attempt as an ordinary run/artifact, and supports explicit cancellation.
-The public regression test covers deduplication, task linkage, review transition, and the artifact projection.
-Candidate creation by an isolated maintenance worker, validation execution, and a task-detail projection of the full proposal metadata remain open.
+The public regression test covers deduplication, task linkage, review transition, the artifact projection, and the task-detail proposal projection.
+The task detail now joins the bounded proposal ledger to the ordinary task view and exposes source/previous revisions, candidate metadata, and validation evidence.
+Candidate creation by an isolated maintenance worker and validation execution remain open.

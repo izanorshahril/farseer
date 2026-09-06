@@ -4406,6 +4406,21 @@ runner = "not-a-real-runner"
                 .state,
             farseer_core::TaskState::Review
         );
+        let (status, detail) = h.get(&format!("/v1/tasks/{task_id}")).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(detail["maintenance_proposal"]["proposal_id"], proposal_id);
+        assert_eq!(
+            detail["maintenance_proposal"]["previous_revision"],
+            "parent"
+        );
+        assert_eq!(
+            detail["maintenance_proposal"]["candidate"]["branch"],
+            "farseer/maintenance/fixture"
+        );
+        assert_eq!(
+            detail["maintenance_proposal"]["candidate"]["validation"][0]["outcome"],
+            "ok"
+        );
 
         let (status, duplicate) = h
             .post(
