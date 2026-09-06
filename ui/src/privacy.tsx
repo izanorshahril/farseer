@@ -2,8 +2,8 @@ import { useEffect, useState, type ReactNode } from "react";
 
 export type SensitiveKind = "account" | "path" | "session" | "diagnostic";
 
-// Presentation surfaces are screenshot-safe on first render. This is a
-// presentation policy only; the source value stays in the caller and record.
+// `09 privacy presentation` and `03 workspace` make first render screenshot-safe.
+// This is a presentation policy only; the source value stays in the caller and record.
 let enabled = true;
 const listeners = new Set<(value: boolean) => void>();
 const revealListeners = new Set<(key: string) => void>();
@@ -91,38 +91,39 @@ export function mask(value: string, kind: SensitiveKind, active = enabled): stri
   return kind === "path" ? "path hidden" : kind === "account" ? "account hidden" : "hidden";
 }
 
-/** Copy/export callers use the same presentation policy as visible text. */
+/** `09 privacy presentation`: raw copy/export requires a live field reveal. */
 export function presentationValue(
   value: string,
   kind: SensitiveKind,
   active = enabled,
-  authorized = false,
+  fieldKey?: string,
 ): string {
-  return authorized ? value : mask(value, kind, active);
+  return !active || (fieldKey !== undefined && isFieldRevealed(fieldKey))
+    ? value
+    : mask(value, kind, active);
 }
 
-/** Copy a field only after the caller has applied the same reveal policy as the view. */
+/** `09 privacy presentation`: copy follows the same reveal policy as the view. */
 export async function copyPresentation(
   value: string,
   kind: SensitiveKind,
   active = enabled,
-  authorized = false,
+  fieldKey?: string,
 ): Promise<void> {
   const write = globalThis.navigator?.clipboard?.writeText;
-  if (write) await write.call(globalThis.navigator.clipboard, presentationValue(value, kind, active, authorized));
+  if (write) await write.call(globalThis.navigator.clipboard, presentationValue(value, kind, active, fieldKey));
 }
 
-/** Serialize a small presentation payload without mutating the source fields. */
+/** `09 privacy presentation`: export stays masked until each field is revealed. */
 export function exportPresentation(
-  fields: Record<string, { value: string; kind: SensitiveKind }>,
+  fields: Record<string, { value: string; kind: SensitiveKind; fieldKey?: string }>,
   active = enabled,
-  authorized = false,
 ): string {
   return JSON.stringify(
     Object.fromEntries(
       Object.entries(fields).map(([name, field]) => [
         name,
-        presentationValue(field.value, field.kind, active, authorized),
+        presentationValue(field.value, field.kind, active, field.fieldKey),
       ]),
     ),
     null,
@@ -151,7 +152,7 @@ export function RevealField({
         type="button"
         className="chip"
         aria-label={`Copy ${label}`}
-        onClick={() => void copyPresentation(value, kind, privacyEnabled(), visible)}
+        onClick={() => void copyPresentation(value, kind, privacyEnabled(), visible ? fieldKey : undefined)}
       >
         copy
       </button>

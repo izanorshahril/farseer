@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { Bridge } from "../bridge";
 import { onSubjectSelection, selectSubject, selectedSubject } from "../selection";
 import { follow } from "../stream";
-import { mask, usePrivacy } from "../privacy";
+import { mask, RevealField, usePrivacy } from "../privacy";
 import { ReadFailure } from "../ReadFailure";
 
 type TaskState = "inbox" | "planned" | "in_progress" | "blocked" | "review" | "done" | "cancelled";
@@ -447,12 +447,12 @@ export function WorkWidget({ bridge }: { bridge: Bridge }) {
           </ul>
           {sessionOffset !== undefined && <button className="chip" onClick={() => void loadSessions(sessionOffset)} disabled={sessionsLoading}>{sessionsLoading ? "loading..." : "load more sessions"}</button>}
           {sessionDetail && <aside className="session-detail" aria-label="Selected session detail">
-            <div className="row"><b>{mask(sessionDetail.session.identifier, "session", privacy)}</b><span className="badge">{sessionDetail.run.outcome ?? "running"}</span></div>
+            <div className="row"><b><RevealField value={sessionDetail.session.identifier} kind="session" fieldKey={`session:${sessionDetail.session.identifier}`} label="harness session identifier" /></b><span className="badge">{sessionDetail.run.outcome ?? "running"}</span></div>
             <p>{mask(sessionDetail.task.title, "diagnostic", privacy)} · {sessionDetail.run.runner}</p>
             <p className="dim small">run {mask(sessionDetail.run.run_id.slice(0, 8), "session", privacy)} · log {sessionDetail.session.log_pointer ? "referenced" : "unavailable"}</p>
             {sessionDetail.parents.length > 0 && <p className="dim small">topology: {sessionDetail.parents.map((parent) => `${parent.kind} ${mask(parent.parent_run_id.slice(0, 8), "session", privacy)}`).join(", ")}</p>}
             {sessionDetail.attachments.map((attachment) => <p key={`${attachment.digest}:${attachment.run_id}`} className="dim small">{attachment.custody} · {mask(short(attachment.digest), "session", privacy)} · {attachment.projection?.status ?? "not indexed"}</p>)}
-            {sessionDetail.excerpts.map((excerpt) => <p key={excerpt.digest} className="dim small">{mask(short(excerpt.digest), "session", privacy)} · {excerpt.excerpt}</p>)}
+            {sessionDetail.excerpts.map((excerpt) => <p key={excerpt.digest} className="dim small">{mask(short(excerpt.digest), "session", privacy)} · <RevealField value={excerpt.excerpt} kind="diagnostic" fieldKey={`session-excerpt:${excerpt.digest}`} label="session excerpt" /></p>)}
           </aside>}
         </div>
       )}
@@ -465,7 +465,7 @@ export function WorkWidget({ bridge }: { bridge: Bridge }) {
               <li key={hit.digest} className="row-button">
                 <b className="mono">{mask(short(hit.digest), "session", privacy)}</b>
                 <small>{hit.coverage} · projection {hit.projection_version ?? "not stated"}</small>
-                <span>{hit.excerpt}</span>
+                <span><RevealField value={hit.excerpt} kind="diagnostic" fieldKey={`search-excerpt:${hit.digest}`} label="search excerpt" /></span>
               </li>
             ))}
           </ul>

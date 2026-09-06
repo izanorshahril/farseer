@@ -137,9 +137,9 @@ fn poll(state: &AppState, cursor: &mut Seq, warned: &mut HashSet<RunId>) -> Vec<
             .unwrap_or("finished");
         out.push(Notification {
             title: format!("farseer: {outcome}"),
-            // A notification is an external presentation surface.  The record
-            // sequence keeps a finished event correlatable without exporting a
-            // provider-owned session/run identifier into a phone or webhook.
+            // `09 privacy presentation` makes external notifications use the
+            // record sequence for correlation without exporting a provider-owned
+            // session/run identifier into a phone or webhook.
             body: format!("record event {}: {outcome}", event.seq),
             // Failure is the one an operator wants pushed through a quiet hour.
             priority: if outcome == "ok" { 3 } else { 4 },

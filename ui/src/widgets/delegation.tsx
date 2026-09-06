@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import type { Bridge } from "../bridge";
 import { meaningOf } from "../meaning";
 import { follow, type RecordEvent } from "../stream";
+import { RevealField, mask, usePrivacy } from "../privacy";
 import { ReadFailure } from "../ReadFailure";
 
 /**
@@ -102,6 +103,7 @@ function fold(current: Map<string, Exchange>, event: RecordEvent): Map<string, E
 }
 
 export function DelegationWidget({ bridge }: { bridge: Bridge }) {
+  const privacy = usePrivacy();
   const [byRun, setByRun] = useState<Map<string, Exchange>>(new Map());
   const [error, setError] = useState<string | null>(null);
   const load = useCallback(async () => {
@@ -145,7 +147,7 @@ export function DelegationWidget({ bridge }: { bridge: Bridge }) {
           <div className="row small">
             <b title={meaningOf("worker")}>to a worker</b>
             <span className="faint mono">{time(exchange.queued)}</span>
-            <span className="faint mono">{exchange.run.slice(0, 8)}</span>
+            <span className="faint mono">{mask(exchange.run.slice(0, 8), "session", privacy)}</span>
             {exchange.runner && <span className="badge">{exchange.runner}</span>}
             <span className="grow" />
             {took(exchange) && <span className="faint mono">{took(exchange)}</span>}
@@ -162,9 +164,9 @@ export function DelegationWidget({ bridge }: { bridge: Bridge }) {
               </span>
             )}
           </div>
-          <p className="asked">{exchange.goal}</p>
+          <p className="asked"><RevealField value={exchange.goal} kind="diagnostic" fieldKey={`delegation-goal:${exchange.run}`} label="worker goal" /></p>
           {exchange.answer ? (
-            <p className="answered">{exchange.answer}</p>
+            <p className="answered"><RevealField value={exchange.answer} kind="diagnostic" fieldKey={`delegation-answer:${exchange.run}`} label="worker answer" /></p>
           ) : (
             /* Absent rather than blank: a worker that has not answered is not a
                worker that answered nothing, and `10 runner inventory`'s rule

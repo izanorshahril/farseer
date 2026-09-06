@@ -3,7 +3,7 @@ import type { Bridge } from "../bridge";
 import { currentProject, onProject, setProject } from "../project";
 import { confirmGrantWithdrawal } from "../confirm";
 import { meaningOf } from "../meaning";
-import { mask, usePrivacy } from "../privacy";
+import { mask, RevealField, usePrivacy } from "../privacy";
 import { ReadFailure } from "../ReadFailure";
 
 /**
@@ -271,7 +271,7 @@ export function ProjectsWidget({ bridge }: { bridge: Bridge }) {
                 {folded ? "▸" : "▾"}
               </button>
               <b className="mono root-path" title={mask(root.path, "path", privacy)}>
-                {mask(root.path, "path", privacy)}
+                <RevealField value={root.path} kind="path" fieldKey={`project-root:${root.path}`} label="project root path" />
               </b>
               {folded && root.projects.length > 0 && (
                 <span className="dim small">

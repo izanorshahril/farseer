@@ -2,7 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import type { Bridge } from "../bridge";
 import { follow, type RecordEvent } from "../stream";
 import { confirmVerb } from "../confirm";
-import { mask, usePrivacy } from "../privacy";
+import { mask, RevealField, usePrivacy } from "../privacy";
 import { ReadFailure } from "../ReadFailure";
 
 /**
@@ -113,7 +113,7 @@ function Thread({ bridge, run, onBack }: { bridge: Bridge; run: Run; onBack: () 
         <button className="chip" onClick={onBack}>
           back
         </button>
-        <b>{run.title ?? run.runner}</b>
+        <b>{run.title ? mask(run.title, "diagnostic", privacy) : run.runner}</b>
         <span className="dim small mono">{run.runner}</span>
         <span className="dim small">{run.model || "model not reported"}</span>
         {run.role && <span className="badge">{run.role}</span>}
@@ -140,12 +140,12 @@ function Thread({ bridge, run, onBack }: { bridge: Bridge; run: Run; onBack: () 
                 <span className="dim small">{event.actor}</span>
               </div>
               {typeof text === "string" && text.trim() ? (
-                <p className="thread-text">{text}</p>
+                <p className="thread-text"><RevealField value={text} kind="diagnostic" fieldKey={`runner-event:${event.seq}`} label="runner event text" /></p>
               ) : (
                 // Shape rather than nothing: this view exists to show what
                 // crossed the wire, and an event with no prose still did.
                 Object.keys(payload).length > 0 && (
-                  <pre className="thread-payload">{JSON.stringify(payload, null, 1)}</pre>
+                  <pre className="thread-payload"><RevealField value={JSON.stringify(payload, null, 1)} kind="diagnostic" fieldKey={`runner-payload:${event.seq}`} label="runner event payload" /></pre>
                 )
               )}
             </li>

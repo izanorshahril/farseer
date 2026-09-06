@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import type { Bridge } from "../bridge";
 import { ReadFailure } from "../ReadFailure";
-import { mask, usePrivacy } from "../privacy";
+import { mask, RevealField, usePrivacy } from "../privacy";
 
 /**
  * Which harness stands in front of farseer.
@@ -258,7 +258,7 @@ export function SettingsWidget({ bridge }: { bridge: Bridge }) {
       <p className="dim small" style={{ marginBottom: 0 }}>
         {note ? mask(note, "diagnostic", privacy) : (
           <>
-            Written to <span className="mono">{mask(current.file, "path", privacy)}</span> and reloaded. A change here is a
+            Written to <span className="mono"><RevealField value={current.file} kind="path" fieldKey="settings:file" label="settings file path" /></span> and reloaded. A change here is a
             git diff, not a hidden setting.
           </>
         )}

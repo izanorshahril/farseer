@@ -295,6 +295,7 @@ set FARSEER_NOTIFY_URL=https://ntfy.sh/some-hard-to-guess-topic
 The backend is the URL, so ntfy, Slack, Discord or an operator's own bridge are one code path.
 ntfy is the documented default because it needs no account, no token and no SDK, and its topic is a password - which is why this is an environment variable rather than a line in `runners.toml`.
 Delivery is best-effort and never in the path of a run.
+Notification bodies use the record sequence and generic run state, so external sinks do not receive raw run or session identifiers, per [09 privacy presentation](.scratch/farseer-command-center/issues/09-privacy-mode.md).
 See [35 notification plane](.scratch/farseer/issues/35-notification-plane.md).
 
 ### Known limits

@@ -269,7 +269,7 @@ export function RunsWidget({ bridge }: { bridge: Bridge }) {
                 title={`open ${mask(run.run_id, "session", privacy)}`}
                 onClick={() => selectRun(run.run_id)}
               >
-                {run.title ?? mask(run.run_id.slice(0, 8), "session", privacy)}
+                {run.title ? mask(run.title, "diagnostic", privacy) : mask(run.run_id.slice(0, 8), "session", privacy)}
               </button>
               <span className="badge">{run.cell_id}</span>
               <span className="dim mono small">{run.runner}</span>

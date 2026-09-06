@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import type { Bridge } from "../bridge";
 import { onSubjectSelection, selectedSubject } from "../selection";
 import { follow, type RecordEvent } from "../stream";
-import { mask, usePrivacy } from "../privacy";
+import { mask, RevealField, usePrivacy } from "../privacy";
 import { ReadFailure } from "../ReadFailure";
 /**
  * What the top manager said, as a conversation.
@@ -393,7 +393,7 @@ export function ConversationWidget({ bridge }: { bridge: Bridge }) {
               <span className="faint mono">{usd(turn.cost)}</span>
             )}
           </div>
-          <p>{turn.text}</p>
+          <p><RevealField value={turn.text} kind="diagnostic" fieldKey={`conversation:${turn.seq}`} label="conversation text" /></p>
         </li>
         ))}
       </ol>

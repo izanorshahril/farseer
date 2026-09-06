@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import type { Bridge } from "../bridge";
 import { follow, type RecordEvent } from "../stream";
-import { mask, usePrivacy } from "../privacy";
+import { mask, RevealField, usePrivacy } from "../privacy";
 import { onSelection, selectRun, selectedRun } from "../selection";
 import { confirmVerb } from "../confirm";
 import { meaningOf } from "../meaning";
@@ -267,7 +267,7 @@ export function RunWidget({ bridge }: { bridge: Bridge }) {
     <>
       {error && <ReadFailure capability="run detail" error={error} stale onRetry={() => runId ? void load(runId) : undefined} />}
       <div className="row" style={{ marginBottom: 8 }}>
-        <b>{run.title ?? mask(run.run_id.slice(0, 8), "session", privacy)}</b>
+        <b>{run.title ? <RevealField value={run.title} kind="diagnostic" fieldKey={`run-title:${run.run_id}`} label="run title" /> : mask(run.run_id.slice(0, 8), "session", privacy)}</b>
         <span className="grow" />
         <span className="faint mono small">{mask(run.run_id.slice(0, 8), "session", privacy)}</span>
         <button className="chip" onClick={() => selectRun(null)} title="close this run">
