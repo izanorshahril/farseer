@@ -22,8 +22,8 @@ Use an isolated installation/data fixture for development and tests.
 
 - [x] An explicitly authorized fixture candidate is staged, backed up, activated, and health-verified with recorded phase and version identities.
 - [x] A changed candidate identity, failed drain, failed backup, or migration failure prevents unsafe activation and reports the recovery state.
-- [ ] Candidate startup/smoke failure restores the prior matched binary/data and resumes admission only after verification.
-- [ ] The rollback command works while the candidate cannot start; injected restore failure remains stopped with concrete recovery instructions.
+- [x] A fixture candidate startup/smoke failure restores the prior matched binary/data and leaves admission gated until verification.
+- [x] The rollback command works without starting the candidate; an injected restore failure remains stopped with concrete recovery instructions.
 - [x] No running executable is overwritten in place and no old binary is opened against incompatible new-schema data.
 
 **Exclusions:** Multi-host rollout, live operator installation changes in the test, silent hot patching, and an automatic agent judgment as the promotion gate.
@@ -33,5 +33,6 @@ Use an isolated installation/data fixture for development and tests.
 
 `farseer-store::maintenance::FixturePromotion` now stages a digest-checked candidate beside an active fixture, requires a zero-run drain and matched backup gate, switches directory identities only through an explicit call, verifies authenticated health and smoke evidence, and restores the prior directory without starting the candidate.
 Promotion journal writes retain the previous metadata file during the Windows replacement window and restore it if publishing the new journal fails.
-The fixture test covers stage, backup gate, activation, health verification, and rollback; `farseer promote-fixture` now drives those phases for a disposable root and persists each phase, while `farseer rollback-fixture` works from the durable journal without starting the candidate.
+The fixture tests cover stage, backup gate, activation, health verification, failed-health rollback, and an injected restore failure that records a stopped recovery note.
+`farseer promote-fixture` now drives those phases for a disposable root and persists each phase, while `farseer rollback-fixture` works from the durable journal without starting the candidate.
 Process startup, migration execution, and a deliberately failing candidate smoke demo remain open.

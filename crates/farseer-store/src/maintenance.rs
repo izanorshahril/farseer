@@ -803,7 +803,7 @@ fn read_identity(path: &Path) -> Result<RuntimeIdentity> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tempfile::tempdir;
+    use tempfile::{TempDir, tempdir};
 
     fn request(trigger_id: &str) -> ProposalRequest {
         ProposalRequest {
@@ -815,6 +815,50 @@ mod tests {
             previous_revision: "parent".into(),
             scope: vec!["crates/farseer-store".into()],
         }
+    }
+
+    fn promotion_fixture(fixture: &TempDir) -> (FixturePromotion, PromotionPlan) {
+        let candidate = fixture.path().join("candidate-source");
+        let active = fixture.path().join("active");
+        fs::create_dir_all(&candidate).unwrap();
+        fs::create_dir_all(&active).unwrap();
+        fs::write(candidate.join("runtime.bin"), b"candidate").unwrap();
+        fs::write(active.join("runtime.bin"), b"previous").unwrap();
+        let previous = RuntimeIdentity {
+            version: "1".into(),
+            artifact_digest: digest_tree(&active).unwrap(),
+            schema_version: 1,
+        };
+        let candidate_identity = RuntimeIdentity {
+            version: "2".into(),
+            artifact_digest: digest_tree(&candidate).unwrap(),
+            schema_version: 1,
+        };
+        write_runtime_identity(&active, &previous).unwrap();
+        write_runtime_identity(&candidate, &candidate_identity).unwrap();
+        let backup = fixture.path().join("backup");
+        fs::create_dir(&backup).unwrap();
+        fs::write(backup.join(crate::BACKUP_DATABASE), b"sqlite snapshot").unwrap();
+        fs::write(
+            backup.join(crate::BACKUP_MANIFEST),
+            serde_json::to_vec(&crate::BackupManifest {
+                format_version: crate::BACKUP_FORMAT_VERSION,
+                schema_version: crate::STORE_FORMAT_VERSION,
+                attachments: vec![],
+            })
+            .unwrap(),
+        )
+        .unwrap();
+        let plan = PromotionPlan {
+            candidate: candidate_identity,
+            previous: previous.clone(),
+            backup: BackupIdentity {
+                runtime: previous,
+                path: backup,
+            },
+            candidate_path: candidate,
+        };
+        (FixturePromotion::new(fixture.path()), plan)
     }
 
     #[test]
@@ -968,5 +1012,52 @@ mod tests {
             b"previous"
         );
         assert_eq!(journal.phase, PromotionPhase::RolledBack);
+    }
+
+    #[test]
+    fn failed_health_restores_the_previous_fixture() {
+        let fixture = tempdir().unwrap();
+        let (controller, plan) = promotion_fixture(&fixture);
+        let candidate = plan.candidate.clone();
+        let mut journal = controller.stage(plan).unwrap();
+        controller.record_drain(&mut journal, 0).unwrap();
+        controller.record_backup(&mut journal).unwrap();
+        controller.activate(&mut journal).unwrap();
+        assert!(matches!(
+            controller.verify_health(
+                &mut journal,
+                HealthObservation {
+                    runtime: candidate,
+                    authenticated: true,
+                    smoke_ok: false,
+                },
+            ),
+            Err(MaintenanceError::HealthFailed(_))
+        ));
+        controller.rollback(&mut journal).unwrap();
+        assert_eq!(
+            fs::read(fixture.path().join("active/runtime.bin")).unwrap(),
+            b"previous"
+        );
+        assert_eq!(journal.phase, PromotionPhase::RolledBack);
+    }
+
+    #[test]
+    fn failed_restore_stops_with_recovery_instructions() {
+        let fixture = tempdir().unwrap();
+        let (controller, plan) = promotion_fixture(&fixture);
+        let mut journal = controller.stage(plan).unwrap();
+        controller.record_drain(&mut journal, 0).unwrap();
+        controller.record_backup(&mut journal).unwrap();
+        controller.activate(&mut journal).unwrap();
+        fs::remove_dir_all(&journal.previous_path).unwrap();
+        assert!(controller.rollback(&mut journal).is_err());
+        assert_eq!(journal.phase, PromotionPhase::Stopped);
+        assert!(
+            journal
+                .recovery
+                .as_deref()
+                .is_some_and(|note| note.contains("restore"))
+        );
     }
 }
