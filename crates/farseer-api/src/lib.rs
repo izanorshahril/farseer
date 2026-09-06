@@ -4475,6 +4475,42 @@ runner = "not-a-real-runner"
     }
 
     #[tokio::test]
+    async fn cancelling_maintenance_records_an_inspectable_outcome() {
+        let h = harness();
+        let (status, created) = h
+            .post(
+                "/v1/maintenance/proposals",
+                json!({
+                    "trigger_id": "fixture-cancelled",
+                    "lineage_id": "lineage-cancelled",
+                    "actor": "operator",
+                    "source_revision": "HEAD",
+                    "previous_revision": "parent",
+                    "goal": "cancel the deterministic fixture"
+                }),
+            )
+            .await;
+        assert_eq!(status, StatusCode::CREATED);
+        let proposal_id = created["proposal"]["proposal_id"].as_str().unwrap();
+        let task_id = created["proposal"]["task_id"].as_str().unwrap();
+        let (status, cancelled) = h
+            .post(
+                &format!("/v1/maintenance/proposals/{proposal_id}/cancel"),
+                json!({}),
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(cancelled["status"], "cancelled");
+
+        let (status, detail) = h.get(&format!("/v1/tasks/{task_id}")).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(detail["task"]["state"], "cancelled");
+        assert_eq!(detail["runs"][0]["outcome"], "cancelled");
+        assert_eq!(detail["artifacts"][0]["status"], "cancelled");
+        assert_eq!(detail["artifacts"][0]["error"], "cancelled by operator");
+    }
+
+    #[tokio::test]
     async fn a_wrong_token_is_refused() {
         let h = harness();
         let request = Request::builder()

@@ -24,7 +24,7 @@ Normal project execution remains possible while maintenance is disabled.
 - [ ] The worker creates a candidate source artifact/branch plus reproducer and validation results; the active runtime remains on its prior version.
 - [x] Duplicate triggers, restart, and self-generated events preserve one lineage and never create an unbounded task loop.
 - [x] Work detail exposes the candidate, validation outcome, and previous revision using existing task/run/artifact views.
-- [ ] Failure or cancellation leaves an inspectable outcome and no promotion; disabling maintenance leaves unrelated work usable.
+- [x] Failure or cancellation leaves an inspectable outcome and no promotion; disabling maintenance leaves unrelated work usable.
 
 **Exclusions:** New proposal status engines, automatic merge/promotion, credential changes, and permanent background LLM reasoning.
 **Test seam/demo:** A deterministic runner fixture produces a candidate edit in an isolated test repository; inspect the evidence and repeat the trigger without creating another task.
@@ -38,4 +38,5 @@ The public regression test covers deduplication, task linkage, review transition
 The task detail now joins the bounded proposal ledger to the ordinary task view and exposes source/previous revisions, candidate metadata, and validation evidence.
 Successful evidence is refused unless it carries at least one validation result, and the store repeats that invariant before marking a proposal succeeded.
 Validation rows also require non-empty commands and outcomes before they enter the ledger.
+Cancellation now records a cancelled maintenance run, artifact, and terminal event through the ordinary task detail projection, without creating a candidate or promotion.
 Candidate creation by an isolated maintenance worker and validation execution remain open.

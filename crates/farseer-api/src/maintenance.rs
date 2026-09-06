@@ -348,13 +348,56 @@ pub(super) async fn cancel(
         .finish(&proposal_id, ProposalStatus::Cancelled)
         .map_err(maintenance_error)?;
     if let Some(task_id) = proposal.task_id.as_deref().and_then(|id| id.parse().ok()) {
-        state.store().transition_task(
+        let run_id = RunId::new();
+        let now = now_ms();
+        let run = RunRow {
+            run_id,
+            task_id,
+            cell_id: CellId::new("zero"),
+            runner: RUNNER.into(),
+            model: "local".into(),
+            outcome: Some("cancelled".into()),
+            usd_micros: 0,
+            tokens: 0,
+            operator_touched: true,
+            started_ts: now,
+            finished_ts: Some(now),
+        };
+        let artifact = ArtifactRow {
+            artifact_id: run_id,
+            task_id,
+            run_id,
+            kind: "maintenance-candidate".into(),
+            status: "cancelled".into(),
+            input_path: proposal.source_revision.clone(),
+            staged_path: String::new(),
+            final_path: None,
+            error: Some("cancelled by operator".into()),
+            created_ts: now,
+            finished_ts: Some(now),
+        };
+        let store = state.store();
+        store.upsert_run(&run)?;
+        store.create_artifact(&artifact)?;
+        store.transition_task(
             task_id,
             TaskState::Cancelled,
             Actor::Operator,
             "maintenance proposal cancelled",
-            now_ms(),
+            now,
         )?;
+        store.append(&farseer_core::NewEvent::new(
+            CellId::new("zero"),
+            run_id,
+            EventKind::new(EventKind::RUN_FINISHED),
+            Actor::Operator,
+            now,
+            serde_json::json!({
+                "outcome": "cancelled",
+                "proposal_id": proposal_id,
+                "reason": "cancelled by operator",
+            }),
+        ))?;
     }
     save(&state, &ledger)?;
     ledger
