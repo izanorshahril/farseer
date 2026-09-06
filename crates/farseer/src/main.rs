@@ -14,6 +14,9 @@ use clap::{Parser, Subcommand};
 use farseer_api::{AppState, RuntimeToken, serve, validate_dir};
 use farseer_core::RunnerConfig;
 use farseer_store::Store;
+use farseer_store::maintenance::{
+    BackupIdentity, FixturePromotion, HealthObservation, PromotionPlan, read_runtime_identity,
+};
 
 #[derive(Parser)]
 #[command(name = "farseer", version, about, long_about = None)]
@@ -73,6 +76,28 @@ enum Command {
     Backup { destination: PathBuf },
     /// Restore a backup directory into the configured record path.
     Restore { backup: PathBuf },
+    /// Promote a versioned disposable fixture through drain, backup, health,
+    /// and rollback gates. This never replaces a live installation.
+    PromoteFixture {
+        #[arg(long)]
+        root: PathBuf,
+        #[arg(long)]
+        candidate: PathBuf,
+        #[arg(long)]
+        backup: PathBuf,
+        #[arg(long, default_value_t = 0)]
+        active_runs: usize,
+        #[arg(long)]
+        health: bool,
+        #[arg(long)]
+        smoke: bool,
+    },
+    /// Roll back the durable fixture promotion journal without starting the
+    /// candidate runtime.
+    RollbackFixture {
+        #[arg(long)]
+        root: PathBuf,
+    },
     /// Speak ACP on stdio, so an editor can drive a running farseer.
     ///
     /// `16 local api surface` made this an adapter on top of the HTTP surface
@@ -122,6 +147,15 @@ fn main() -> Result<()> {
             );
             Ok(())
         }
+        Command::PromoteFixture {
+            root,
+            candidate,
+            backup,
+            active_runs,
+            health,
+            smoke,
+        } => promote_fixture(root, candidate, backup, active_runs, health, smoke),
+        Command::RollbackFixture { root } => rollback_fixture(root),
         Command::Acp => {
             let runtime = acp_server::Runtime::attach()?;
             // Multi-threaded, because a prompt runs as its own task while the
@@ -185,6 +219,74 @@ fn control_runtime(action: &str, body: serde_json::Value) -> Result<()> {
                 Err(anyhow::anyhow!("runtime returned HTTP {status}"))
             }
         })
+}
+
+fn promote_fixture(
+    root: PathBuf,
+    candidate_path: PathBuf,
+    backup_path: PathBuf,
+    active_runs: usize,
+    authenticated_health: bool,
+    smoke_ok: bool,
+) -> Result<()> {
+    let active_path = root.join("active");
+    let previous = read_runtime_identity(&active_path).with_context(|| {
+        format!(
+            "reading previous fixture identity from {}",
+            active_path.display()
+        )
+    })?;
+    let candidate = read_runtime_identity(&candidate_path).with_context(|| {
+        format!(
+            "reading candidate fixture identity from {}",
+            candidate_path.display()
+        )
+    })?;
+    let plan = PromotionPlan {
+        candidate: candidate.clone(),
+        previous: previous.clone(),
+        backup: BackupIdentity {
+            runtime: previous,
+            path: backup_path,
+        },
+        candidate_path,
+    };
+    let controller = FixturePromotion::new(&root);
+    let mut journal = controller.stage(plan)?;
+    controller.save_journal(&journal)?;
+    controller.record_drain(&mut journal, active_runs)?;
+    controller.save_journal(&journal)?;
+    controller.record_backup(&mut journal)?;
+    controller.save_journal(&journal)?;
+    controller.activate(&mut journal)?;
+    controller.save_journal(&journal)?;
+    if let Err(error) = controller.verify_health(
+        &mut journal,
+        HealthObservation {
+            runtime: candidate,
+            authenticated: authenticated_health,
+            smoke_ok,
+        },
+    ) {
+        let _ = controller.rollback(&mut journal);
+        let _ = controller.save_journal(&journal);
+        return Err(error.into());
+    }
+    controller.save_journal(&journal)?;
+    println!(
+        "promotion: healthy fixture is active; phase={}",
+        journal.phase
+    );
+    Ok(())
+}
+
+fn rollback_fixture(root: PathBuf) -> Result<()> {
+    let controller = FixturePromotion::new(&root);
+    let mut journal = controller.load_journal()?;
+    controller.rollback(&mut journal)?;
+    controller.save_journal(&journal)?;
+    println!("promotion: rolled back fixture; phase={}", journal.phase);
+    Ok(())
 }
 
 fn validate(cells: &std::path::Path) -> Result<()> {

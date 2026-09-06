@@ -337,6 +337,8 @@ cargo run --release --manifest-path .scratch/farseer/spikes/jobspike/Cargo.toml 
 
 Toolchain is `x86_64-pc-windows-msvc`, rustup stable, decided in [19 rust toolchain](.scratch/farseer/issues/19-rust-toolchain.md).
 
+Fixture promotion is explicit and disposable: `farseer promote-fixture --root <root> --candidate <candidate> --backup <backup> --health --smoke` records drain, backup, activation, and health phases without replacing a live installation; `farseer rollback-fixture --root <root>` restores the previous journaled fixture.
+
 ## Where the decisions live
 
 [`.scratch/farseer/map.md`](.scratch/farseer/map.md) is the index.

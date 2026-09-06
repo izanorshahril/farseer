@@ -33,4 +33,5 @@ Use an isolated installation/data fixture for development and tests.
 
 `farseer-store::maintenance::FixturePromotion` now stages a digest-checked candidate beside an active fixture, requires a zero-run drain and matched backup gate, switches directory identities only through an explicit call, verifies authenticated health and smoke evidence, and restores the prior directory without starting the candidate.
 Promotion journal writes retain the previous metadata file during the Windows replacement window and restore it if publishing the new journal fails.
-The fixture test covers stage, backup gate, activation, health verification, and rollback; process startup, migration execution, and public CLI integration remain open.
+The fixture test covers stage, backup gate, activation, health verification, and rollback; `farseer promote-fixture` now drives those phases for a disposable root and persists each phase, while `farseer rollback-fixture` works from the durable journal without starting the candidate.
+Process startup, migration execution, and a deliberately failing candidate smoke demo remain open.

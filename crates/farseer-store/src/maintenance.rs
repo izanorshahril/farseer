@@ -568,6 +568,13 @@ impl FixturePromotion {
             &serde_json::to_vec_pretty(journal)?,
         )
     }
+
+    /// Load the durable phase journal for an explicit rollback command.
+    pub fn load_journal(&self) -> Result<PromotionJournal> {
+        Ok(serde_json::from_slice(&fs::read(
+            self.root.join("promotion.json"),
+        )?)?)
+    }
 }
 
 fn invalid_transition(from: &PromotionPhase, to: PromotionPhase) -> MaintenanceError {
@@ -715,6 +722,11 @@ pub fn write_runtime_identity(path: &Path, identity: &RuntimeIdentity) -> Result
         &path.join("identity.json"),
         &serde_json::to_vec_pretty(identity)?,
     )
+}
+
+/// Read the identity sidecar consumed by fixture promotion and CLI control.
+pub fn read_runtime_identity(path: &Path) -> Result<RuntimeIdentity> {
+    read_identity(path)
 }
 
 fn read_identity(path: &Path) -> Result<RuntimeIdentity> {
