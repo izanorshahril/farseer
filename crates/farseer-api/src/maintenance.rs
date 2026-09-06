@@ -304,7 +304,13 @@ pub(super) async fn execute(
         }
     };
     let repo_root = match task.project_path.as_deref() {
-        Some(project) => projects::resolve(&state, project)?,
+        Some(project) => match projects::resolve(&state, project) {
+            Ok(path) => path,
+            Err(error) => {
+                state.finish_maintenance_worker();
+                return Err(error);
+            }
+        },
         None => state.repo_root().to_path_buf(),
     };
     let worker_state = Arc::clone(&state);
@@ -718,11 +724,16 @@ fn scoped_candidate_path(
     {
         return Err("maintenance scope must stay inside the candidate workspace".into());
     }
+    let workspace = fs::canonicalize(workspace).map_err(|error| error.to_string())?;
     let target = workspace.join(relative);
-    let directory = if target.is_dir() {
-        target
-    } else if target.is_file() {
-        target
+    let resolved = fs::canonicalize(&target).map_err(|error| error.to_string())?;
+    if !resolved.starts_with(&workspace) {
+        return Err("maintenance scope resolves outside the candidate workspace".into());
+    }
+    let directory = if resolved.is_dir() {
+        resolved
+    } else if resolved.is_file() {
+        resolved
             .parent()
             .map(Path::to_path_buf)
             .ok_or_else(|| "maintenance scope has no parent directory".to_string())?
@@ -732,7 +743,14 @@ fn scoped_candidate_path(
             relative.display()
         ));
     };
-    Ok(directory.join(format!(".farseer-maintenance-candidate-{id}.md")))
+    let candidate = directory.join(format!(".farseer-maintenance-candidate-{id}.md"));
+    if fs::symlink_metadata(&candidate)
+        .map(|metadata| metadata.file_type().is_symlink())
+        .unwrap_or(false)
+    {
+        return Err("maintenance candidate path is a symlink".into());
+    }
+    Ok(candidate)
 }
 
 fn cleanup_candidate(evidence: &WorkerEvidence) {
