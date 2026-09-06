@@ -4123,6 +4123,100 @@ grants_shell = true
         );
     }
 
+    #[tokio::test]
+    async fn switching_a_project_profile_records_history_and_only_affects_future_tasks() {
+        const ZERO: &str = r#"
+cell_id = "zero"
+name = "Cell Zero"
+workspace_strategy = "plain_directory"
+
+[manager]
+runner = "not-a-real-runner"
+"#;
+        const SOCIAL: &str = r#"
+cell_id = "social"
+name = "Social"
+workspace_strategy = "plain_directory"
+
+[manager]
+runner = "not-a-real-runner"
+"#;
+        let h = harness_with_cells(&[("zero", ZERO), ("social", SOCIAL)]);
+        let root = tempfile::tempdir().unwrap();
+        let project = root.path().join("project");
+        std::fs::create_dir(&project).unwrap();
+        std::fs::create_dir(project.join(".farseer")).unwrap();
+        let project = std::fs::canonicalize(project).unwrap();
+        h.state
+            .store()
+            .authorize_root(&projects::display(&root.path().canonicalize().unwrap()), 0)
+            .unwrap();
+        let profile = project.join(project_profiles::PROFILE_PATH);
+        std::fs::write(
+            &profile,
+            format!(
+                "version = 1\nproject_path = {:?}\ncoordinating_cell = \"zero\"\n",
+                projects::display(&project)
+            ),
+        )
+        .unwrap();
+        let (status, first) = h
+            .post(
+                "/v1/cells/zero/instruct",
+                json!({ "goal": "first profile task", "project": project.display().to_string() }),
+            )
+            .await;
+        assert_eq!(status, StatusCode::ACCEPTED, "{first}");
+
+        std::fs::write(
+            &profile,
+            format!(
+                "version = 1\nproject_path = {:?}\ncoordinating_cell = \"social\"\n",
+                projects::display(&project)
+            ),
+        )
+        .unwrap();
+        let (status, second) = h
+            .post(
+                "/v1/cells/zero/instruct",
+                json!({ "goal": "second profile task", "project": project.display().to_string() }),
+            )
+            .await;
+        assert_eq!(status, StatusCode::ACCEPTED, "{second}");
+        assert_ne!(first["task_id"], second["task_id"]);
+
+        let (status, projection) = h
+            .get(&format!("/v1/projects/profile?path={}", project.display()))
+            .await;
+        assert_eq!(status, StatusCode::OK, "{projection}");
+        assert_eq!(projection["coordinating_cell"], "social");
+        assert_eq!(projection["history"].as_array().unwrap().len(), 2);
+        assert_eq!(projection["history"][0]["new"], "zero");
+        assert_eq!(projection["history"][1]["old"], "zero");
+        assert_eq!(projection["history"][1]["new"], "social");
+
+        let project_path = projects::display(&project);
+        let global = h
+            .state
+            .store()
+            .tasks(&farseer_store::TaskFilter {
+                limit: 50,
+                ..Default::default()
+            })
+            .unwrap();
+        let project_tasks = h
+            .state
+            .store()
+            .tasks(&farseer_store::TaskFilter {
+                project_path: Some(&project_path),
+                limit: 50,
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(global.len(), project_tasks.len());
+        assert_eq!(global.len(), 2);
+    }
+
     fn register_manager(h: &Harness) -> (RunId, TaskId, String) {
         let cell = h.state.cells().get(&CellId::new("zero")).cloned().unwrap();
         let run_id = RunId::new();
