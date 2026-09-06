@@ -155,6 +155,34 @@ pub struct SupervisedProcess {
     stdin: Option<Arc<Mutex<ChildStdin>>>,
 }
 
+/// A cloneable view of the Job Object owned by a supervised process.
+///
+/// The handle is duplicated by sharing the same owner slot, never by looking
+/// up a PID again.  That keeps periodic observations tied to the process tree
+/// farseer actually launched, even after Windows recycles the process id.
+#[derive(Clone)]
+pub struct ResourceHandle {
+    job: Arc<Mutex<Option<RawJobHandle>>>,
+}
+
+impl ResourceHandle {
+    /// Read cumulative metrics from the still-owned Job Object.
+    pub fn observation(
+        &self,
+        run_id: impl Into<String>,
+        timestamp_ms: i64,
+        final_sample: bool,
+    ) -> ResourceObservation {
+        let metrics = self
+            .job
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .as_ref()
+            .and_then(|RawJobHandle(raw)| resource::query_job(HANDLE(*raw as *mut _)).ok());
+        resource::observation(run_id, metrics, timestamp_ms, final_sample)
+    }
+}
+
 /// Whether the child gets a stdin at all.
 ///
 /// **A one-shot runner must be given a closed stdin, not an open pipe nobody
@@ -320,13 +348,15 @@ impl SupervisedProcess {
         timestamp_ms: i64,
         final_sample: bool,
     ) -> ResourceObservation {
-        let metrics = self
-            .job
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .as_ref()
-            .and_then(|RawJobHandle(raw)| resource::query_job(HANDLE(*raw as *mut _)).ok());
-        resource::observation(run_id, metrics, timestamp_ms, final_sample)
+        self.resource_handle()
+            .observation(run_id, timestamp_ms, final_sample)
+    }
+
+    /// Return a sampling view that remains valid while the process is driven.
+    pub fn resource_handle(&self) -> ResourceHandle {
+        ResourceHandle {
+            job: Arc::clone(&self.job),
+        }
     }
 
     /// A handle that can write to this process's stdin from another thread.

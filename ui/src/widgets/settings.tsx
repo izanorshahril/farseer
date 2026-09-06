@@ -29,6 +29,7 @@ type Runner = {
 };
 
 type TopManager = { cell_id: string; runner: string; file: string };
+type RuntimeStatus = { resource_monitor_enabled: boolean };
 
 type Skill = { name: string; declared_by: string[] };
 
@@ -42,6 +43,7 @@ export function SettingsWidget({ bridge }: { bridge: Bridge }) {
   const [open, setOpen] = useState<string | null>(null);
   const [available, setAvailable] = useState(true);
   const [readError, setReadError] = useState<string | null>(null);
+  const [resourceMonitor, setResourceMonitor] = useState<boolean | null>(null);
 
   const load = useCallback(async () => {
     try {
@@ -63,6 +65,12 @@ export function SettingsWidget({ bridge }: { bridge: Bridge }) {
       setSkills(body.skills);
     } catch {
       setSkills([]);
+    }
+    try {
+      const status = await bridge.read<RuntimeStatus>("/runtime");
+      setResourceMonitor(status.resource_monitor_enabled);
+    } catch {
+      setResourceMonitor(null);
     }
   }, [bridge]);
 
@@ -98,6 +106,27 @@ export function SettingsWidget({ bridge }: { bridge: Bridge }) {
     }
   };
 
+  const toggleResourceMonitor = async () => {
+    if (resourceMonitor === null) return;
+    setBusy(true);
+    setNote(null);
+    try {
+      const status = await bridge.post("/runtime/resources", {
+        enabled: !resourceMonitor,
+      }) as RuntimeStatus;
+      setResourceMonitor(status.resource_monitor_enabled);
+      setNote(
+        status.resource_monitor_enabled
+          ? "resource sampling enabled for new supervised runs"
+          : "resource sampling disabled; run lifecycle is unchanged",
+      );
+    } catch (error) {
+      setNote((error as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
   if (!available)
     return (
       <p className="empty">
@@ -117,6 +146,22 @@ export function SettingsWidget({ bridge }: { bridge: Bridge }) {
         The harness in front of <b>{current.cell_id}</b>. Every request you type goes to it, and it
         decides where the work goes.
       </p>
+      {resourceMonitor !== null && (
+        <div className="settings-toggle">
+          <span className="grow">
+            <b>resource monitor</b>
+            <span className="dim small">periodic owned Job Object samples for new runs</span>
+          </span>
+          <button
+            className={resourceMonitor ? "chip on" : "chip"}
+            aria-pressed={resourceMonitor}
+            disabled={busy}
+            onClick={() => void toggleResourceMonitor()}
+          >
+            {resourceMonitor ? "on" : "off"}
+          </button>
+        </div>
+      )}
       <ul className="runners">
         {runners.map((runner) => {
           const chosen = runner.name === current.runner;

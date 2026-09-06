@@ -211,6 +211,7 @@ Binds `127.0.0.1` only, opens the record, loads the definitions, and writes its 
 | `GET /v1/runs` | list recent runs newest first using the same row shape as the single-run read |
 | `GET /v1/runs/{id}` | a run's row: lifecycle, outcome, cost, tokens, and `18`/`05`'s liveness - `live`/`stalled`/`likely_hung`, or `null` once nothing in memory can answer |
 | `GET /v1/runs/{id}/resources` | bounded optional Job Object observations with measured, stale, or unavailable status, source, units, timestamp and supervised-job scope |
+| `POST /v1/runtime/resources` | enable or disable periodic owned Job Object sampling for new runs; the runtime remains usable when collection is off or unavailable |
 | `POST /v1/runs/{id}/cancel` | end a run early, recorded as `05`'s `cancelled` outcome, never `failed`. `404` if it already finished or never existed - idempotent, not a silent no-op |
 | `POST /v1/runs/{id}/steer` | send a follow-up message into a run's live process. `400` if the runner has no steering path - Codex, cursor-agent and goose today - `404` if the run is unknown or already finished |
 | `POST /v1/runs/{id}/rerun` | same sealed contract, fresh run, fresh workspace; managers and delegated workers retain their pinned cell authority, and a worker reacquires that cell's shared cap; legacy records without a pinned definition fail closed; `404` on an unknown run |

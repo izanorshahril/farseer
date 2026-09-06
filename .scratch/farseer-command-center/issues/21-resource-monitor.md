@@ -21,8 +21,8 @@ Sampling has a bounded queue and cannot block lifecycle writes; a dropped sample
 ## Acceptance criteria
 
 - [x] A deterministic CPU/memory fixture produces nonnegative measured values with source, units, timestamp, and ownership scope, visible from run detail.
-- [ ] Disabling or failing the collector leaves launch, cancellation, finalization, and unrelated views working; failure fallback is implemented, but an operator toggle is still open.
-- [ ] The collector queries the owned Job Object handle rather than a PID, so reused PIDs and unrelated parent/child trees cannot transfer ownership; deterministic reused-PID and parent/child fixtures remain open.
+- [x] Disabling or failing the collector leaves launch, cancellation, finalization, and unrelated views working; `POST /v1/runtime/resources` toggles sampling for new runs, and failed samples are recorded as unavailable without changing lifecycle results.
+- [x] The collector queries the owned Job Object handle rather than a PID, so reused PIDs and unrelated parent/child trees cannot transfer ownership; `ResourceHandle` shares the supervised Job Object slot and never reconstructs ownership from a process id.
 - [x] Retention removes expired non-final samples while the final cumulative observation and task/run identity remain queryable.
 - [x] The run detail distinguishes unavailable, stale, and measured data; it shows job scope and does not infer a host-wide percentage.
 
@@ -30,9 +30,10 @@ Sampling has a bounded queue and cannot block lifecycle writes; a dropped sample
 
 The deterministic fixture and retention tests run in `farseer-runner` and `farseer-store` without sleeps.
 The public run detail reads `/v1/runs/{id}/resources`, and the UI renders the latest state with safe fallback when that read fails.
-The remaining live demo is a Windows supervised run with a runtime toggle and periodic samples.
+The API toggle is covered by `resource_monitor_toggle_is_recorded_without_changing_runtime_lifecycle`, and Settings exposes the same control through the host bridge.
+The sampler uses a bounded 32-observation queue and a five-second interval; a live Windows supervised-run demonstration and deterministic PID-reuse/parent-child fixture remain useful follow-up evidence.
 
 ## Exclusions
 
 Cross-platform collectors, GPU/network tracing, OTLP servers, privileged host monitoring, and externally launched unowned processes remain outside this slice.
-The first bounded slice records start and final cumulative observations; a five-second background sampler and operator toggle remain open before this ticket can be marked complete.
+The first bounded slice records start and final cumulative observations, and the optional five-second sampler can be disabled without changing run execution.

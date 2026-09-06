@@ -135,6 +135,8 @@ pub struct AppState {
     /// launch. Empty is the honest resting state - farseer reports what it
     /// observed, and before the first poll it has observed nothing.
     polled_windows: Mutex<Vec<farseer_core::WindowObservation>>,
+    /// Optional Job Object sampling is operator-controlled and failure-isolated.
+    resource_monitor: AtomicBool,
     runtime: RuntimeControl,
 }
 
@@ -172,6 +174,8 @@ pub struct RuntimeStatus {
     pub drain_expired: bool,
     /// Set on the force response to make the operator's blast radius explicit.
     pub affected_runs: Option<usize>,
+    /// Whether new supervised runs collect periodic resource observations.
+    pub resource_monitor_enabled: bool,
 }
 
 impl RuntimeControl {
@@ -195,6 +199,7 @@ impl RuntimeControl {
             drain_deadline_ts: deadline,
             drain_expired: deadline.is_some_and(|deadline| now >= deadline),
             affected_runs: None,
+            resource_monitor_enabled: false,
         }
     }
 
@@ -406,6 +411,7 @@ impl AppState {
             runtime_id: uuid::Uuid::new_v4().to_string(),
             thresholds: LivenessThresholds::default(),
             polled_windows: Mutex::new(Vec::new()),
+            resource_monitor: AtomicBool::new(true),
             runs_dir,
             transcript_dir,
             repo_root: repo_root.into(),
@@ -424,7 +430,17 @@ impl AppState {
     }
 
     pub fn runtime_status(&self) -> RuntimeStatus {
-        self.runtime.status(now_ms())
+        let mut status = self.runtime.status(now_ms());
+        status.resource_monitor_enabled = self.resource_monitor.load(Ordering::Acquire);
+        status
+    }
+
+    fn set_resource_monitor(&self, enabled: bool) {
+        self.resource_monitor.store(enabled, Ordering::Release);
+    }
+
+    fn resource_monitor_enabled(&self) -> bool {
+        self.resource_monitor.load(Ordering::Acquire)
     }
 
     fn admit_run(&self) -> ApiResult<()> {
@@ -693,6 +709,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/v1/runtime", get(runtime_status))
         .route("/v1/runtime/drain", post(drain_runtime))
         .route("/v1/runtime/force", post(force_runtime))
+        .route("/v1/runtime/resources", post(set_resource_monitor))
         .route("/v1/cells", get(list_cells))
         .route("/v1/cells/{cell_id}", get(get_cell))
         .route("/v1/cells/reload", post(reload_cells))
@@ -980,6 +997,23 @@ async fn health(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
 
 async fn runtime_status(State(state): State<Arc<AppState>>) -> Json<RuntimeStatus> {
     Json(state.runtime_status())
+}
+
+#[derive(Debug, Deserialize)]
+struct ResourceMonitorBody {
+    enabled: bool,
+}
+
+async fn set_resource_monitor(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<ResourceMonitorBody>,
+) -> ApiResult<Json<RuntimeStatus>> {
+    state.set_resource_monitor(body.enabled);
+    state.append_runtime_event(
+        "resource_monitor",
+        serde_json::json!({ "enabled": body.enabled }),
+    )?;
+    Ok(Json(state.runtime_status()))
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -1712,6 +1746,7 @@ fn manager_run_options(
         usd_micros_per_mtok: state.runner_config().price_for(&contract.runner),
         // The manager's own declared skills, resolved to directories.
         skills: skill_paths(state, &contract.runner, &cell.manager.skills)?,
+        resource_monitor: state.resource_monitor_enabled(),
         // What the operator pinned, or nothing at all. `30 codex app
         // server`: farseer passes a model or an effort only when a
         // person wrote one down, so an unpinned runner keeps whatever
@@ -2090,6 +2125,7 @@ pub(crate) fn spawn_run(
             // direct worker - carries no declared skills rather than
             // inheriting the cell manager's.
             skills: Vec::new(),
+            resource_monitor: state.resource_monitor_enabled(),
             // What the operator pinned, or nothing at all. `30 codex app
             // server`: farseer passes a model or an effort only when a
             // person wrote one down, so an unpinned runner keeps whatever
@@ -4300,6 +4336,38 @@ grants_shell = true
         );
         assert_eq!(body["build_provenance"], "farseer-api/0.1.0");
         assert_eq!(body["features"], json!(["health", "sse", "commands"]));
+    }
+
+    #[tokio::test]
+    async fn resource_monitor_toggle_is_recorded_without_changing_runtime_lifecycle() {
+        let h = harness();
+        let (_, before) = h.get("/v1/runtime").await;
+        assert_eq!(before["state"], "running");
+        assert_eq!(before["resource_monitor_enabled"], true);
+
+        let (status, disabled) = h
+            .post("/v1/runtime/resources", json!({ "enabled": false }))
+            .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(disabled["resource_monitor_enabled"], false);
+        assert_eq!(disabled["state"], "running");
+
+        let (status, enabled) = h
+            .post("/v1/runtime/resources", json!({ "enabled": true }))
+            .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(enabled["resource_monitor_enabled"], true);
+        assert!(
+            h.state
+                .store()
+                .scan(0, 20, &ScanFilter::default())
+                .unwrap()
+                .into_iter()
+                .any(|event| {
+                    event.kind == farseer_core::EventKind::RUNTIME_LIFECYCLE.into()
+                        && event.payload["action"] == "resource_monitor"
+                })
+        );
     }
 
     #[tokio::test]

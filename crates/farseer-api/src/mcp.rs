@@ -320,6 +320,7 @@ impl FarseerMcp {
                 account: Some(self.state.runner_config().account_for(&contract.runner)),
                 usd_micros_per_mtok: self.state.runner_config().price_for(&contract.runner),
                 skills: skill_dirs.to_vec(),
+                resource_monitor: self.state.resource_monitor_enabled(),
                 // What the operator pinned, or nothing at all. `30 codex app
                 // server`: farseer passes a model or an effort only when a
                 // person wrote one down, so an unpinned runner keeps whatever
