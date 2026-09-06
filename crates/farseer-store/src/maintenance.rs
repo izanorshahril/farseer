@@ -605,7 +605,17 @@ impl FixturePromotion {
         validate_command(command)?;
         let observation = run_command(&journal.staged_path, command)?;
         journal.migration = Some(observation.clone());
-        if observation.timed_out || observation.status != Some(0) {
+        if observation.timed_out {
+            journal.recovery = Some(format!(
+                "migration failed in {}; previous runtime remains active",
+                journal.staged_path.display()
+            ));
+            return Err(MaintenanceError::CommandTimedOut {
+                command: observation.command,
+                timeout_ms: command.timeout_ms,
+            });
+        }
+        if observation.status != Some(0) {
             journal.recovery = Some(format!(
                 "migration failed in {}; previous runtime remains active",
                 journal.staged_path.display()
@@ -1039,6 +1049,25 @@ mod tests {
         }
     }
 
+    fn timeout_command() -> CommandSpec {
+        #[cfg(windows)]
+        {
+            CommandSpec {
+                program: "cmd.exe".into(),
+                args: vec!["/C".into(), "ping 127.0.0.1 -n 3 > nul".into()],
+                timeout_ms: 10,
+            }
+        }
+        #[cfg(not(windows))]
+        {
+            CommandSpec {
+                program: "sh".into(),
+                args: vec!["-c".into(), "sleep 1".into()],
+                timeout_ms: 10,
+            }
+        }
+    }
+
     fn request(trigger_id: &str) -> ProposalRequest {
         ProposalRequest {
             proposal_id: format!("proposal-{trigger_id}"),
@@ -1396,5 +1425,23 @@ mod tests {
             fs::read(fixture.path().join("active/runtime.bin")).unwrap(),
             b"previous"
         );
+    }
+
+    #[test]
+    fn timed_out_migration_is_reported_as_a_timeout() {
+        let fixture = tempdir().unwrap();
+        let (controller, mut plan) = promotion_fixture(&fixture);
+        plan.candidate.schema_version = plan.previous.schema_version + 1;
+        write_runtime_identity(&plan.candidate_path, &plan.candidate).unwrap();
+        plan.migration = Some(timeout_command());
+        let mut journal = controller.stage(plan).unwrap();
+        controller.record_drain(&mut journal, 0).unwrap();
+        controller.record_backup(&mut journal).unwrap();
+        let migration = journal.plan.migration.clone().unwrap();
+        assert!(matches!(
+            controller.run_migration(&mut journal, &migration),
+            Err(MaintenanceError::CommandTimedOut { .. })
+        ));
+        assert_eq!(journal.phase, PromotionPhase::BackedUp);
     }
 }
