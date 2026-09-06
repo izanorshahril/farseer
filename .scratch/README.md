@@ -31,6 +31,7 @@ git show df90320b0e7215d2ec82df5d285e5d731c8537ed:ARCHITECTURE.md
 
 Keep future temporary exports, generated spike targets, PID captures, and tool metadata out of the workspace.
 Remove superseded snapshots after their useful findings are recorded in tickets; use Git for recovery instead of maintaining another archive tree.
+The superseded `ui-command-center` and `one-operator-turn` prototypes were removed on 2026-09-06; `prototypes/berd-home` remains the accepted static design reference.
 
 ## Load policy
 

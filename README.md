@@ -126,7 +126,7 @@ An external protocol is spoken at a boundary, never shaped into internals.
    ├─ issues/          original decisions plus follow-on implementation tickets
    ├─ research/        compaction, hang detection, headless UI boundary
    ├─ runtime-reference.md  implementation notes and machine probes; read on demand
-   ├─ prototypes/      one operator turn, end to end
+   ├─ prototypes/      accepted berd-home static reference
    └─ spikes/          jobspike, wsspike, storebench
 ```
 
