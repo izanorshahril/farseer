@@ -12,6 +12,9 @@ use sha2::{Digest, Sha256};
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
+use std::thread;
+use std::time::{Duration, Instant};
 
 pub const PROPOSAL_FORMAT_VERSION: u32 = 1;
 pub const PROMOTION_FORMAT_VERSION: u32 = 1;
@@ -48,6 +51,12 @@ pub enum MaintenanceError {
     IdentityMismatch(&'static str),
     #[error("health check failed: {0}")]
     HealthFailed(String),
+    #[error("maintenance command `{command}` timed out after {timeout_ms} ms")]
+    CommandTimedOut { command: String, timeout_ms: u64 },
+    #[error("maintenance command `{command}` exited with status {status}")]
+    CommandFailed { command: String, status: String },
+    #[error("maintenance command `{0}` is invalid")]
+    InvalidCommand(String),
     #[error("runtime drain still has {0} active run(s)")]
     DrainIncomplete(usize),
     #[error("unsafe fixture path component `{0}`")]
@@ -407,6 +416,36 @@ pub struct PromotionPlan {
     pub previous: RuntimeIdentity,
     pub backup: BackupIdentity,
     pub candidate_path: PathBuf,
+    #[serde(default)]
+    pub migration: Option<CommandSpec>,
+    #[serde(default)]
+    pub startup: Option<CommandSpec>,
+}
+
+/// An explicitly named, bounded executable used only by a disposable
+/// promotion fixture.
+///
+/// The program and arguments are passed directly to the OS without a shell.
+/// A relative program is resolved below the fixture directory; a bare command
+/// name is resolved through PATH so tests can use `cmd.exe` or `sh`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CommandSpec {
+    pub program: String,
+    #[serde(default)]
+    pub args: Vec<String>,
+    #[serde(default = "default_command_timeout_ms")]
+    pub timeout_ms: u64,
+}
+
+fn default_command_timeout_ms() -> u64 {
+    5_000
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CommandObservation {
+    pub command: String,
+    pub status: Option<i32>,
+    pub timed_out: bool,
 }
 
 impl PromotionPlan {
@@ -420,9 +459,16 @@ impl PromotionPlan {
             ));
         }
         if self.candidate.schema_version != self.previous.schema_version {
-            return Err(MaintenanceError::IdentityMismatch(
-                "candidate schema requires an explicit migration",
-            ));
+            let migration = self
+                .migration
+                .as_ref()
+                .ok_or(MaintenanceError::IdentityMismatch(
+                    "candidate schema requires an explicit migration",
+                ))?;
+            validate_command(migration)?;
+        }
+        if let Some(startup) = &self.startup {
+            validate_command(startup)?;
         }
         if self.backup.runtime != self.previous {
             return Err(MaintenanceError::IdentityMismatch(
@@ -473,6 +519,8 @@ pub struct PromotionJournal {
     pub active_path: PathBuf,
     pub previous_path: PathBuf,
     pub health: Option<HealthObservation>,
+    pub migration: Option<CommandObservation>,
+    pub startup: Option<CommandObservation>,
     pub recovery: Option<String>,
 }
 
@@ -522,6 +570,8 @@ impl FixturePromotion {
             active_path,
             previous_path,
             health: None,
+            migration: None,
+            startup: None,
             recovery: None,
         })
     }
@@ -536,6 +586,39 @@ impl FixturePromotion {
         )?;
         journal.phase = PromotionPhase::BackedUp;
         Ok(())
+    }
+
+    /// Run the explicit schema migration from the staged fixture before any
+    /// directory switch.  A failed migration leaves the previous runtime
+    /// active and records a recovery note in the journal.
+    pub fn run_migration(
+        &self,
+        journal: &mut PromotionJournal,
+        command: &CommandSpec,
+    ) -> Result<CommandObservation> {
+        if journal.phase != PromotionPhase::BackedUp {
+            return Err(invalid_transition(
+                &journal.phase,
+                PromotionPhase::Activated,
+            ));
+        }
+        validate_command(command)?;
+        let observation = run_command(&journal.staged_path, command)?;
+        journal.migration = Some(observation.clone());
+        if observation.timed_out || observation.status != Some(0) {
+            journal.recovery = Some(format!(
+                "migration failed in {}; previous runtime remains active",
+                journal.staged_path.display()
+            ));
+            return Err(MaintenanceError::CommandFailed {
+                command: observation.command,
+                status: observation
+                    .status
+                    .map(|status| status.to_string())
+                    .unwrap_or_else(|| "timeout".into()),
+            });
+        }
+        Ok(observation)
     }
 
     /// Record the existing runtime's drain result.  Activation cannot proceed
@@ -594,6 +677,51 @@ impl FixturePromotion {
         journal.health = Some(observation);
         journal.phase = PromotionPhase::Healthy;
         Ok(())
+    }
+
+    /// Start the activated candidate using its bounded fixture command.
+    ///
+    /// The command is expected to perform a deterministic startup/smoke probe
+    /// and exit.  Long-lived production processes are outside this fixture
+    /// seam and must use the runtime lifecycle instead.
+    pub fn start_candidate(
+        &self,
+        journal: &mut PromotionJournal,
+        command: &CommandSpec,
+    ) -> Result<CommandObservation> {
+        if journal.phase != PromotionPhase::Activated {
+            return Err(invalid_transition(
+                &journal.phase,
+                PromotionPhase::Activated,
+            ));
+        }
+        validate_command(command)?;
+        let observation = run_command(&journal.active_path, command)?;
+        journal.startup = Some(observation.clone());
+        if observation.timed_out {
+            journal.recovery = Some(format!(
+                "candidate startup timed out in {}; restore the previous runtime before admitting work",
+                journal.active_path.display()
+            ));
+            return Err(MaintenanceError::CommandTimedOut {
+                command: observation.command,
+                timeout_ms: command.timeout_ms,
+            });
+        }
+        if observation.status != Some(0) {
+            journal.recovery = Some(format!(
+                "candidate startup failed in {}; restore the previous runtime before admitting work",
+                journal.active_path.display()
+            ));
+            return Err(MaintenanceError::CommandFailed {
+                command: observation.command,
+                status: observation
+                    .status
+                    .map(|status| status.to_string())
+                    .unwrap_or_else(|| "unknown".into()),
+            });
+        }
+        Ok(observation)
     }
 
     /// Restore the previous directory without consulting or starting the
@@ -659,6 +787,78 @@ fn invalid_transition(from: &PromotionPhase, to: PromotionPhase) -> MaintenanceE
     MaintenanceError::InvalidPromotionTransition {
         from: from.to_string(),
         to: to.to_string(),
+    }
+}
+
+fn validate_command(command: &CommandSpec) -> Result<()> {
+    if command.program.trim().is_empty() {
+        return Err(MaintenanceError::InvalidCommand("empty program".into()));
+    }
+    if command.timeout_ms == 0 || command.timeout_ms > 60_000 {
+        return Err(MaintenanceError::InvalidCommand(
+            "timeout must be between 1 and 60000 ms".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn run_command(cwd: &Path, spec: &CommandSpec) -> Result<CommandObservation> {
+    let program_path = Path::new(&spec.program);
+    let local_program = cwd.join(program_path);
+    let program = if program_path.is_absolute()
+        || program_path.components().count() > 1
+        || local_program.is_file()
+    {
+        let resolved = if program_path.is_absolute() {
+            program_path.to_path_buf()
+        } else {
+            cwd.join(program_path)
+        };
+        if !program_path.is_absolute()
+            && resolved
+                .canonicalize()
+                .ok()
+                .and_then(|path| {
+                    path.strip_prefix(cwd.canonicalize().ok()?)
+                        .ok()
+                        .map(PathBuf::from)
+                })
+                .is_none()
+        {
+            return Err(MaintenanceError::InvalidCommand(spec.program.clone()));
+        }
+        resolved
+    } else {
+        program_path.to_path_buf()
+    };
+    let label = format!("{} {}", spec.program, spec.args.join(" "));
+    let mut child = Command::new(program)
+        .args(&spec.args)
+        .current_dir(cwd)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|error| MaintenanceError::InvalidCommand(format!("{label}: {error}")))?;
+    let deadline = Instant::now() + Duration::from_millis(spec.timeout_ms);
+    loop {
+        if let Some(status) = child.try_wait()? {
+            return Ok(CommandObservation {
+                command: label,
+                status: status.code(),
+                timed_out: false,
+            });
+        }
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Ok(CommandObservation {
+                command: label,
+                status: None,
+                timed_out: true,
+            });
+        }
+        thread::sleep(Duration::from_millis(10));
     }
 }
 
@@ -820,6 +1020,25 @@ mod tests {
     use super::*;
     use tempfile::{TempDir, tempdir};
 
+    fn command(exit_code: i32) -> CommandSpec {
+        #[cfg(windows)]
+        {
+            CommandSpec {
+                program: "cmd.exe".into(),
+                args: vec!["/C".into(), format!("exit {exit_code}")],
+                timeout_ms: 1_000,
+            }
+        }
+        #[cfg(not(windows))]
+        {
+            CommandSpec {
+                program: "sh".into(),
+                args: vec!["-c".into(), format!("exit {exit_code}")],
+                timeout_ms: 1_000,
+            }
+        }
+    }
+
     fn request(trigger_id: &str) -> ProposalRequest {
         ProposalRequest {
             proposal_id: format!("proposal-{trigger_id}"),
@@ -872,6 +1091,8 @@ mod tests {
                 path: backup,
             },
             candidate_path: candidate,
+            migration: None,
+            startup: None,
         };
         (FixturePromotion::new(fixture.path()), plan)
     }
@@ -1024,6 +1245,8 @@ mod tests {
                 path: backup,
             },
             candidate_path: candidate,
+            migration: None,
+            startup: None,
         };
         let controller = FixturePromotion::new(fixture.path());
         let mut journal = controller.stage(plan).unwrap();
@@ -1096,6 +1319,82 @@ mod tests {
                 .recovery
                 .as_deref()
                 .is_some_and(|note| note.contains("restore"))
+        );
+    }
+
+    #[test]
+    fn fixture_promotion_runs_explicit_migration_and_startup_commands() {
+        let fixture = tempdir().unwrap();
+        let (controller, mut plan) = promotion_fixture(&fixture);
+        plan.candidate.schema_version = plan.previous.schema_version + 1;
+        write_runtime_identity(&plan.candidate_path, &plan.candidate).unwrap();
+        plan.migration = Some(command(0));
+        plan.startup = Some(command(0));
+        let mut journal = controller.stage(plan).unwrap();
+        controller.record_drain(&mut journal, 0).unwrap();
+        controller.record_backup(&mut journal).unwrap();
+        let migration = journal.plan.migration.clone().unwrap();
+        controller.run_migration(&mut journal, &migration).unwrap();
+        controller.activate(&mut journal).unwrap();
+        let startup = journal.plan.startup.clone().unwrap();
+        controller.start_candidate(&mut journal, &startup).unwrap();
+        assert_eq!(journal.migration.as_ref().unwrap().status, Some(0));
+        assert_eq!(journal.startup.as_ref().unwrap().status, Some(0));
+    }
+
+    #[test]
+    fn failed_candidate_startup_is_bounded_and_recoverable() {
+        let fixture = tempdir().unwrap();
+        let (controller, mut plan) = promotion_fixture(&fixture);
+        plan.startup = Some(command(7));
+        let mut journal = controller.stage(plan).unwrap();
+        controller.record_drain(&mut journal, 0).unwrap();
+        controller.record_backup(&mut journal).unwrap();
+        controller.activate(&mut journal).unwrap();
+        let startup = journal.plan.startup.clone().unwrap();
+        assert!(matches!(
+            controller.start_candidate(&mut journal, &startup),
+            Err(MaintenanceError::CommandFailed { .. })
+        ));
+        assert!(
+            journal
+                .recovery
+                .as_deref()
+                .is_some_and(|note| note.contains("restore"))
+        );
+        controller.rollback(&mut journal).unwrap();
+        assert_eq!(journal.phase, PromotionPhase::RolledBack);
+        assert_eq!(
+            fs::read(fixture.path().join("active/runtime.bin")).unwrap(),
+            b"previous"
+        );
+    }
+
+    #[test]
+    fn failed_migration_never_activates_the_candidate() {
+        let fixture = tempdir().unwrap();
+        let (controller, mut plan) = promotion_fixture(&fixture);
+        plan.candidate.schema_version = plan.previous.schema_version + 1;
+        write_runtime_identity(&plan.candidate_path, &plan.candidate).unwrap();
+        plan.migration = Some(command(9));
+        let mut journal = controller.stage(plan).unwrap();
+        controller.record_drain(&mut journal, 0).unwrap();
+        controller.record_backup(&mut journal).unwrap();
+        let migration = journal.plan.migration.clone().unwrap();
+        assert!(matches!(
+            controller.run_migration(&mut journal, &migration),
+            Err(MaintenanceError::CommandFailed { .. })
+        ));
+        assert_eq!(journal.phase, PromotionPhase::BackedUp);
+        assert!(
+            journal
+                .recovery
+                .as_deref()
+                .is_some_and(|note| note.contains("previous"))
+        );
+        assert_eq!(
+            fs::read(fixture.path().join("active/runtime.bin")).unwrap(),
+            b"previous"
         );
     }
 }

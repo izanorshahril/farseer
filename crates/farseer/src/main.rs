@@ -15,8 +15,16 @@ use farseer_api::{AppState, RuntimeToken, serve, validate_dir};
 use farseer_core::RunnerConfig;
 use farseer_store::Store;
 use farseer_store::maintenance::{
-    BackupIdentity, FixturePromotion, HealthObservation, PromotionPlan, read_runtime_identity,
+    BackupIdentity, CommandSpec, FixturePromotion, HealthObservation, PromotionPlan,
+    read_runtime_identity,
 };
+
+struct FixtureCommands {
+    migration_program: Option<String>,
+    migration_args: Vec<String>,
+    startup_program: Option<String>,
+    startup_args: Vec<String>,
+}
 
 #[derive(Parser)]
 #[command(name = "farseer", version, about, long_about = None)]
@@ -91,6 +99,18 @@ enum Command {
         health: bool,
         #[arg(long)]
         smoke: bool,
+        /// Optional migration executable, run from the staged candidate.
+        #[arg(long)]
+        migration_program: Option<String>,
+        /// Arguments passed directly to the migration executable.
+        #[arg(long)]
+        migration_arg: Vec<String>,
+        /// Optional bounded candidate startup/smoke executable.
+        #[arg(long)]
+        startup_program: Option<String>,
+        /// Arguments passed directly to the startup executable.
+        #[arg(long)]
+        startup_arg: Vec<String>,
     },
     /// Roll back the durable fixture promotion journal without starting the
     /// candidate runtime.
@@ -154,7 +174,24 @@ fn main() -> Result<()> {
             active_runs,
             health,
             smoke,
-        } => promote_fixture(root, candidate, backup, active_runs, health, smoke),
+            migration_program,
+            migration_arg,
+            startup_program,
+            startup_arg,
+        } => promote_fixture(
+            root,
+            candidate,
+            backup,
+            active_runs,
+            health,
+            smoke,
+            FixtureCommands {
+                migration_program,
+                migration_args: migration_arg,
+                startup_program,
+                startup_args: startup_arg,
+            },
+        ),
         Command::RollbackFixture { root } => rollback_fixture(root),
         Command::Acp => {
             let runtime = acp_server::Runtime::attach()?;
@@ -228,6 +265,7 @@ fn promote_fixture(
     active_runs: usize,
     authenticated_health: bool,
     smoke_ok: bool,
+    commands: FixtureCommands,
 ) -> Result<()> {
     let active_path = root.join("active");
     let previous = read_runtime_identity(&active_path).with_context(|| {
@@ -250,6 +288,16 @@ fn promote_fixture(
             path: backup_path,
         },
         candidate_path,
+        migration: commands.migration_program.map(|program| CommandSpec {
+            program,
+            args: commands.migration_args,
+            timeout_ms: 5_000,
+        }),
+        startup: commands.startup_program.map(|program| CommandSpec {
+            program,
+            args: commands.startup_args,
+            timeout_ms: 5_000,
+        }),
     };
     let controller = FixturePromotion::new(&root);
     let mut journal = controller.stage(plan)?;
@@ -258,8 +306,24 @@ fn promote_fixture(
     controller.save_journal(&journal)?;
     controller.record_backup(&mut journal)?;
     controller.save_journal(&journal)?;
+    if let Some(migration) = journal.plan.migration.clone() {
+        if let Err(error) = controller.run_migration(&mut journal, &migration) {
+            let _ = controller.save_journal(&journal);
+            return Err(error.into());
+        }
+        controller.save_journal(&journal)?;
+    }
     controller.activate(&mut journal)?;
     controller.save_journal(&journal)?;
+    if let Some(startup) = journal.plan.startup.clone() {
+        if let Err(error) = controller.start_candidate(&mut journal, &startup) {
+            let _ = controller.save_journal(&journal);
+            let _ = controller.rollback(&mut journal);
+            let _ = controller.save_journal(&journal);
+            return Err(error.into());
+        }
+        controller.save_journal(&journal)?;
+    }
     if let Err(error) = controller.verify_health(
         &mut journal,
         HealthObservation {

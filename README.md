@@ -340,7 +340,10 @@ cargo run --release --manifest-path .scratch/farseer/spikes/jobspike/Cargo.toml 
 Toolchain is `x86_64-pc-windows-msvc`, rustup stable, decided in [19 rust toolchain](.scratch/farseer/issues/19-rust-toolchain.md).
 
 Maintenance candidates are explicit and disposable: `POST /v1/maintenance/proposals/{id}/execute` leaves one deterministic branch/worktree and fixed local validation evidence without changing the active checkout.
-Fixture promotion is explicit and disposable: `farseer promote-fixture --root <root> --candidate <candidate> --backup <backup> --health --smoke` records drain, backup, activation, and health phases without replacing a live installation; `farseer rollback-fixture --root <root>` restores the previous journaled fixture.
+Fixture promotion is explicit and disposable: `farseer promote-fixture --root <root> --candidate <candidate> --backup <backup> --health --smoke` records drain, backup, activation, and health phases without replacing a live installation.
+When a candidate schema changes, pass `--migration-program <exe>` and optional repeated `--migration-arg <arg>` values; an optional `--startup-program <exe>` with repeated `--startup-arg <arg>` values runs a bounded candidate startup probe after activation.
+Commands receive arguments directly without a shell and run from the staged or active fixture.
+`farseer rollback-fixture --root <root>` restores the previous journaled fixture without starting the candidate.
 
 ## Where the decisions live
 
