@@ -35,6 +35,7 @@ An active run workspace cannot be torn down while an authorized terminal lease h
 
 `crates/farseer-runner/src/terminal.rs` resolves the three named profiles before spawn, validates dimensions and cwd, supervises each process through the existing Job Object, and bounds scrollback to 10,000 lines and 1 MiB.
 `TerminalManager` records a workspace lease for every live session, defers run teardown while a session owns that cwd, and completes the deferred delete after explicit End; the Unicode terminal test covers the lease and cleanup ordering.
+Deferred cleanup now attempts every ready workspace before returning the first teardown error, so one blocked path cannot strand other pending cleanups without an explicit retry.
 `crates/farseer-api/src/terminals.rs` exposes profile discovery, open, reconnect, input, resize, and explicit end routes with authorized project or active-run workspace checks.
 The runtime owns the in-memory session manager, so closing the desktop window leaves sessions available while the runtime remains alive.
 The first slice intentionally retains resize state at the adapter seam and does not claim ConPTY or durable recovery after a runtime process restart.

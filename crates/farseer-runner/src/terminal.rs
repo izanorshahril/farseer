@@ -442,16 +442,19 @@ impl TerminalManager {
                 .filter_map(|path| pending.remove(&path).map(|repo| (path, repo)))
                 .collect::<Vec<_>>()
         };
+        let mut first_error = None;
         for (workspace, repo) in ready {
             if let Err(error) = crate::workspace::teardown_workspace(&workspace, repo.as_deref()) {
                 self.pending_cleanup
                     .lock()
                     .unwrap_or_else(|e| e.into_inner())
                     .insert(workspace, repo);
-                return Err(TerminalError::Cleanup(error.to_string()));
+                if first_error.is_none() {
+                    first_error = Some(error.to_string());
+                }
             }
         }
-        Ok(())
+        first_error.map_or(Ok(()), |error| Err(TerminalError::Cleanup(error)))
     }
 }
 
