@@ -27,6 +27,7 @@ Masking defaults to on for account identities and sensitive paths in screenshot 
 **Evidence:** `ui/src/privacy.tsx` defaults presentation masking on and leaves source values untouched.
 First-party widgets classify account, path, session, and diagnostic display fields through `mask`, including tooltip text, accessible labels, confirmation prompts, and graph/run identifiers.
 Live runner task goals and project labels use the same diagnostic classification rather than bypassing the presentation policy.
+Sealed skill paths in the Run contract use an explicit path reveal instead of raw `Fact` output.
 `RevealField` exposes one field for ten seconds with accessible state, and visibility changes or privacy re-enable clear all reveals.
 `copyPresentation` and `exportPresentation` keep masked output as the default and raw output requires a live field reveal or privacy being explicitly disabled.
 The Run widget now exposes an export-report control that copies a bounded JSON presentation through the same masking helper.

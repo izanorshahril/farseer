@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useState, type ReactNode } from "react";
 import type { Bridge } from "../bridge";
 import { follow, type RecordEvent } from "../stream";
 import { exportPresentation, mask, RevealField, usePrivacy } from "../privacy";
@@ -145,7 +145,7 @@ const TONE: Record<string, string> = {
  */
 
 /** A labelled fact, absent-aware, because a blank and a zero are not the same. */
-function Fact({ label, value }: { label: string; value: string | undefined }) {
+function Fact({ label, value }: { label: string; value: ReactNode }) {
   return (
     <span className={value ? "" : "absent"}>
       <i title={meaningOf(label)}>{label}</i>
@@ -343,7 +343,14 @@ export function RunWidget({ bridge }: { bridge: Bridge }) {
             {/* Paths, because that is what reached the argv - see `32`. */}
             <Fact
               label="skills"
-              value={contract.skills?.length ? contract.skills.join(", ") : undefined}
+              value={contract.skills?.length ? (
+                <RevealField
+                  value={contract.skills.join(", ")}
+                  kind="path"
+                  fieldKey={`run-skills:${run.run_id}`}
+                  label="sealed skill paths"
+                />
+              ) : undefined}
             />
             <Fact
               label="budget"

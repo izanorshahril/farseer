@@ -358,6 +358,12 @@ fn validate_evidence(evidence: &[ValidationEvidence]) -> Result<()> {
         return Err(MaintenanceError::EvidenceTooLarge(MAX_VALIDATION_EVIDENCE));
     }
     for item in evidence {
+        if item.command.trim().is_empty() {
+            return Err(MaintenanceError::EmptyField("validation.command"));
+        }
+        if item.outcome.trim().is_empty() {
+            return Err(MaintenanceError::EmptyField("validation.outcome"));
+        }
         check_field("validation.command", &item.command)?;
         check_field("validation.outcome", &item.outcome)?;
         if let Some(detail) = &item.detail {
@@ -905,6 +911,29 @@ mod tests {
             Err(MaintenanceError::AttemptLimit)
         ));
         assert!(ledger.suppresses("lineage-1", "self-event"));
+    }
+
+    #[test]
+    fn blank_validation_evidence_is_rejected() {
+        let mut ledger = ProposalLedger::default();
+        ledger.begin(request("failure-blank-validation")).unwrap();
+        assert!(matches!(
+            ledger.record_attempt(
+                "proposal-failure-blank-validation",
+                MaintenanceAttempt {
+                    number: 1,
+                    started_ts: 1,
+                    finished_ts: Some(2),
+                    evidence: vec![ValidationEvidence {
+                        command: " ".into(),
+                        outcome: "ok".into(),
+                        exit_code: Some(0),
+                        detail: None,
+                    }],
+                },
+            ),
+            Err(MaintenanceError::EmptyField("validation.command"))
+        ));
     }
 
     #[test]
