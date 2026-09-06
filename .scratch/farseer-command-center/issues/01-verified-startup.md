@@ -44,3 +44,9 @@ The 2026-09-06 fresh desktop smoke started a new daemon from an absent runtime f
 Optional resource collection remains local to run detail and settings: `RunWidget` keeps the run projection usable when its resource read is unavailable, while `SettingsWidget` hides the resource toggle when the optional runtime route is absent.
 The Windows health probe no longer shuts down its request side before reading the response, because that half-close made the real Axum listener return an empty response even though curl and PowerShell succeeded.
 The fake listener now answers after the HTTP header terminator, and a real `cargo run -p farseer-shell` attached to the live daemon and served its canvas after the fix.
+
+## Status correction, 2026-09-06
+
+The authenticated owner identity now carries Windows process creation time beside the PID.
+The shell compares the `(pid, creation_time)` pair when both sides can query it and deliberately makes no PID-only decision for legacy records or unavailable OS queries.
+Focused shell coverage proves creation-time mismatch rejection and the no-PID-only fallback, and the workspace gate passes outside the restricted Windows ACL sandbox.

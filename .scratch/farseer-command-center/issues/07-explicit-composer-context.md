@@ -6,7 +6,7 @@
 
 **Blocked by:** None; package approved.
 
-**Status:** in-progress.
+**Status:** complete.
 
 **Execution:** package approved; verify named blockers before implementation.
 
@@ -35,4 +35,4 @@ The composer exposes accessible face, project, conversation, task, and manager-r
 `ui/src/SandboxWidget.tsx` stamps the same snapshot at the host bridge boundary, while hover remains inert.
 `crates/farseer-api/src/lib.rs` rejects contradictory body and anchor identifiers before creating conversations, tasks, or runs.
 `ui/tests/composer-context.test.ts` covers immutable capture and stale optional-anchor fields, and `a_contradictory_operator_anchor_is_refused_before_creating_work` proves the public refusal path leaves the store unchanged.
-Automated browser interaction coverage remains open because the UI test harness has no browser renderer.
+The 2026-09-06 browser smoke selected Work, pinned the farseer project, retained an explicit `pi` manager choice, and showed the project, conversation, task, and manager context in the composer while privacy kept paths and identifiers masked.

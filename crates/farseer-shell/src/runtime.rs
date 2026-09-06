@@ -25,6 +25,8 @@ pub struct Runtime {
     pub features: Vec<String>,
     #[serde(default)]
     pub process_id: Option<u32>,
+    #[serde(default)]
+    pub process_creation_time: Option<u64>,
 }
 
 /// The daemon this shell is talking to.
@@ -123,10 +125,7 @@ fn wait_for_startup(
                 }
                 match verify_classified(&runtime, expected_data_dir) {
                     Ok(runtime) => {
-                        if runtime
-                            .process_id
-                            .is_some_and(|process_id| process_id != child.id())
-                        {
+                        if runtime_identity_differs_from_child(&runtime, child.id()) {
                             // `01 verified startup` reaches this branch
                             // before the loser can admit work, so killing the
                             // launcher's own child cannot orphan a worker tree.
@@ -290,6 +289,13 @@ fn verify_classified(runtime: &Runtime, expected_data_dir: &str) -> Result<Runti
             "startup: runtime process identity mismatch"
         )));
     }
+    if let Some(process_creation_time) = runtime.process_creation_time
+        && health["process_creation_time"] != serde_json::json!(process_creation_time)
+    {
+        return Err(VerifyError::Incompatible(anyhow!(
+            "startup: runtime process creation identity mismatch"
+        )));
+    }
     if runtime.build_provenance != format!("farseer-api/{}", env!("CARGO_PKG_VERSION")) {
         return Err(VerifyError::Incompatible(anyhow!(
             "startup: incompatible runtime build {}",
@@ -317,6 +323,20 @@ fn verify_classified(runtime: &Runtime, expected_data_dir: &str) -> Result<Runti
         }
     }
     Ok(runtime.clone())
+}
+
+fn runtime_identity_differs_from_child(runtime: &Runtime, child_pid: u32) -> bool {
+    let (Some(runtime_pid), Some(runtime_creation_time), Some(child_creation_time)) = (
+        runtime.process_id,
+        runtime.process_creation_time,
+        farseer_api::security::process_creation_time(child_pid),
+    ) else {
+        // Older discovery records and platforms without an OS creation-time
+        // query cannot support a PID-only decision.  The authenticated health
+        // handshake remains the authority in that case.
+        return false;
+    };
+    runtime_pid != child_pid || runtime_creation_time != child_creation_time
 }
 
 fn same_identity(left: &Runtime, right: &Runtime) -> bool {
@@ -407,6 +427,7 @@ mod tests {
                 .map(|feature| (*feature).into())
                 .collect(),
             process_id: None,
+            process_creation_time: None,
         }
     }
 
@@ -448,6 +469,7 @@ mod tests {
             "build_provenance": runtime.build_provenance,
             "features": runtime.features,
             "process_id": runtime.process_id,
+            "process_creation_time": runtime.process_creation_time,
         })
     }
 
@@ -564,6 +586,27 @@ mod tests {
     }
 
     #[test]
+    fn process_creation_identity_is_checked_when_present() {
+        let mut runtime = runtime(0);
+        runtime.process_creation_time = Some(41);
+        let mut body = health_body(&runtime);
+        body["process_creation_time"] = serde_json::json!(42);
+        runtime.port = listener(200, body);
+        let error = verify(&runtime, "sha256:data").unwrap_err().to_string();
+        assert!(error.contains("process creation identity"), "{error}");
+    }
+
+    #[test]
+    fn startup_never_makes_a_pid_only_identity_decision() {
+        let mut runtime = runtime(0);
+        runtime.process_id = Some(std::process::id());
+        assert!(!runtime_identity_differs_from_child(
+            &runtime,
+            std::process::id()
+        ));
+    }
+
+    #[test]
     fn a_losing_launch_reuses_the_verified_owner_after_its_child_exits() {
         let expected = runtime(42);
         let mut attempts = 0;
@@ -605,6 +648,10 @@ mod tests {
     }
 
     fn command_shell(command: &str) -> Child {
+        // These are startup-observation fixtures, not supervised runtime
+        // processes.  The production daemon is supervised by the runner's Job
+        // Object; this helper only gives wait_for_startup a short-lived child
+        // whose exit and timeout can be asserted without a real daemon.
         let shell = std::env::var_os("ComSpec").unwrap_or_else(|| "cmd.exe".into());
         Command::new(shell)
             .args(["/C", command])

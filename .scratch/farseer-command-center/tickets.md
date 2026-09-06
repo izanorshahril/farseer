@@ -98,7 +98,6 @@ Widget recovery and isolation, Explicit composer context, Responsive canvas layo
 Terminal profiles, Bounded maintenance source proposals, Safe staged runtime promotion, Noncoding artifact-manifest pipeline, and Optional supervised resource monitor had no implementation in that historical snapshot.
 Next in that historical snapshot was to finish the in-progress operator, session, routing, and team slices before starting terminal, maintenance, promotion, manifest, or resource work.
 
-
 ## Status clarification, 2026-09-06
 
 Approval is complete; earlier proposal and execution-gate wording is historical.
@@ -189,3 +188,14 @@ The remaining item is one browser failure/recovery demonstration that proves the
 ## Status correction, 2026-09-06 implementation wave 13
 
 Widget recovery is complete: a development-only render probe, live browser boundary state, and a concurrent maintenance proposal proved localized failure, sibling interactivity, and continued durable work recording.
+
+## Status clarification, 2026-09-06 implementation wave 14
+
+The Explicit composer context, Responsive canvas layout, Privacy presentation mode, and Focused workspace tickets now have recorded browser acceptance evidence and are complete.
+Widget recovery now has a bridge-level malformed JSON and localized 404 regression in addition to its render, stream, and runtime-continuity evidence.
+Project team profiles now have a deterministic public-ingress regression that records two nominated specialist calls, shared task usage, graph topology, and matching global/project board projections.
+
+## Status clarification, 2026-09-06 implementation wave 15
+
+The startup identity correction now pairs the owner PID with Windows process creation time and tests the legacy no-PID-only fallback.
+The shared stream regression now proves custom subscriber state survives the shared connection while the global canvas state remains intact.

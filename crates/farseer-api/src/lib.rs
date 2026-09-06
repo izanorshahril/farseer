@@ -881,6 +881,7 @@ pub async fn serve(state: Arc<AppState>, port: u16) -> std::io::Result<()> {
             .map(|feature| (*feature).into())
             .collect(),
         process_id: Some(std::process::id()),
+        process_creation_time: security::process_creation_time(std::process::id()),
     };
     security::write_runtime_file_with_identity(
         &runtime_file_path(),
@@ -1040,6 +1041,7 @@ async fn health(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
         "build_provenance": format!("farseer-api/{}", env!("CARGO_PKG_VERSION")),
         "features": RUNTIME_FEATURES,
         "process_id": std::process::id(),
+        "process_creation_time": security::process_creation_time(std::process::id()),
         "lifecycle": state.runtime_status(),
     }))
 }
@@ -4334,6 +4336,269 @@ runner = "farseer-test-missing-runner"
             run_count_after_second
         );
         assert_eq!(call_count_after, call_count + 1);
+    }
+
+    /// `14 project teams`, `12 attributed usage`, and `04 scoped graph`: drive
+    /// the public operator ingress with a disposable pi face, let that manager
+    /// call both nominated specialists, and read the same task through the
+    /// detail, graph, and global/project board projections.
+    ///
+    /// The fake face is a `.cmd` shim rather than a direct test hook. That keeps
+    /// this proof at the same PATHEXT-aware executable boundary as a real run,
+    /// while the HTTP calls still cross the bound router and authenticate with
+    /// the manager capability that farseer injected into the environment.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_top_manager_routes_a_project_team_through_public_ingress() {
+        static PATH_LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
+        let _path_lock = PATH_LOCK
+            .get_or_init(|| tokio::sync::Mutex::new(()))
+            .lock()
+            .await;
+
+        const CELL_WITH_TEAM: &str = r#"
+cell_id = "zero"
+name = "Cell Zero"
+workspace_strategy = "plain_directory"
+
+[manager]
+runner = "pi"
+
+[[roster]]
+kind = "tool"
+name = "shell"
+irreversibility = "reversible"
+grants_shell = true
+
+[[roster]]
+kind = "cell"
+name = "social"
+cell_id = "social"
+max_autonomy_ceiling = "reversible"
+
+[[roster]]
+kind = "cell"
+name = "abroad"
+cell_id = "abroad"
+max_autonomy_ceiling = "reversible"
+
+[[roster]]
+kind = "cell"
+name = "other"
+cell_id = "other"
+max_autonomy_ceiling = "reversible"
+"#;
+        const SPECIALIST: &str = r#"
+cell_id = "social"
+name = "Specialist"
+workspace_strategy = "plain_directory"
+
+[manager]
+runner = "pi"
+
+[[roster]]
+kind = "tool"
+name = "shell"
+irreversibility = "reversible"
+grants_shell = true
+"#;
+
+        let h = harness_with_cells(&[
+            ("zero", CELL_WITH_TEAM),
+            ("social", SPECIALIST),
+            ("abroad", &SPECIALIST.replace("social", "abroad")),
+            ("other", &SPECIALIST.replace("social", "other")),
+        ]);
+        std::fs::create_dir_all(h._repo.path().join("extensions/pi")).unwrap();
+        std::fs::write(
+            h._repo.path().join("extensions/pi/farseer-delegate.ts"),
+            "// disposable delegation extension marker\n",
+        )
+        .unwrap();
+
+        let fake = tempfile::tempdir().unwrap();
+        std::fs::write(
+            fake.path().join("pi.cmd"),
+            "@echo off\r\npowershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File \"%~dp0fake-pi.ps1\"\r\n",
+        )
+        .unwrap();
+        std::fs::write(
+            fake.path().join("fake-pi.ps1"),
+            r#"$headers = @{ Authorization = "Bearer $env:FARSEER_MANAGER_TOKEN" }
+$body = @{ manager_run_id = $env:FARSEER_MANAGER_RUN_ID; manager_token = $env:FARSEER_MANAGER_TOKEN; goal = "fixture specialist call" }
+foreach ($cell in @("social", "abroad")) {
+  $body.cell = $cell
+  try {
+    Invoke-RestMethod -Method Post -Uri "$env:FARSEER_ENDPOINT/v1/manager/delegate/cell" -Headers $headers -ContentType "application/json" -Body ($body | ConvertTo-Json -Compress) | Out-Null
+  } catch {}
+}
+Write-Output '{"type":"response","command":"get_state","success":true,"data":{"model":{"id":"fixture-model","name":"Fixture","provider":"fixture","contextWindow":1000},"thinkingLevel":"low","isStreaming":false,"sessionId":"fixture-session","messageCount":0}}'
+Write-Output '{"type":"agent_end","messages":[{"role":"assistant","content":[{"type":"text","text":"fixture manager finished"}],"usage":{"input":5,"output":6,"cacheRead":0,"cacheWrite":0,"reasoning":0,"totalTokens":11,"cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"total":0.000001}},"stopReason":"stop"}],"willRetry":false}'
+"#,
+        )
+        .unwrap();
+        let old_path = std::env::var_os("PATH");
+        let mut path = fake.path().display().to_string();
+        if let Some(old) = old_path.as_ref() {
+            path.push(';');
+            path.push_str(&old.to_string_lossy());
+        }
+        // Rust 2024 makes process-environment mutation explicitly unsafe; the
+        // lock above keeps this test from racing another resolver in the suite,
+        // and the guard below restores the exact prior value on every exit.
+        unsafe { std::env::set_var("PATH", path) };
+        struct RestorePath(Option<std::ffi::OsString>);
+        impl Drop for RestorePath {
+            fn drop(&mut self) {
+                match self.0.take() {
+                    Some(path) => unsafe { std::env::set_var("PATH", path) },
+                    None => unsafe { std::env::remove_var("PATH") },
+                }
+            }
+        }
+        let _restore_path = RestorePath(old_path);
+
+        let root = tempfile::tempdir().unwrap();
+        let project = root.path().join("project");
+        std::fs::create_dir(&project).unwrap();
+        std::fs::create_dir(project.join(".farseer")).unwrap();
+        let project = std::fs::canonicalize(project).unwrap();
+        h.state
+            .store()
+            .authorize_root(&projects::display(&root.path().canonicalize().unwrap()), 0)
+            .unwrap();
+        std::fs::write(
+            project.join(project_profiles::PROFILE_PATH),
+            format!(
+                "version = 1\nproject_path = {:?}\ncoordinating_cell = \"zero\"\nspecialist_cells = [\"social\", \"abroad\"]\n",
+                projects::display(&project)
+            ),
+        )
+        .unwrap();
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        h.state.set_mcp_endpoint(port);
+        let router = h.router.clone();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, router).await.unwrap();
+        });
+
+        let (status, accepted) = h
+            .post(
+                "/v1/cells/zero/instruct",
+                json!({
+                    "goal": "coordinate the two project specialists",
+                    "project": project.display().to_string(),
+                }),
+            )
+            .await;
+        assert_eq!(status, StatusCode::ACCEPTED, "{accepted}");
+        let root_run = accepted["run_id"].as_str().unwrap().to_owned();
+        let task_id = accepted["task_id"].as_str().unwrap().to_owned();
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+        let (mut child_runs, mut calls): (Vec<String>, Vec<serde_json::Value>) =
+            (Vec::new(), Vec::new());
+        while calls.len() < 2 {
+            let events = h
+                .state
+                .store()
+                .scan(0, 5_000, &ScanFilter::default())
+                .unwrap();
+            calls = events
+                .iter()
+                .filter(|event| {
+                    event.run_id.to_string() == root_run
+                        && event.kind == EventKind::CELL_CALLED.into()
+                })
+                .map(|event| event.payload.clone())
+                .collect();
+            child_runs = calls
+                .iter()
+                .filter_map(|payload| payload["callee_run_id"].as_str())
+                .map(str::to_owned)
+                .collect();
+            if calls.len() < 2 {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "specialist calls were not recorded"
+                );
+                tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+            }
+        }
+        assert_eq!(calls[0]["project_specialists"], json!(["social", "abroad"]));
+        assert_eq!(calls[1]["project_specialists"], json!(["social", "abroad"]));
+        assert_eq!(calls[0]["call"]["autonomy_ceiling"], "reversible");
+        assert_eq!(calls[1]["call"]["autonomy_ceiling"], "reversible");
+        assert_eq!(child_runs.len(), 2);
+
+        let root_row = h
+            .wait_for_finished(&root_run, std::time::Duration::from_secs(15))
+            .await;
+        assert_eq!(root_row["outcome"], "ok");
+        for child_run in &child_runs {
+            let row = h
+                .wait_for_finished(child_run, std::time::Duration::from_secs(15))
+                .await;
+            assert_eq!(row["outcome"], "ok", "child {child_run}: {row}");
+            assert_eq!(row["task_id"], task_id);
+            assert_eq!(row["tokens"], 11);
+        }
+
+        let (status, detail) = h.get(&format!("/v1/tasks/{task_id}")).await;
+        assert_eq!(status, StatusCode::OK, "{detail}");
+        assert_eq!(detail["usage"]["runs"], 3);
+        assert_eq!(detail["usage"]["tokens"], 33);
+        assert_eq!(detail["runs"].as_array().unwrap().len(), 3);
+
+        let (status, graph) = h
+            .get(&format!(
+                "/v1/work/graph?project={}",
+                projects::display(&project)
+            ))
+            .await;
+        assert_eq!(status, StatusCode::OK, "{graph}");
+        assert!(
+            graph["nodes"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|node| { node["kind"] == "task" && node["target"] == task_id })
+        );
+        assert!(
+            graph["observed_edges"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|edge| edge["kind"] == "cell_call"),
+            "graph should expose the observed cell-call edge: {graph}"
+        );
+
+        let (status, global) = h.get("/v1/tasks/page?limit=10").await;
+        assert_eq!(status, StatusCode::OK, "{global}");
+        let (status, scoped) = h
+            .get(&format!(
+                "/v1/tasks/page?project={}&limit=10",
+                projects::display(&project)
+            ))
+            .await;
+        assert_eq!(status, StatusCode::OK, "{scoped}");
+        let global_task = global["tasks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["task_id"] == task_id)
+            .expect("global board contains the public-ingress task");
+        let scoped_task = scoped["tasks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["task_id"] == task_id)
+            .expect("project board contains the same task");
+        for field in ["task_id", "project_path", "state", "run_summary"] {
+            assert_eq!(global_task[field], scoped_task[field], "field {field}");
+        }
+        server.abort();
     }
 
     #[tokio::test]

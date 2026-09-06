@@ -6,7 +6,7 @@
 
 **Blocked by:** None; package approved.
 
-**Status:** in-progress.
+**Status:** complete.
 
 **Execution:** package approved; verify named blockers before implementation.
 
@@ -33,7 +33,9 @@ Sealed skill paths in the Run contract use an explicit path reveal instead of ra
 The Run widget now exposes an export-report control that copies a bounded JSON presentation through the same masking helper.
 The notification plane now correlates finished events by record sequence, maps unknown outcomes to a fixed generic state, and never exports a run/session identifier to an external sink.
 `ui/tests/privacy.test.ts` covers masked and authorized copy/export while preserving the source value, and `crates/farseer-api/src/notify.rs` covers notification redaction and record-sequence correlation.
-The 2026-09-06 browser smoke showed masked provider accounts in Capacity with privacy enabled; the source tests cover copy/export authorization, and the notification test covers the external sink representation.
+The 2026-09-06 browser smoke mounted every first-party and authored widget with privacy enabled and showed all five provider accounts as masked.
+Revealing one account reduced the masked count by one, disabling privacy unmasked the accounts, and re-enabling privacy restored all five masks.
+The source tests cover copy/export authorization, and the notification test covers the external sink representation.
 
 **Exclusions:** No encryption redesign, credential rotation, irreversible scrubbing, or privacy inference from arbitrary event payloads.
 

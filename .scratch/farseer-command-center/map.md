@@ -118,3 +118,15 @@ The remaining item is one browser failure/recovery demonstration that proves the
 ## Status correction, 2026-09-06 implementation wave 13
 
 Widget recovery is complete: a development-only render probe, live browser boundary state, and a concurrent maintenance proposal proved localized failure, sibling interactivity, and continued durable work recording.
+
+## Status correction, 2026-09-06 implementation wave 14
+
+The explicit composer, responsive canvas, privacy presentation, and focused workspace tickets now carry browser acceptance evidence at the App boundary.
+The browser smoke covered explicit project and runner context, narrow/common/wide graph and composer layouts, reversible privacy reveal and re-masking, and focused Work navigation with Back restoration.
+Widget recovery now has a bridge-level malformed JSON and localized 404 regression in addition to the render probe and stream recovery tests.
+The project-team slice now has a deterministic public-ingress regression using a disposable PATHEXT-resolved pi shim: one top-manager instruction created one task, two nominated specialist cell calls, shared task usage, a scoped graph cell-call edge, and matching global/project board rows.
+
+## Status correction, 2026-09-06 implementation wave 15
+
+Startup owner identity now uses the Windows `(pid, process_creation_time)` pair when the OS can provide it, with an explicit no-PID-only fallback for legacy records.
+The shared UI stream preserves the first connection's retry seam and delivers per-subscriber state without dropping the global canvas state.

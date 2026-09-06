@@ -76,18 +76,23 @@ export function follow(
   if (options.since === undefined) {
     if (!shared) {
       const subscribers = new Set<(event: RecordEvent) => void>();
+      // The shared socket has one retry policy.  Preserve the first
+      // subscriber's deterministic retry delay, while global state remains
+      // visible to every canvas listener.
       const connection = connect((event) => {
         // A copy, so a subscriber unsubscribing inside its own handler does not
         // mutate the set being iterated.
         for (const subscriber of [...subscribers]) subscriber(event);
-      }, {});
+      }, { ...options, onState: setStreamState });
       shared = { subscribers, stop: connection.close };
     }
     const here = shared;
     here.subscribers.add(onEvent);
+    const removeState = options.onState ? onStreamState(options.onState) : undefined;
     return {
       close: () => {
         here.subscribers.delete(onEvent);
+        removeState?.();
         // The last widget to unmount closes the connection, so a page with no
         // live widgets holds no socket.
         if (here.subscribers.size === 0 && shared === here) {

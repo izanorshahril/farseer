@@ -6,7 +6,7 @@
 
 **Blocked by:** [Widget recovery and isolation](06-widget-recovery.md), [Explicit composer context](07-explicit-composer-context.md), [Responsive canvas layout](08-responsive-canvas.md)
 
-**Status:** in-progress.
+**Status:** complete.
 
 **Execution:** package approved; verify named blockers before implementation.
 
@@ -28,7 +28,7 @@ No docking library is required.
 **Evidence:** `ui/src/App.tsx` gives each face the same focus action, persists focus, pane, comparison state, and the originating subject/anchor in the canvas document, restores the subject and focus button after restart, restores focus on Back or Escape, masks inspector identities, and clears stale focused faces.
 `ui/src/layout.ts` validates the persisted focus origin, and `ui/tests/layout.test.ts` covers its round trip.
 `ui/src/style.css` hides inactive faces from the accessibility tree through layout removal and supplies responsive navigation and reduced-motion behavior.
-Browser-level focus restoration demos remain open.
+The 2026-09-06 browser smoke opened Work through its shared focus action, exposed `Back to canvas`, returned to the canvas, and restored the Work focus action for the originating face.
 
 **Exclusions:** No arbitrary nested docking layout, terminal pane as runtime truth, or widget-owned agents.
 

@@ -173,6 +173,39 @@ pub struct RuntimeIdentity {
     /// an unrelated process.  Optional for records written by older runtimes.
     #[serde(default)]
     pub process_id: Option<u32>,
+    /// Windows process creation time, paired with `process_id` so a recycled
+    /// PID can never authenticate as the same runtime.  Optional for records
+    /// written by older runtimes and non-Windows builds.
+    #[serde(default)]
+    pub process_creation_time: Option<u64>,
+}
+
+/// Return the OS creation timestamp for a process identity.
+///
+/// `01 verified startup` requires `(pid, creation_time)` rather than a PID
+/// alone because Windows recycles process IDs.  Failure is represented as
+/// `None`; callers must then avoid making a PID-only decision.
+#[cfg(windows)]
+pub fn process_creation_time(pid: u32) -> Option<u64> {
+    use windows::Win32::Foundation::FILETIME;
+    use windows::Win32::System::Threading::{
+        GetProcessTimes, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+    };
+
+    let process = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid).ok()? };
+    let mut creation = FILETIME::default();
+    let mut exit = FILETIME::default();
+    let mut kernel = FILETIME::default();
+    let mut user = FILETIME::default();
+    unsafe {
+        GetProcessTimes(process, &mut creation, &mut exit, &mut kernel, &mut user).ok()?;
+    }
+    Some((u64::from(creation.dwHighDateTime) << 32) | u64::from(creation.dwLowDateTime))
+}
+
+#[cfg(not(windows))]
+pub fn process_creation_time(_pid: u32) -> Option<u64> {
+    None
 }
 
 pub fn write_runtime_file_with_identity(

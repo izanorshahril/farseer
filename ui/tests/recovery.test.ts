@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { readFailureIncident, readFailureStatus } from "../src/ReadFailure";
+import { createBridge } from "../src/bridge";
 import { follow, onStreamState, type RecordEvent } from "../src/stream";
 import { WidgetBoundary } from "../src/WidgetBoundary";
 
@@ -32,6 +33,39 @@ describe("widget recovery", () => {
     expect(incident).toMatch(/^read-project-roots-/);
     expect(incident).not.toContain("secret");
     expect(incident).not.toContain("hidden");
+  });
+
+  test("localizes widget 404 and malformed JSON reads", async () => {
+    const original = globalThis.fetch;
+    let calls = 0;
+    try {
+      globalThis.fetch = (async () => {
+        calls += 1;
+        if (calls === 1) return new Response("{not-json", { status: 200 });
+        return new Response("{\"error\":\"C:\\\\Users\\secret\"}", { status: 404 });
+      }) as typeof fetch;
+      const bridge = createBridge();
+
+      let malformed: unknown;
+      try {
+        await bridge.read("/projects");
+      } catch (error) {
+        malformed = error;
+      }
+      expect(readFailureStatus(malformed)).toBe("unknown");
+      expect(readFailureIncident("projects", malformed)).not.toContain("secret");
+
+      let missing: unknown;
+      try {
+        await bridge.read("/projects?path=C:\\\\Users\\secret");
+      } catch (error) {
+        missing = error;
+      }
+      expect(readFailureStatus(missing)).toBe("404");
+      expect(readFailureIncident("projects", missing)).not.toContain("secret");
+    } finally {
+      globalThis.fetch = original;
+    }
   });
 
   test("drops replayed stream frames at the cursor seam", async () => {
@@ -221,13 +255,17 @@ data: ${JSON.stringify(event(8))}
       }) as typeof fetch;
       let sharedLive!: () => void;
       const live = new Promise<void>((resolve) => { sharedLive = resolve; });
+      const sharedSubscriberStates: string[] = [];
       removeSharedState();
       sharedStates.length = 0;
       removeObservedShared = onStreamState((state) => {
         sharedStates.push(state);
         if (state === "live") sharedLive();
       });
-      sharedSubscription = follow(() => {});
+      sharedSubscription = follow(() => {}, {
+        onState: (state) => sharedSubscriberStates.push(state),
+        reconnectDelayMs: 0,
+      });
       await live;
       cursorSubscription = follow(() => {}, {
         since: 8,
@@ -237,6 +275,7 @@ data: ${JSON.stringify(event(8))}
       await new Promise((resolve) => setTimeout(resolve, 25));
       expect(cursorStates).toContain("stale");
       expect(sharedStates).toEqual(["connecting", "live"]);
+      expect(sharedSubscriberStates).toEqual(["connecting", "live"]);
     } finally {
       cursorSubscription?.close();
       sharedSubscription?.close();

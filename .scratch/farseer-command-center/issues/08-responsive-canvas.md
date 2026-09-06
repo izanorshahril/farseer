@@ -6,7 +6,7 @@
 
 **Blocked by:** None; package approved.
 
-**Status:** in-progress.
+**Status:** complete.
 
 **Execution:** package approved; verify named blockers before implementation.
 
@@ -28,7 +28,9 @@ Keep layout state opaque to the runtime.
 `ui/src/layout.ts` and `ui/src/App.tsx` persist order, spans, unit metrics, sidebar state, and focused presentation state through the existing canvas blob.
 Browser-level viewport and keyboard demos remain open.
 The 2026-09-06 browser smoke at the supported narrow desktop viewport moved Work with its keyboard grip, resized it with the accessible size control, restored focus after Escape from the focused workspace, and recovered the empty canvas by showing Work again; the stylesheet continues to honor `prefers-reduced-motion`.
-The earlier line stating that browser demos remained open is superseded by this smoke record.
+At 867x912, Work stayed within the viewport at 829x452 with the graph selected and the composer visible, and the 2x2 span survived a reload without horizontal overflow.
+At 1024x720 and 1440x900, the same graph, composer, and 2x2 span remained visible with no horizontal overflow; Work measured 612x452 in both layouts.
+These three viewport checks supersede the earlier line stating that browser demos remained open.
 
 **Exclusions:** No freeform overlapping canvas, docking framework, second top-level application mode, or runtime layout parsing.
 
