@@ -26,7 +26,7 @@ Use event replay as the reliable fallback when harness logs are absent.
 
 **Evidence:** The API exposes a bounded `/v1/work/sessions` projection, the Work widget has a paged Sessions face, and task detail includes session and transcript-projection references.
 The additive `/v1/work/search/page` route now returns bounded scrubbed excerpts, source digests, projection versions, and cursors.
-Search pagination filters in SQLite before applying the offset, so non-matching projections cannot consume a page and hide later matches.
+Search pagination filters in SQLite before applying the offset, and advances by rows actually emitted when the byte cap ends a page, so non-matching or truncated projections cannot hide later matches.
 The public session-page regression test now proves bounded paging, provider identifier kind, runner/model facts, distinct referenced, rotated, and unavailable log pointers across protocol-shaped sessions, and project/conversation/task/run filters.
 The two-protocol restart demo and a dedicated search face remain open.
 

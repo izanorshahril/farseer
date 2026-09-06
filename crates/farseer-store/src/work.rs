@@ -1318,14 +1318,16 @@ impl Store {
                 )?
                 .collect::<std::result::Result<Vec<_>, _>>()?
         };
-        let has_more = rows.len() > limit;
+        let row_count = rows.len();
         let mut documents = Vec::with_capacity(rows.len().min(limit));
         let mut used = 0usize;
+        let mut consumed = 0usize;
         for (digest, projection) in rows.into_iter().take(limit) {
             let remaining = byte_limit.saturating_sub(used);
             if remaining == 0 {
                 break;
             }
+            consumed += 1;
             let bytes = self.conn().query_row(
                 "SELECT substr(CAST(body AS BLOB), 1, ?2) FROM transcript_index WHERE digest = ?1",
                 rusqlite::params![digest, remaining.min(i64::MAX as usize) as i64],
@@ -1339,7 +1341,8 @@ impl Store {
                 projection_version: projection,
             });
         }
-        Ok((documents, has_more.then_some(offset + limit)))
+        let has_unread_rows = row_count > consumed;
+        Ok((documents, has_unread_rows.then_some(offset + consumed)))
     }
 
     /// Commit one projection and its edges only if its attachment is still the
@@ -1845,6 +1848,29 @@ mod tests {
             .indexed_transcript_search_page("needle", 1, 1, 64)
             .unwrap();
         assert_eq!(rows[0].digest, "c");
+        assert_eq!(next, None);
+    }
+
+    #[test]
+    fn transcript_search_cursor_advances_by_rows_emitted_under_byte_cap() {
+        let store = Store::open_in_memory().unwrap();
+        for (digest, body) in [("a", "needle alpha"), ("b", "needle beta")] {
+            store
+                .index_transcript(digest, body, "redact-v1", "hash-tf-v1")
+                .unwrap();
+        }
+        let (rows, next) = store
+            .indexed_transcript_search_page("needle", 2, 0, 5)
+            .unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].digest, "a");
+        assert_eq!(next, Some(1));
+
+        let (rows, next) = store
+            .indexed_transcript_search_page("needle", 2, next.unwrap(), 5)
+            .unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].digest, "b");
         assert_eq!(next, None);
     }
 

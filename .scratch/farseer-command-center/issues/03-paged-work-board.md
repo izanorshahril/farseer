@@ -23,7 +23,7 @@ Use additive paged reads with the selected limits and scope-bound keyset cursors
 - [x] Board reads are cursor or page bounded, return stable ordering and continuation metadata, and never request all history by default.
 - [x] Existing command transitions still validate allowed state changes and record actor/reason; paging and refresh cannot overwrite a more recently selected task.
 - [x] A task with several sequential or concurrent runs remains one board card with visible run summary.
-- [ ] Empty, loading, stale, and failed reads have compact structured states with retry while preserving the last good projection.
+- [x] Empty, loading, stale, and failed reads have compact structured states with retry while preserving the last good projection.
 
 **Exclusions:** No independent per-project task store, task deletion, inferred task state from process liveness, or graph rendering.
 
@@ -36,4 +36,5 @@ The additive `/v1/tasks/page` endpoint defaults to 100 rows, caps at 500, uses a
 Each card now includes an additive `run_summary` with total runs, active runs, and the latest terminal outcome, so repeated and delegated runs remain one task card.
 The store verifies that a task has identical facts in global and project projections, and the API fixture verifies the same contract through global and project routes.
 The API also verifies bounded continuation, scope-bound cursor refusal, transition provenance, and parent/child run summaries.
+The Work board now preserves its last projection while refreshing, distinguishes initial loading and empty states, and only labels a failed read stale when a prior projection exists.
 Store, API, and UI focused checks pass.

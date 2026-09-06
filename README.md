@@ -53,6 +53,7 @@ graph TD
   M0 --> REC[(append-only record SQLite)]
   MS --> REC
   REC -->|live record and saved layout| UI
+  REC -->|bounded work, session and search projections| UI
   UI -.->|attach, any depth| W0
   UI -.->|attach| WS
   UI -.->|optional terminal sessions| TERM[PowerShell, cmd, Git Bash]
@@ -97,7 +98,7 @@ An external protocol is spoken at a boundary, never shaped into internals.
 │  ├─ src/selection.ts shared conversation, task, run, project and manager-runner context
 │  ├─ src/project.ts   which project work goes to, remembered across restarts
 │  ├─ src/widgets/     Work, Conversation, Fleet and Capacity defaults plus optional operational views
-│  ├─ tests/           focused behavior checks for the canvas layout contract
+│  ├─ tests/           focused behavior checks for layout, privacy, recovery and composer context
 │  ├─ plugins/         the widget host: gate 1's keep-or-undo and gate 2's import allowlist
 │  └─ scripts/         compiles agent widgets into the build, so the desktop app has them too
 ├─ widgets/            agent-authored widgets, in git, compiled and sandboxed by the canvas
@@ -219,8 +220,10 @@ Binds `127.0.0.1` only, opens the record, loads the definitions, and writes its 
 | `GET /v1/cells/states` | every cell that is not simply active |
 | `GET /v1/conversations`, `POST /v1/conversations` | list durable conversations or create one |
 | `GET /v1/tasks`, `/v1/tasks/{id}`, `POST /v1/tasks/{id}/transition` | read tasks and record validated lifecycle transitions with actor and reason |
+| `GET /v1/tasks/page` | bounded global or project kanban cards with scope-bound continuation and per-task run summaries |
 | `POST /v1/artifacts/manifests` | run a local authorized-directory manifest job with sorted SHA-256 entries and staged completion |
 | `GET /v1/work/graph`, `/v1/work/search` | query durable work edges and scrubbed transcript projections |
+| `GET /v1/work/sessions`, `/v1/work/search/page` | page harness sessions by project, conversation, task or run and search scrubbed transcript excerpts with source metadata |
 | `GET`/`POST /v1/runs/{id}/transcripts` | read or add transcript custody metadata and derived text |
 | `GET /v1/runs/{id}/control` | read the current attach control state |
 | `POST /v1/runs/{id}/{observe,take-over,release,heartbeat,intervene}` | manage the run's operator lease and record intervention provenance |
@@ -228,6 +231,7 @@ Binds `127.0.0.1` only, opens the record, loads the definitions, and writes its 
 | `POST /a2a` | the A2A JSON-RPC face for a foreign orchestrator: `message/send`, `tasks/get`, `tasks/cancel`. Authenticated by a bearer **per peer**, each bound to one cell, so the caller's identity is derived from auth rather than asserted. `tasks/resubscribe` answers `501` and says why - A2A's subscription cannot express `16`'s cursored replay |
 | `GET`/`PUT /v1/ui-state/{key}` | an opaque blob farseer never parses, so a canvas survives a restart. `canvas` holds the widget arrangement and `window` the desktop window's own size and position. `413` above 1 MiB |
 | `GET /v1/projects`, `POST /v1/projects`, `POST`/`DELETE /v1/projects/roots` | manage authorized project roots and project projections |
+| `GET /v1/projects/profile` | validate a project profile against authorized paths and loaded cells, including manager and specialist roster details |
 | `GET`/`POST /v1/terminals`, `GET`/`DELETE /v1/terminals/{id}` | open, reconnect, inspect, input, resize and explicitly end optional PowerShell, cmd or Git Bash sessions |
 | `GET /v1/analytics/{cost,intervention,rework,lessons}` | the four questions from [11 analytics questions](.scratch/farseer/issues/11-analytics-questions.md) |
 | `/v1/mcp` | the streamable-HTTP MCP face nested into this router and guard; all four tools - `read_memory`, `write_memory`, `delegate_to_worker` and `delegate_to_cell` - derive identity from an active manager capability, and no raw event append exists because "an agent that can forge events can rewrite its own history" |

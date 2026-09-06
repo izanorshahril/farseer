@@ -89,6 +89,7 @@ export function WorkWidget({ bridge }: { bridge: Bridge }) {
   const [face, setFace] = useState<Face>("board");
   const [expanded, setExpanded] = useState(false);
   const [tasks, setTasks] = useState<BoardTask[]>([]);
+  const [loading, setLoading] = useState(true);
   const [nextCursor, setNextCursor] = useState<string | undefined>();
   const [loadingMore, setLoadingMore] = useState(false);
   const loadVersion = useRef(0);
@@ -117,22 +118,27 @@ export function WorkWidget({ bridge }: { bridge: Bridge }) {
     const version = ++loadVersion.current;
     const params = new URLSearchParams({ limit: "100" });
     if (projectScope) params.set("project", projectScope);
-    const [nextTasks, nextConversations, cell] = await Promise.all([
-      bridge.read<TaskPage>(`/tasks/page?${params}`),
-      bridge.read<Conversation[]>("/conversations?limit=500"),
-      bridge.read<Cell>("/cells/zero"),
-    ]);
-    if (version !== loadVersion.current) return;
-    setTasks(nextTasks.tasks);
-    setNextCursor(nextTasks.next_cursor);
-    setConversations(nextConversations);
-    setRunners(cell.manager.runners);
-    const selectedTask = selectedSubject().task;
-    if (selectedTask) {
-      const selected = await bridge.read<TaskDetail>(`/tasks/${selectedTask}`);
-      if (version === loadVersion.current && selectedSubject().task === selectedTask) setDetail(selected);
+    setLoading(true);
+    try {
+      const [nextTasks, nextConversations, cell] = await Promise.all([
+        bridge.read<TaskPage>(`/tasks/page?${params}`),
+        bridge.read<Conversation[]>("/conversations?limit=500"),
+        bridge.read<Cell>("/cells/zero"),
+      ]);
+      if (version !== loadVersion.current) return;
+      setTasks(nextTasks.tasks);
+      setNextCursor(nextTasks.next_cursor);
+      setConversations(nextConversations);
+      setRunners(cell.manager.runners);
+      const selectedTask = selectedSubject().task;
+      if (selectedTask) {
+        const selected = await bridge.read<TaskDetail>(`/tasks/${selectedTask}`);
+        if (version === loadVersion.current && selectedSubject().task === selectedTask) setDetail(selected);
+      }
+      setError(null);
+    } finally {
+      if (version === loadVersion.current) setLoading(false);
     }
-    setError(null);
   }, [bridge, projectScope]);
 
   const loadMore = async () => {
@@ -351,7 +357,7 @@ export function WorkWidget({ bridge }: { bridge: Bridge }) {
       {error && <ReadFailure
         capability={`work ${face}`}
         error={error}
-        stale
+        stale={tasks.length > 0}
         onRetry={() => {
           if (face === "graph") void loadGraph().catch(() => undefined);
           else if (face === "sessions") void loadSessions().catch(() => undefined);
@@ -362,20 +368,22 @@ export function WorkWidget({ bridge }: { bridge: Bridge }) {
 
       {face === "board" && (
         <>
-          <div className="work-board">
-            {STATES.filter((state) => state !== "done" && state !== "cancelled").map((state) => (
-              <section key={state} className="work-column" aria-label={stateLabel(state)}>
-                <h4>{stateLabel(state)} <span>{grouped[state].length}</span></h4>
-                {grouped[state].map((task) => (
-                  <button key={task.task_id} className={subject.task === task.task_id ? "work-card selected" : "work-card"} onClick={() => chooseTask(task)}>
-                    <b>{task.title}</b>
-                    <small>{task.project_path ? mask(task.project_path, "path", privacy) : "fleet"}</small>
-                    <small>{task.run_summary.run_count} run{task.run_summary.run_count === 1 ? "" : "s"} · {task.run_summary.active_runs} active · {task.run_summary.latest_outcome ?? "pending"}</small>
-                  </button>
-                ))}
-              </section>
-            ))}
-          </div>
+          {loading && tasks.length === 0 && <p className="empty">Loading bounded work...</p>}
+          {!loading && !error && tasks.length === 0 && <p className="empty">No work recorded.</p>}
+          {tasks.length > 0 && <div className="work-board">
+              {STATES.filter((state) => state !== "done" && state !== "cancelled").map((state) => (
+                <section key={state} className="work-column" aria-label={stateLabel(state)}>
+                  <h4>{stateLabel(state)} <span>{grouped[state].length}</span></h4>
+                  {grouped[state].map((task) => (
+                    <button key={task.task_id} className={subject.task === task.task_id ? "work-card selected" : "work-card"} onClick={() => chooseTask(task)}>
+                      <b>{task.title}</b>
+                      <small>{task.project_path ? mask(task.project_path, "path", privacy) : "fleet"}</small>
+                      <small>{task.run_summary.run_count} run{task.run_summary.run_count === 1 ? "" : "s"} · {task.run_summary.active_runs} active · {task.run_summary.latest_outcome ?? "pending"}</small>
+                    </button>
+                  ))}
+                </section>
+              ))}
+            </div>}
           {nextCursor && <button className="chip" onClick={() => loadMore().catch((failure: Error) => setError(failure.message))} disabled={loadingMore}>{loadingMore ? "loading..." : "load more"}</button>}
         </>
       )}
