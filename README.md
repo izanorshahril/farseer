@@ -225,6 +225,7 @@ Binds `127.0.0.1` only, opens the record, loads the definitions, and writes its 
 | `POST /v1/artifacts/manifests` | run a local authorized-directory manifest job with sorted SHA-256 entries and staged completion |
 | `GET`/`POST /v1/maintenance/proposals` | inspect or begin one deduplicated maintenance proposal, linked to an ordinary task |
 | `POST /v1/maintenance/proposals/{id}/evidence` | record one bounded candidate, reproducer, branch, and validation attempt as an ordinary artifact/run |
+| `POST /v1/maintenance/proposals/{id}/execute` | create one deterministic isolated candidate branch/worktree, reproducer, and local validation evidence |
 | `POST /v1/maintenance/proposals/{id}/cancel` | cancel a proposal and its linked task without promotion |
 | `GET /v1/work/graph`, `/v1/work/search` | query durable work edges and scrubbed transcript projections |
 | `GET /v1/work/sessions`, `/v1/work/session`, `/v1/work/search/page` | page harness sessions, open linked session detail, and search scrubbed transcript excerpts with source metadata |
@@ -338,6 +339,7 @@ cargo run --release --manifest-path .scratch/farseer/spikes/jobspike/Cargo.toml 
 
 Toolchain is `x86_64-pc-windows-msvc`, rustup stable, decided in [19 rust toolchain](.scratch/farseer/issues/19-rust-toolchain.md).
 
+Maintenance candidates are explicit and disposable: `POST /v1/maintenance/proposals/{id}/execute` leaves one deterministic branch/worktree and fixed local validation evidence without changing the active checkout.
 Fixture promotion is explicit and disposable: `farseer promote-fixture --root <root> --candidate <candidate> --backup <backup> --health --smoke` records drain, backup, activation, and health phases without replacing a live installation; `farseer rollback-fixture --root <root>` restores the previous journaled fixture.
 
 ## Where the decisions live

@@ -2,9 +2,12 @@
 //!
 //! `17 bounded maintenance source proposals` requires maintenance to use the
 //! ordinary task, run, and artifact projections rather than a second work
-//! engine.  This module owns only the explicit proposal/evidence boundary;
-//! candidate creation and promotion remain operator-controlled.
+//! engine.  This module owns the explicit proposal/evidence boundary;
+//! candidate creation is deterministic and promotion remains operator-controlled.
 
+use std::fs;
+use std::path::Path;
+use std::process::{Command, Output};
 use std::sync::Arc;
 
 use axum::Json;
@@ -68,6 +71,12 @@ pub(super) struct EvidenceResponse {
     pub task_id: Option<String>,
     pub run_id: Option<String>,
     pub artifact: Option<ArtifactRow>,
+}
+
+#[derive(Debug)]
+struct WorkerEvidence {
+    candidate: CandidateSource,
+    outcome: String,
 }
 
 pub(super) async fn list(
@@ -213,14 +222,6 @@ pub(super) async fn record_evidence(
         .find(|proposal| proposal.proposal_id == proposal_id)
         .cloned()
         .ok_or(ApiError::NotFound("maintenance proposal"))?;
-    let task_id = proposal
-        .task_id
-        .as_deref()
-        .map(|id| id.parse::<TaskId>())
-        .transpose()
-        .map_err(|_| ApiError::Corrupt("maintenance task id"))?;
-    let run_id = task_id.map(|_| RunId::new());
-    let now = now_ms();
     let outcome = body.outcome.trim().to_ascii_lowercase();
     let succeeded = matches!(outcome.as_str(), "ok" | "passed" | "success" | "succeeded");
     if succeeded && body.validation.is_empty() {
@@ -234,21 +235,134 @@ pub(super) async fn record_evidence(
         reproducer: body.reproducer.clone(),
         validation: body.validation.clone(),
     };
-    let attempt = MaintenanceAttempt {
-        number: proposal.attempts.len() + 1,
-        started_ts: now,
-        finished_ts: Some(now),
-        evidence: body.validation.clone(),
+    let response = persist_evidence(
+        &state,
+        &mut ledger,
+        &proposal,
+        candidate,
+        outcome,
+        Actor::Operator,
+        false,
+    )?;
+    save(&state, &ledger)?;
+    Ok(Json(response))
+}
+
+/// Create one deterministic candidate branch and record its local validation.
+///
+/// The worker writes only beneath the run directory and keeps the candidate
+/// worktree available for inspection.  It never changes the active checkout or
+/// invokes promotion, so a successful candidate cannot replace the process
+/// that created it.
+pub(super) async fn execute(
+    State(state): State<Arc<AppState>>,
+    UrlPath(proposal_id): UrlPath<String>,
+) -> ApiResult<Json<EvidenceResponse>> {
+    if !state.try_start_maintenance_worker() {
+        return Err(ApiError::Policy(
+            "a maintenance worker is already running".into(),
+        ));
+    }
+    let proposal = match (|| -> ApiResult<ProposalMetadata> {
+        let _gate = state.maintenance_gate();
+        let ledger = load(&state)?;
+        ledger
+            .proposals
+            .iter()
+            .find(|proposal| proposal.proposal_id == proposal_id)
+            .cloned()
+            .ok_or(ApiError::NotFound("maintenance proposal"))
+    })() {
+        Ok(proposal) => proposal,
+        Err(error) => {
+            state.finish_maintenance_worker();
+            return Err(error);
+        }
     };
+    if !matches!(proposal.status, ProposalStatus::Open) {
+        state.finish_maintenance_worker();
+        return Err(ApiError::Policy("maintenance proposal is not open".into()));
+    }
+    let worker_state = Arc::clone(&state);
+    let worker_proposal = proposal.clone();
+    let evidence = match tokio::task::spawn_blocking(move || {
+        run_candidate_worker(&worker_state, &worker_proposal)
+    })
+    .await
+    {
+        Ok(evidence) => evidence,
+        Err(error) => {
+            state.finish_maintenance_worker();
+            return Err(ApiError::Policy(format!(
+                "maintenance worker failed to join: {error}"
+            )));
+        }
+    };
+    state.finish_maintenance_worker();
+    let _gate = state.maintenance_gate();
+    let mut ledger = load(&state)?;
+    let proposal = ledger
+        .proposals
+        .iter()
+        .find(|proposal| proposal.proposal_id == proposal_id)
+        .cloned()
+        .ok_or(ApiError::NotFound("maintenance proposal"))?;
+    if !matches!(proposal.status, ProposalStatus::Open) {
+        return Err(ApiError::Policy("maintenance proposal is not open".into()));
+    }
+    let response = persist_evidence(
+        &state,
+        &mut ledger,
+        &proposal,
+        evidence.candidate,
+        evidence.outcome,
+        Actor::System,
+        false,
+    )?;
+    save(&state, &ledger)?;
+    Ok(Json(response))
+}
+
+fn persist_evidence(
+    state: &AppState,
+    ledger: &mut ProposalLedger,
+    proposal: &ProposalMetadata,
+    candidate: CandidateSource,
+    outcome: String,
+    actor: Actor,
+    operator_touched: bool,
+) -> ApiResult<EvidenceResponse> {
+    let succeeded = matches!(outcome.as_str(), "ok" | "passed" | "success" | "succeeded");
+    if succeeded && candidate.validation.is_empty() {
+        return Err(ApiError::BadRequest(
+            "successful maintenance evidence requires validation",
+        ));
+    }
+    let task_id = proposal
+        .task_id
+        .as_deref()
+        .map(|id| id.parse::<TaskId>())
+        .transpose()
+        .map_err(|_| ApiError::Corrupt("maintenance task id"))?;
+    let run_id = task_id.map(|_| RunId::new());
+    let now = now_ms();
     ledger
-        .record_attempt(&proposal_id, attempt)
+        .record_attempt(
+            &proposal.proposal_id,
+            MaintenanceAttempt {
+                number: proposal.attempts.len() + 1,
+                started_ts: now,
+                finished_ts: Some(now),
+                evidence: candidate.validation.clone(),
+            },
+        )
         .map_err(maintenance_error)?;
     ledger
-        .attach_candidate(&proposal_id, candidate)
+        .attach_candidate(&proposal.proposal_id, candidate.clone())
         .map_err(maintenance_error)?;
     ledger
         .finish(
-            &proposal_id,
+            &proposal.proposal_id,
             if succeeded {
                 ProposalStatus::Succeeded
             } else {
@@ -268,7 +382,7 @@ pub(super) async fn record_evidence(
             outcome: Some(if succeeded { "ok" } else { "failed" }.into()),
             usd_micros: 0,
             tokens: 0,
-            operator_touched: false,
+            operator_touched,
             started_ts: now,
             finished_ts: Some(now),
         };
@@ -279,8 +393,8 @@ pub(super) async fn record_evidence(
             kind: "maintenance-candidate".into(),
             status: if succeeded { "complete" } else { "failed" }.into(),
             input_path: proposal.source_revision.clone(),
-            staged_path: body.artifact.clone(),
-            final_path: body.branch.clone(),
+            staged_path: candidate.artifact.clone(),
+            final_path: candidate.branch.clone(),
             error: (!succeeded).then(|| outcome.clone()),
             created_ts: now,
             finished_ts: Some(now),
@@ -295,7 +409,7 @@ pub(super) async fn record_evidence(
             } else {
                 TaskState::Blocked
             },
-            Actor::Operator,
+            actor,
             if succeeded {
                 "maintenance candidate and validation evidence recorded"
             } else {
@@ -307,29 +421,285 @@ pub(super) async fn record_evidence(
             CellId::new("zero"),
             run_id,
             EventKind::new(EventKind::RUN_FINISHED),
-            Actor::Operator,
+            actor,
             now,
             serde_json::json!({
                 "outcome": if succeeded { "ok" } else { "failed" },
-                "proposal_id": proposal_id,
-                "artifact": body.artifact,
+                "proposal_id": proposal.proposal_id,
+                "artifact": candidate.artifact,
             }),
         ))?;
         artifact = Some(row);
     }
-    save(&state, &ledger)?;
     let proposal = ledger
         .proposals
         .iter()
-        .find(|proposal| proposal.proposal_id == proposal_id)
+        .find(|item| item.proposal_id == proposal.proposal_id)
         .cloned()
         .ok_or(ApiError::Corrupt("maintenance proposal ledger"))?;
-    Ok(Json(EvidenceResponse {
+    Ok(EvidenceResponse {
         task_id: proposal.task_id.clone(),
         proposal,
         run_id: run_id.map(|id| id.to_string()),
         artifact,
-    }))
+    })
+}
+
+fn run_candidate_worker(state: &AppState, proposal: &ProposalMetadata) -> WorkerEvidence {
+    let id = safe_component(&proposal.proposal_id);
+    let root = state.runs_dir().join("maintenance").join(&id);
+    let workspace = root.join("workspace");
+    let artifact_path = workspace.join("farseer-maintenance-candidate.md");
+    let reproducer_path = workspace.join("farseer-maintenance-reproducer.txt");
+    let branch = format!("farseer/maintenance/{id}");
+    let artifact = display_path(&artifact_path);
+    let reproducer = display_path(&reproducer_path);
+    let mut validation = Vec::new();
+    let mut worktree_added = false;
+
+    let setup = (|| -> Result<(), String> {
+        fs::create_dir_all(&root).map_err(|error| error.to_string())?;
+        let source_revision = resolve_revision(state.repo_root(), &proposal.source_revision)?;
+        let output = git(
+            state.repo_root(),
+            &[
+                "worktree".into(),
+                "add".into(),
+                "-b".into(),
+                branch.clone(),
+                workspace.display().to_string(),
+                source_revision,
+            ],
+        )?;
+        if !output.status.success() {
+            return Err(command_detail(&output));
+        }
+        worktree_added = true;
+        fs::write(
+            &artifact_path,
+            format!(
+                "# Farseer maintenance candidate\n\nproposal: {}\nsource: {}\nscope: {}\n",
+                proposal.proposal_id,
+                proposal.source_revision,
+                proposal.scope.join(", ")
+            ),
+        )
+        .map_err(|error| error.to_string())?;
+        fs::write(
+            &reproducer_path,
+            format!(
+                "reproduce trigger `{}` from source revision `{}`\n",
+                proposal.trigger_id, proposal.source_revision
+            ),
+        )
+        .map_err(|error| error.to_string())?;
+        let diff = git(&workspace, &["diff".into(), "--check".into()])?;
+        validation.push(validation_row("git diff --check", &diff));
+        if !diff.status.success() {
+            return Err("candidate diff validation failed".into());
+        }
+        if workspace.join("Cargo.toml").is_file() {
+            let formatting = process(
+                "cargo",
+                &workspace,
+                &["fmt".into(), "--all".into(), "--".into(), "--check".into()],
+            )?;
+            validation.push(validation_row("cargo fmt --all -- --check", &formatting));
+            if !formatting.status.success() {
+                return Err("candidate formatting validation failed".into());
+            }
+            let tests = process(
+                "cargo",
+                &workspace,
+                &[
+                    "test".into(),
+                    "-p".into(),
+                    "farseer-store".into(),
+                    "maintenance::tests::proposal_trigger_deduplicates_and_bounds_attempts".into(),
+                    "--lib".into(),
+                ],
+            )?;
+            validation.push(validation_row(
+                "cargo test -p farseer-store maintenance::tests::proposal_trigger_deduplicates_and_bounds_attempts --lib",
+                &tests,
+            ));
+            if !tests.status.success() {
+                return Err("candidate repository validation failed".into());
+            }
+        } else {
+            validation.push(ValidationEvidence {
+                command: "repository fixture validation".into(),
+                outcome: "ok".into(),
+                exit_code: Some(0),
+                detail: Some("no Cargo.toml; structural fixture validation only".into()),
+            });
+        }
+        let add = git(&workspace, &["add".into(), "--".into(), ".".into()])?;
+        if !add.status.success() {
+            return Err(command_detail(&add));
+        }
+        let commit = git(
+            &workspace,
+            &[
+                "-c".into(),
+                "user.name=Farseer Maintenance".into(),
+                "-c".into(),
+                "user.email=farseer@localhost".into(),
+                "commit".into(),
+                "--quiet".into(),
+                "-m".into(),
+                "Create maintenance candidate".into(),
+            ],
+        )?;
+        if !commit.status.success() {
+            return Err(command_detail(&commit));
+        }
+        let status = git(
+            &workspace,
+            &["status".into(), "--short".into(), "--branch".into()],
+        )?;
+        validation.push(validation_row("git status --short --branch", &status));
+        if !status.status.success() {
+            return Err("candidate validation failed".into());
+        }
+        Ok(())
+    })();
+
+    match setup {
+        Ok(()) => WorkerEvidence {
+            candidate: CandidateSource {
+                artifact,
+                branch: Some(branch),
+                reproducer: Some(reproducer),
+                validation,
+            },
+            outcome: "ok".into(),
+        },
+        Err(error) => {
+            if worktree_added {
+                let _ = git(
+                    state.repo_root(),
+                    &[
+                        "worktree".into(),
+                        "remove".into(),
+                        "--force".into(),
+                        workspace.display().to_string(),
+                    ],
+                );
+                let _ = git(
+                    state.repo_root(),
+                    &["branch".into(), "-D".into(), branch.clone()],
+                );
+            }
+            if validation.is_empty() {
+                validation.push(ValidationEvidence {
+                    command: "maintenance candidate setup".into(),
+                    outcome: "failed".into(),
+                    exit_code: None,
+                    detail: Some(error.clone()),
+                });
+            }
+            WorkerEvidence {
+                candidate: CandidateSource {
+                    artifact,
+                    branch: None,
+                    reproducer: None,
+                    validation,
+                },
+                outcome: error,
+            }
+        }
+    }
+}
+
+fn git(repo: &Path, args: &[String]) -> Result<Output, String> {
+    process("git", repo, args)
+}
+
+fn process(program: &str, directory: &Path, args: &[String]) -> Result<Output, String> {
+    Command::new(program)
+        .current_dir(directory)
+        .args(args)
+        .output()
+        .map_err(|error| format!("{program}: {error}"))
+}
+
+fn resolve_revision(repo: &Path, revision: &str) -> Result<String, String> {
+    let revision = revision.trim();
+    if revision.is_empty() || revision.starts_with('-') || revision.contains('\0') {
+        return Err("source revision must be a commit reference".into());
+    }
+    let expression = format!("{revision}^{{commit}}");
+    let output = git(
+        repo,
+        &[
+            "rev-parse".into(),
+            "--verify".into(),
+            "--end-of-options".into(),
+            expression,
+        ],
+    )?;
+    if !output.status.success() {
+        return Err(format!(
+            "source revision does not resolve: {}",
+            command_detail(&output)
+        ));
+    }
+    let resolved = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if !(40..=64).contains(&resolved.len())
+        || !resolved.bytes().all(|byte| byte.is_ascii_hexdigit())
+    {
+        return Err("source revision did not resolve to an object id".into());
+    }
+    Ok(resolved)
+}
+
+fn command_detail(output: &Output) -> String {
+    let text = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    if text.is_empty() {
+        format!("command exited with {}", output.status)
+    } else {
+        text.chars().take(512).collect()
+    }
+}
+
+fn validation_row(command: &str, output: &Output) -> ValidationEvidence {
+    let mut detail = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    if !stderr.is_empty() {
+        if !detail.is_empty() {
+            detail.push('\n');
+        }
+        detail.push_str(&stderr);
+    }
+    ValidationEvidence {
+        command: command.into(),
+        outcome: if output.status.success() {
+            "ok".into()
+        } else {
+            "failed".into()
+        },
+        exit_code: output.status.code(),
+        detail: (!detail.is_empty()).then(|| detail.chars().take(512).collect()),
+    }
+}
+
+fn safe_component(value: &str) -> String {
+    value
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || ch == '-' {
+                ch
+            } else {
+                '-'
+            }
+        })
+        .collect()
+}
+
+fn display_path(path: &Path) -> String {
+    let text = path.display().to_string();
+    text.strip_prefix(r"\\?\").unwrap_or(&text).to_string()
 }
 
 pub(super) async fn cancel(

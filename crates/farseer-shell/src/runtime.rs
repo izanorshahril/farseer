@@ -35,10 +35,7 @@ pub struct Attached {
 /// Read and authenticate the runtime named by the discovery file.
 pub fn attach_existing(expected_data_dir: &str) -> Result<Option<Runtime>> {
     let path = farseer_api::security::runtime_file_path();
-    let Ok(text) = std::fs::read_to_string(&path) else {
-        return Ok(None);
-    };
-    let Ok(runtime) = serde_json::from_str::<Runtime>(&text) else {
+    let Some(runtime) = read_runtime_file(&path)? else {
         return Ok(None);
     };
     match verify_classified(&runtime, expected_data_dir) {
@@ -54,9 +51,7 @@ pub fn attach_existing(expected_data_dir: &str) -> Result<Option<Runtime>> {
 /// Start a daemon and wait for its authenticated health response.
 pub fn spawn(binary: &Path, cells: &Path, repo: &Path, record: &Path) -> Result<Attached> {
     let path = farseer_api::security::runtime_file_path();
-    let previous = std::fs::read_to_string(&path)
-        .ok()
-        .and_then(|text| serde_json::from_str::<Runtime>(&text).ok());
+    let previous = read_runtime_file(&path)?;
     let expected_data_dir =
         farseer_api::security::data_dir_fingerprint(record.parent().unwrap_or(record));
     let mut child = Command::new(binary)
@@ -95,28 +90,32 @@ pub fn spawn(binary: &Path, cells: &Path, repo: &Path, record: &Path) -> Result<
             }
             return fail_child(child, anyhow!("startup: child exited with {status}"));
         }
-        if let Ok(text) = std::fs::read_to_string(&path)
-            && let Ok(runtime) = serde_json::from_str::<Runtime>(&text)
-        {
-            if previous
-                .as_ref()
-                .is_some_and(|old| same_identity(old, &runtime))
-            {
-                last_observation = "runtime file still names the previous runtime".to_owned();
-                std::thread::sleep(Duration::from_millis(100));
-                continue;
+        match read_runtime_file(&path) {
+            Ok(Some(runtime)) => {
+                if previous
+                    .as_ref()
+                    .is_some_and(|old| same_identity(old, &runtime))
+                {
+                    last_observation = "runtime file still names the previous runtime".to_owned();
+                    std::thread::sleep(Duration::from_millis(100));
+                    continue;
+                }
+                match verify_classified(&runtime, &expected_data_dir) {
+                    Ok(runtime) => {
+                        return Ok(Attached {
+                            runtime,
+                            _child: Some(child),
+                        });
+                    }
+                    Err(VerifyError::Unauthenticated(error)) => {
+                        last_observation = error.to_string();
+                    }
+                    Err(VerifyError::Incompatible(error)) => return fail_child(child, error),
+                }
             }
-            match verify_classified(&runtime, &expected_data_dir) {
-                Ok(runtime) => {
-                    return Ok(Attached {
-                        runtime,
-                        _child: Some(child),
-                    });
-                }
-                Err(VerifyError::Unauthenticated(error)) => {
-                    last_observation = error.to_string();
-                }
-                Err(VerifyError::Incompatible(error)) => return fail_child(child, error),
+            Ok(None) => {}
+            Err(error) => {
+                last_observation = error.to_string();
             }
         }
         std::thread::sleep(Duration::from_millis(100));
@@ -125,6 +124,24 @@ pub fn spawn(binary: &Path, cells: &Path, repo: &Path, record: &Path) -> Result<
         child,
         anyhow!("startup: timed out after 20 seconds ({last_observation})"),
     )
+}
+
+fn read_runtime_file(path: &Path) -> Result<Option<Runtime>> {
+    match std::fs::read_to_string(path) {
+        Ok(text) => serde_json::from_str::<Runtime>(&text)
+            .map(Some)
+            .with_context(|| {
+                format!(
+                    "startup: runtime discovery file is malformed ({})",
+                    path.display()
+                )
+            }),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(anyhow!(
+            "startup: cannot read runtime discovery file {}: {error}",
+            path.display()
+        )),
+    }
 }
 
 fn fail_child(mut child: Child, error: anyhow::Error) -> Result<Attached> {
@@ -439,5 +456,16 @@ mod tests {
         .unwrap();
         assert_eq!(found.unwrap().runtime_id, "runtime");
         assert!(attempts >= 2);
+    }
+
+    #[test]
+    fn a_malformed_discovery_file_is_an_actionable_startup_error() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(file.path(), b"not-json").unwrap();
+        let error = read_runtime_file(file.path()).unwrap_err().to_string();
+        assert!(
+            error.contains("runtime discovery file is malformed"),
+            "{error}"
+        );
     }
 }

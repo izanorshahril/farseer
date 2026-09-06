@@ -141,6 +141,7 @@ pub struct AppState {
     /// Serialized access to the small JSON proposal ledger. The work itself
     /// remains in the canonical SQLite task/run/artifact rows.
     maintenance_gate: Mutex<()>,
+    maintenance_worker_active: AtomicBool,
     maintenance_path: PathBuf,
     runtime: RuntimeControl,
 }
@@ -419,6 +420,7 @@ impl AppState {
             polled_windows: Mutex::new(Vec::new()),
             resource_monitor: AtomicBool::new(true),
             maintenance_gate: Mutex::new(()),
+            maintenance_worker_active: AtomicBool::new(false),
             maintenance_path,
             runs_dir,
             transcript_dir,
@@ -548,6 +550,17 @@ impl AppState {
         self.maintenance_gate
             .lock()
             .unwrap_or_else(|error| error.into_inner())
+    }
+
+    pub(crate) fn try_start_maintenance_worker(&self) -> bool {
+        self.maintenance_worker_active
+            .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
+            .is_ok()
+    }
+
+    pub(crate) fn finish_maintenance_worker(&self) {
+        self.maintenance_worker_active
+            .store(false, Ordering::Release);
     }
 
     pub(crate) fn maintenance_path(&self) -> &Path {
@@ -735,6 +748,10 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route(
             "/v1/maintenance/proposals/{proposal_id}/evidence",
             post(maintenance::record_evidence),
+        )
+        .route(
+            "/v1/maintenance/proposals/{proposal_id}/execute",
+            post(maintenance::execute),
         )
         .route(
             "/v1/maintenance/proposals/{proposal_id}/cancel",
@@ -4438,6 +4455,136 @@ runner = "not-a-real-runner"
         assert_eq!(status, StatusCode::OK);
         assert_eq!(duplicate["created"], false);
         assert_eq!(duplicate["proposal"]["proposal_id"], proposal_id);
+    }
+
+    #[tokio::test]
+    async fn maintenance_worker_keeps_the_active_checkout_untouched() {
+        let h = harness();
+        let before = std::process::Command::new("git")
+            .args(["-C", h._repo.path().to_str().unwrap(), "rev-parse", "HEAD"])
+            .output()
+            .unwrap();
+        assert!(before.status.success());
+        let before = String::from_utf8(before.stdout).unwrap();
+        let (status, created) = h
+            .post(
+                "/v1/maintenance/proposals",
+                json!({
+                    "trigger_id": "worker-fixture",
+                    "lineage_id": "worker-lineage",
+                    "actor": "system",
+                    "source_revision": "HEAD",
+                    "previous_revision": "parent",
+                    "scope": ["README.md"],
+                    "goal": "create an isolated deterministic candidate"
+                }),
+            )
+            .await;
+        assert_eq!(status, StatusCode::CREATED);
+        let proposal_id = created["proposal"]["proposal_id"].as_str().unwrap();
+
+        let (status, executed) = h
+            .post(
+                &format!("/v1/maintenance/proposals/{proposal_id}/execute"),
+                json!({}),
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK, "{executed}");
+        assert_eq!(executed["proposal"]["status"], "succeeded", "{executed}");
+        let candidate = &executed["proposal"]["candidate"];
+        let artifact = std::path::Path::new(candidate["artifact"].as_str().unwrap());
+        let reproducer = std::path::Path::new(candidate["reproducer"].as_str().unwrap());
+        assert!(artifact.is_file(), "{artifact:?}");
+        assert!(reproducer.is_file(), "{reproducer:?}");
+        assert!(
+            candidate["branch"]
+                .as_str()
+                .unwrap()
+                .starts_with("farseer/maintenance/")
+        );
+        assert_eq!(candidate["validation"][0]["outcome"], "ok");
+        assert_eq!(candidate["validation"][1]["outcome"], "ok");
+
+        let after = std::process::Command::new("git")
+            .args(["-C", h._repo.path().to_str().unwrap(), "rev-parse", "HEAD"])
+            .output()
+            .unwrap();
+        assert!(after.status.success());
+        assert_eq!(before, String::from_utf8(after.stdout).unwrap());
+
+        let branch = candidate["branch"].as_str().unwrap();
+        let workspace = artifact.parent().unwrap();
+        let removed = std::process::Command::new("git")
+            .args([
+                "-C",
+                h._repo.path().to_str().unwrap(),
+                "worktree",
+                "remove",
+                "--force",
+                workspace.to_str().unwrap(),
+            ])
+            .status()
+            .unwrap();
+        assert!(removed.success());
+        let deleted = std::process::Command::new("git")
+            .args([
+                "-C",
+                h._repo.path().to_str().unwrap(),
+                "branch",
+                "-D",
+                branch,
+            ])
+            .status()
+            .unwrap();
+        assert!(deleted.success());
+    }
+
+    #[tokio::test]
+    async fn maintenance_worker_rejects_an_invalid_revision_without_leaking_a_branch() {
+        let h = harness();
+        let (status, created) = h
+            .post(
+                "/v1/maintenance/proposals",
+                json!({
+                    "trigger_id": "worker-invalid-revision",
+                    "lineage_id": "worker-invalid-lineage",
+                    "actor": "system",
+                    "source_revision": "does-not-exist",
+                    "previous_revision": "parent",
+                    "goal": "reject an invalid candidate revision"
+                }),
+            )
+            .await;
+        assert_eq!(status, StatusCode::CREATED);
+        let proposal_id = created["proposal"]["proposal_id"].as_str().unwrap();
+        let (status, executed) = h
+            .post(
+                &format!("/v1/maintenance/proposals/{proposal_id}/execute"),
+                json!({}),
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK, "{executed}");
+        assert_eq!(executed["proposal"]["status"], "failed");
+        assert!(executed["proposal"]["candidate"]["branch"].is_null());
+        assert!(
+            executed["proposal"]["candidate"]["validation"][0]["detail"]
+                .as_str()
+                .unwrap()
+                .contains("source revision")
+        );
+        let branch = format!("farseer/maintenance/{proposal_id}");
+        let branches = std::process::Command::new("git")
+            .args([
+                "-C",
+                h._repo.path().to_str().unwrap(),
+                "branch",
+                "--list",
+                &branch,
+            ])
+            .output()
+            .unwrap();
+        assert!(branches.status.success());
+        assert!(branches.stdout.is_empty(), "{:?}", branches.stdout);
     }
 
     #[tokio::test]
