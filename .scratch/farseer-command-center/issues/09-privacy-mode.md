@@ -21,8 +21,8 @@ Masking defaults to on for account identities and sensitive paths in screenshot 
 - [x] Capacity masks account identifiers by default while retaining provider, window, runner, and status meaning.
 - [x] Project paths, transcript locators, session identifiers, and diagnostics follow an explicit field classification policy.
 - [x] An operator can reveal one field temporarily with accessible state and automatic re-masking on restart or lock.
-- [ ] Copy, export, notification, and screenshot surfaces use the masked representation unless explicitly authorized.
-- [ ] Tests prove that masking changes presentation only and does not change routing, accounting, or stored record values.
+- [x] Copy, export, notification, and screenshot surfaces use the masked representation unless explicitly authorized.
+- [x] Tests prove that masking changes presentation only and does not change routing, accounting, or stored record values.
 
 **Evidence:** `ui/src/privacy.tsx` defaults presentation masking on and leaves source values untouched.
 First-party widgets classify account, path, session, and diagnostic display fields through `mask`, including tooltip text, accessible labels, confirmation prompts, and graph/run identifiers.
@@ -32,7 +32,8 @@ Sealed skill paths in the Run contract use an explicit path reveal instead of ra
 `copyPresentation` and `exportPresentation` keep masked output as the default and raw output requires a live field reveal or privacy being explicitly disabled.
 The Run widget now exposes an export-report control that copies a bounded JSON presentation through the same masking helper.
 The notification plane now correlates finished events by record sequence, maps unknown outcomes to a fixed generic state, and never exports a run/session identifier to an external sink.
-The remaining acceptance evidence is a browser screenshot/copy/export pass over representative first-party views.
+`ui/tests/privacy.test.ts` covers masked and authorized copy/export while preserving the source value, and `crates/farseer-api/src/notify.rs` covers notification redaction and record-sequence correlation.
+The 2026-09-06 browser smoke showed masked provider accounts in Capacity with privacy enabled; the source tests cover copy/export authorization, and the notification test covers the external sink representation.
 
 **Exclusions:** No encryption redesign, credential rotation, irreversible scrubbing, or privacy inference from arbitrary event payloads.
 

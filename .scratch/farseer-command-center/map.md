@@ -84,3 +84,11 @@ These close the corresponding bounded read and profile acceptance items while se
 
 The follow-up review fixed byte-budget cursor advancement for transcript search, added explicit board loading/empty/stale states, exposed append-only project profile transition history, added a linked session-detail projection, and synchronized the README route/tree documentation.
 The session explorer now has a file-backed restart regression covering Claude-shaped and ACP-shaped sessions through the bounded public list route; browser/demo evidence and a dedicated search face remain separate follow-up work.
+
+## Status correction, 2026-09-06 implementation wave 7
+
+The widget stream recovery seam now proves EOF replay, rejected-fetch retry, stale/live ordering, exclusive cursor advancement, and cursor-specific state isolation.
+The responsive canvas acceptance demo covers keyboard movement, accessible resizing, focused-workspace Escape restoration, and empty-canvas recovery at the supported narrow desktop viewport.
+Privacy acceptance evidence combines masking, copy/export, notification, and browser screenshot checks.
+The project-team specialist regression remains deterministic and refuses an ineligible cell before creating a second run; a live multi-cell cap demonstration remains open.
+The remaining unchecked acceptance items are startup child-cleanup/capability demonstrations and the widget render/read/runtime-continuity E2E demonstration.

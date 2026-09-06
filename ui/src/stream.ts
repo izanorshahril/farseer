@@ -26,6 +26,11 @@ export type RecordEvent = {
 export type Subscription = { close: () => void };
 export type StreamState = "connecting" | "live" | "stale";
 type StateListener = (state: StreamState) => void;
+export type FollowOptions = {
+  since?: number;
+  onState?: StateListener;
+  reconnectDelayMs?: number;
+};
 const stateListeners = new Set<StateListener>();
 let streamState: StreamState = "connecting";
 
@@ -41,13 +46,6 @@ function setStreamState(next: StreamState): void {
   for (const listener of [...stateListeners]) listener(next);
 }
 
-/**
- * Follow the log from `since`, reconnecting on its own.
- *
- * The cursor is exclusive, so a reconnect resumes with no gap and no duplicate -
- * which is what makes dropping the connection a non-event rather than a hole in
- * the operator's view.
- */
 /**
  * The one connection this page holds, and everyone who is listening to it.
  *
@@ -73,7 +71,7 @@ let shared: { subscribers: Set<(event: RecordEvent) => void>; stop: () => void }
  */
 export function follow(
   onEvent: (event: RecordEvent) => void,
-  options: { since?: number } = {},
+  options: FollowOptions = {},
 ): Subscription {
   if (options.since === undefined) {
     if (!shared) {
@@ -104,13 +102,19 @@ export function follow(
 
 function connect(
   onEvent: (event: RecordEvent) => void,
-  options: { since?: number },
+  options: FollowOptions,
 ): Subscription {
   const controller = new AbortController();
   let cursor = options.since;
   let lastSeq = options.since ?? -1;
   let stopped = false;
-  setStreamState("connecting");
+  let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  let reconnectResolve: (() => void) | null = null;
+  // Cursor-specific readers are independent projections. They report to their
+  // own listener, while global state belongs only to the shared canvas stream.
+  const reportState = options.onState ?? (options.since === undefined ? setStreamState : undefined);
+  const report = (state: StreamState) => reportState?.(state);
+  report("connecting");
 
   const run = async () => {
     while (!stopped) {
@@ -118,7 +122,7 @@ function connect(
         const query = cursor === undefined ? "" : `?since=${cursor}`;
         const response = await fetch(`/v1/stream${query}`, { signal: controller.signal });
         if (!response.ok || !response.body) throw new Error(`stream: ${response.status}`);
-        setStreamState("live");
+        report("live");
         const reader = response.body.pipeThrough(new TextDecoderStream()).getReader();
         let buffer = "";
         while (!stopped) {
@@ -154,13 +158,21 @@ function connect(
             split = buffer.indexOf("\n\n");
           }
         }
-        if (!stopped) setStreamState("stale");
+        if (!stopped) report("stale");
       } catch (error) {
         if (stopped || (error as Error).name === "AbortError") return;
-        setStreamState("stale");
+        report("stale");
       }
+      if (stopped) break;
       // Reconnect, unhurried. The cursor means nothing is lost by waiting.
-      await new Promise((resolve) => setTimeout(resolve, 1_000));
+      await new Promise<void>((resolve) => {
+        reconnectResolve = resolve;
+        reconnectTimer = setTimeout(() => {
+          reconnectTimer = null;
+          reconnectResolve = null;
+          resolve();
+        }, options.reconnectDelayMs ?? 1_000);
+      });
     }
   };
 
@@ -169,6 +181,15 @@ function connect(
     close: () => {
       stopped = true;
       controller.abort();
+      if (reconnectTimer) {
+        clearTimeout(reconnectTimer);
+        reconnectTimer = null;
+      }
+      if (reconnectResolve) {
+        const resolve = reconnectResolve;
+        reconnectResolve = null;
+        resolve();
+      }
     },
   };
 }

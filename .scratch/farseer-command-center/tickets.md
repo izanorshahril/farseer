@@ -155,3 +155,11 @@ The Project team profiles ticket now has a deterministic multi-cell regression t
 
 The shell startup health probe now keeps its write side open until the authenticated response is read, fixing a Windows-only empty-response failure against the real Axum listener.
 The focused shell startup suite passes nine tests, and a real `cargo run -p farseer-shell` attached to the running daemon and served the canvas.
+
+## Status correction, 2026-09-06 implementation wave 7
+
+The widget stream recovery slice now covers EOF replay, rejected fetch retry, stale/live ordering, exclusive cursor advancement, and per-subscription state isolation.
+The responsive canvas acceptance demo covers keyboard movement, accessible resizing, focused-workspace Escape restoration, and empty-canvas recovery at the supported narrow desktop viewport.
+Privacy acceptance evidence now combines the masking, copy/export, notification, and browser screenshot checks.
+The project-team specialist regression remains deterministic and refuses an ineligible cell before creating a second run; a live multi-cell cap demonstration remains open.
+The remaining unchecked acceptance items are the startup child-cleanup/capability demonstrations and the widget render/read/runtime-continuity E2E demonstration.

@@ -21,7 +21,7 @@ Diagnostics may be expanded, but raw backend traces are not the primary message.
 - [ ] A render exception in one built-in or authored widget leaves all sibling widgets and shell controls interactive.
 - [ ] A failed read keeps the last successful projection when available and offers retry, scope reduction, or diagnostics.
 - [ ] Errors identify the affected capability and correlation context without exposing bearer tokens or raw private paths.
-- [ ] Stream disconnects show stale or reconnecting state and recover without duplicate event rows.
+- [x] Stream disconnects show stale or reconnecting state and recover without duplicate event rows.
 - [ ] A failure and recovery demo proves the runtime continues accepting and recording work while the UI widget is broken.
 
 **Exclusions:** No retry loop inside the Rust core, silent fallback to fabricated data, or privileged bridge expansion for authored widgets.
@@ -35,6 +35,8 @@ Diagnostics may be expanded, but raw backend traces are not the primary message.
 Conversation, run detail, runner thread, delegation, fleet, projects, quota, work, settings, and list widgets retain prior projections where available and use the shared recovery surface.
 `ui/src/stream.ts` marks EOF and transport errors stale, reconnects from the exclusive cursor, and drops replayed sequence numbers before dispatch.
 `ui/tests/recovery.test.ts` covers diagnostic redaction and duplicate stream-frame suppression.
+`ui/tests/recovery.test.ts` also closes a first stream after one event, observes stale then live state, verifies the exclusive cursor on the second request, and receives the next event without duplication.
+`ui/tests/recovery.test.ts` also covers non-OK and rejected fetches, malformed SSE data followed by a valid frame, and cursor-specific followers reporting their own state instead of overwriting the shared canvas connection's status.
 `bun run --cwd ui check` and `bun run --cwd ui test` pass.
 
 The runtime-continuity demo with an injected browser failure remains a manual E2E check because the UI test harness has no browser renderer or live farseer process.
