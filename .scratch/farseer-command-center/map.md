@@ -74,7 +74,7 @@ Next: select unfinished work from [the ticket index](tickets.md); verify named b
 ## Status correction, 2026-09-06
 
 The earlier implementation-state sentence calling verified startup fully implemented is historical and is superseded by [Verified startup](issues/01-verified-startup.md).
-The authenticated handshake and timeout diagnostics are implemented, while launch convergence, child-owned cleanup, and desktop smoke evidence remain open.
+The authenticated handshake, launch convergence, and distinct answered-listener diagnostics are implemented, while child-owned cleanup and desktop smoke evidence remain open.
 The current branch also hardened recoverable backup publication, terminal workspace leases, anchor-only project context, session-to-task navigation, parent/child usage accounting, and the honest authority acceptance evidence.
 Those increments do not close the remaining browser, live-runner, promotion, and resource-monitor demonstrations.
 The bounded maintenance worker now creates an isolated candidate branch, reproducer, and fixed validation evidence; safe runtime promotion remains separate.

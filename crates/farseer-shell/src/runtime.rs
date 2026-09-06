@@ -40,10 +40,8 @@ pub fn attach_existing(expected_data_dir: &str) -> Result<Option<Runtime>> {
     };
     match verify_classified(&runtime, expected_data_dir) {
         Ok(runtime) => Ok(Some(runtime)),
-        Err(VerifyError::Unauthenticated(error)) => {
-            let _ = error;
-            Ok(None)
-        }
+        Err(VerifyError::Unauthenticated(error)) if retryable_discovery_error(&error) => Ok(None),
+        Err(VerifyError::Unauthenticated(error)) => Err(error),
         Err(VerifyError::Incompatible(error)) => Err(error),
     }
 }
@@ -108,6 +106,9 @@ pub fn spawn(binary: &Path, cells: &Path, repo: &Path, record: &Path) -> Result<
                         });
                     }
                     Err(VerifyError::Unauthenticated(error)) => {
+                        if !retryable_discovery_error(&error) {
+                            return fail_child(child, error);
+                        }
                         last_observation = error.to_string();
                     }
                     Err(VerifyError::Incompatible(error)) => return fail_child(child, error),
@@ -162,6 +163,14 @@ fn wait_for_owner(
         std::thread::sleep(Duration::from_millis(100));
     }
     Ok(None)
+}
+
+fn retryable_discovery_error(error: &anyhow::Error) -> bool {
+    let text = error.to_string().to_ascii_lowercase();
+    text.contains("loopback endpoint did not answer")
+        || text.contains("connection refused")
+        || text.contains("actively refused")
+        || text.contains("timed out")
 }
 
 #[cfg(test)]
@@ -467,5 +476,19 @@ mod tests {
             error.contains("runtime discovery file is malformed"),
             "{error}"
         );
+    }
+
+    #[test]
+    fn only_unreachable_discovery_errors_are_retryable() {
+        assert!(retryable_discovery_error(&anyhow!(
+            "loopback endpoint did not answer"
+        )));
+        assert!(retryable_discovery_error(&anyhow!("operation timed out")));
+        assert!(!retryable_discovery_error(&anyhow!(
+            "unauthorized: runtime rejected the discovery token (401)"
+        )));
+        assert!(!retryable_discovery_error(&anyhow!(
+            "listener returned HTTP 404"
+        )));
     }
 }

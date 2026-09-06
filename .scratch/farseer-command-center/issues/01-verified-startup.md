@@ -6,7 +6,7 @@
 
 **Blocked by:** None; package approved.
 
-**Status:** in-progress; handshake verification is implemented, launch-convergence and smoke evidence remain open.
+**Status:** in-progress; handshake verification and distinct answered-listener errors are implemented, while child-owned cleanup and desktop smoke evidence remain open.
 
 **Execution:** package approved; verify named blockers before implementation.
 
@@ -35,5 +35,6 @@ Implemented in `crates/farseer-api/src/security.rs`, `crates/farseer-api/src/lib
 The shell rejects empty ports, empty tokens, mismatched data fingerprints, incompatible identity, wrong listeners, and missing required features, and leaves successful sidecars alive after UI exit.
 Startup timeout errors now retain the last observed cause, such as an unpublished runtime file, a previous-runtime identity, or an unauthenticated health response, instead of collapsing every failure into one opaque timeout.
 Malformed discovery files now remain explicit startup errors before a new child is spawned rather than being treated as an absent runtime, with a focused regression for the malformed-file path.
+Discovery records for an answered wrong listener or unauthorized runtime now fail distinctly; only unreachable stale endpoints are retryable during launch convergence.
 When two shells race, the loser now waits briefly for the winner that holds the data-directory lease, re-verifies its authenticated runtime identity, and attaches without claiming ownership of the winner's child.
-`runtime::tests::a_losing_launch_reuses_the_verified_owner_after_its_child_exits` covers the retry seam; child-owned cleanup and desktop smoke demonstrations remain open.
+`runtime::tests::only_unreachable_discovery_errors_are_retryable` and `runtime::tests::a_losing_launch_reuses_the_verified_owner_after_its_child_exits` cover the classification and retry seams; child-owned cleanup and desktop smoke demonstrations remain open.
