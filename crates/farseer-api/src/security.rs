@@ -169,7 +169,8 @@ pub struct RuntimeIdentity {
     pub build_provenance: String,
     pub features: Vec<String>,
     /// The process that owns the data-directory lease and published this
-    /// record.  Optional for records written by older runtimes.
+    /// record.  `01 verified startup` uses it to distinguish this launch from
+    /// an unrelated process.  Optional for records written by older runtimes.
     #[serde(default)]
     pub process_id: Option<u32>,
 }

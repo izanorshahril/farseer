@@ -399,6 +399,15 @@ impl SupervisedProcess {
         Ok(Some(line))
     }
 
+    /// Poll the supervised process without weakening the Job Object boundary.
+    /// `18 safe staged runtime promotion` uses this for bounded fixture
+    /// commands while the owning job still handles descendant cleanup.
+    /// The returned status is the root status; dropping this value still
+    /// reaps any descendants through the owning job.
+    pub fn try_wait(&mut self) -> std::io::Result<Option<std::process::ExitStatus>> {
+        self.child.try_wait()
+    }
+
     /// Kill-on-close: closing the job handle is a kernel guarantee that
     /// every process still assigned to it dies, transitively, no matter how
     /// deep the tree has grown since spawn. Equivalent to dropping this

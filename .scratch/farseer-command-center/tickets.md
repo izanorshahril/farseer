@@ -10,6 +10,9 @@ Each ticket is one complete observable slice through the necessary layers, not a
 Refactoring from review packet R13 stays within the slice that requires it.
 The five adopted decisions govern contracts; the specification governs behavior; each ticket defines its acceptance.
 
+Current snapshot: the latest status correction at the bottom of this file is authoritative for implementation progress.
+Earlier status blocks remain as append-only history; they are not a second backlog or a claim that every ticket is complete.
+
 ## Runtime and bounded reads
 
 | Ticket | Blocked by | Review packets |
@@ -89,45 +92,45 @@ No paid or external action is inferred from a deterministic test requirement.
 New dependencies must be checked, exact-pinned, and optional where this plan says they are optional.
 
 Done: 21 approved slices linked to all 15 review packets; implementation remains partial.
-The current implementation has completed tickets 02, 03, 04, 05, 16, and 19.
-Ticket 01 has the authenticated handshake and diagnostic timeout increment, but its launch-convergence and desktop smoke acceptance remains open.
-Tickets 06, 07, 08, 09, 10, 11, 12, 13, and 14 have bounded work in progress and are not complete until their acceptance evidence is recorded.
-Tickets 15, 17, 18, 20, and 21 have no implementation in this branch.
-Next: finish the in-progress operator, session, routing, and team slices before starting terminal, maintenance, promotion, manifest, or resource work.
+The current implementation has completed the Independent runtime lifecycle, Paged work board, Scoped orchestration graph, Bounded transcript projection, Recoverable schema and backup, and Honest tool authority tickets.
+The Verified startup ticket has the authenticated handshake and diagnostic timeout increment, but its launch-convergence and desktop smoke acceptance remains open.
+Widget recovery and isolation, Explicit composer context, Responsive canvas layout, Privacy presentation mode, Focused workspace, Session explorer, Attributed usage, Explainable routing, and Project team profiles have bounded work in progress and are not complete until their acceptance evidence is recorded.
+Terminal profiles, Bounded maintenance source proposals, Safe staged runtime promotion, Noncoding artifact-manifest pipeline, and Optional supervised resource monitor had no implementation in that historical snapshot.
+Next in that historical snapshot was to finish the in-progress operator, session, routing, and team slices before starting terminal, maintenance, promotion, manifest, or resource work.
 
 
 ## Status clarification, 2026-09-06
 
 Approval is complete; earlier proposal and execution-gate wording is historical.
-The implementation snapshot now records tickets 01, 02, 03, 04, 05, 16, and 19 as implemented.
+The implementation snapshot then recorded the Verified startup, Independent runtime lifecycle, Paged work board, Scoped orchestration graph, Bounded transcript projection, Recoverable schema and backup, and Honest tool authority tickets as implemented.
 Widget recovery and Explicit composer context remain in progress, with focused workspace, privacy, session, usage, routing, and project-team increments also present but incomplete.
-Tickets 15, 17, 18, 20, and 21 have partial implementation; dependency completion still governs eligibility.
+The Terminal profiles, Bounded maintenance source proposals, Safe staged runtime promotion, Noncoding artifact-manifest pipeline, and Optional supervised resource monitor tickets have partial implementation; dependency completion still governs eligibility.
 This is the current branch status, not a claim that every acceptance item is complete.
 
 ## Status clarification, 2026-09-06 implementation wave
 
 Tickets 06, 07, 08, 09, 10, 11, 12, 13, and 14 retain their bounded implementation increments and their named browser or policy evidence gaps.
-Ticket 15 now has the optional terminal API and supervised profile adapter, with the ConPTY and workspace-lease follow-ups still open.
-Ticket 20 now has the deterministic local manifest worker, durable artifact rows, cancellation, Work task display, and an ordinary-route completion regression test; the live cancellation demonstration remains open.
-Ticket 21 now has first/final and optional periodic Windows Job Object samples, durable retention, a public run-resource read, a runtime toggle, and run-detail labels; deterministic PID-reuse/parent-child fixtures and a live supervised-run demonstration remain evidence follow-ups.
-Tickets 17 and 18 remain bounded store primitives without public maintenance task or promotion commands.
+The Terminal profiles ticket now has the optional terminal API and supervised profile adapter, with the ConPTY and workspace-lease follow-ups still open.
+The Noncoding artifact-manifest pipeline ticket now has the deterministic local manifest worker, durable artifact rows, cancellation, Work task display, and an ordinary-route completion regression test; the live cancellation demonstration remains open.
+The Optional supervised resource monitor ticket now has first/final and optional periodic Windows Job Object samples, durable retention, a public run-resource read, a runtime toggle, and run-detail labels; deterministic PID-reuse/parent-child fixtures and a live supervised-run demonstration remain evidence follow-ups.
+The Bounded maintenance source proposals and Safe staged runtime promotion tickets then remained bounded store primitives without public maintenance task or promotion commands.
 No ticket is marked complete solely from source presence; acceptance checkboxes record the verified boundary and the remaining demonstration.
 
 ## Status correction, 2026-09-06
 
 The current branch status is the later wave plus the review fixes, not the older snapshot above.
-Ticket 01 remains partial because child-owned cleanup, recovery-state presentation, capability gating, and desktop smoke evidence are open; competing launches now converge on the verified owner.
-Ticket 03 has bounded board reads and transition coverage, but its cross-scope and UI acceptance demo remains open.
-Ticket 12 now has explicit parent/child de-duplication coverage; its broader two-task acceptance demo remains open.
-Ticket 15 now serializes terminal leases and ignores naturally exited sessions when deciding teardown; the ConPTY/manual demonstration remains open.
-Ticket 16 remains implemented after backup consistency and restore publication hardening.
-Ticket 19 acceptance evidence is complete.
+The Verified startup ticket remains partial because child-owned cleanup, recovery-state presentation, capability gating, and desktop smoke evidence are open; competing launches now converge on the verified owner.
+The Paged work board ticket has bounded board reads and transition coverage, but its cross-scope and UI acceptance demo remains open.
+The Attributed usage ticket now has explicit parent/child de-duplication coverage; its broader two-task acceptance demo remains open.
+The Terminal profiles ticket now serializes terminal leases and ignores naturally exited sessions when deciding teardown; the ConPTY/manual demonstration remains open.
+The Recoverable schema and backup ticket remains implemented after backup consistency and restore publication hardening.
+The Honest tool authority ticket's acceptance evidence is complete.
 
 ## Status correction, 2026-09-06 implementation wave 2
 
-Ticket 03 now has public global/project scope coverage and additive per-card run summaries for repeated or delegated runs; its manual empty/loading/failure demonstration remains open.
-Ticket 11 now labels referenced, rotated, and unavailable logs and verifies project/conversation/task/run filters plus search pagination; session-detail topology and restart demonstration remain open.
-Ticket 14 now exposes manager and roster details and refuses missing specialist cells before work creation; solo/multi-cell transition history and board demonstration remain open.
+The Paged work board now has public global/project scope coverage and additive per-card run summaries for repeated or delegated runs; its manual empty/loading/failure demonstration remains open.
+The Session explorer now labels referenced, rotated, and unavailable logs and verifies project/conversation/task/run filters plus search pagination; session-detail topology and restart demonstration remain open.
+The Project team profiles now expose manager and roster details and refuse missing specialist cells before work creation; solo/multi-cell transition history and board demonstration remain open.
 
 The follow-up review also closed the board read-state acceptance with UI loading/empty/stale behavior and corrected transcript search cursors under the byte budget.
 Project profile reads now expose their recorded transition history; the profile-switch/future-task and multi-cell demonstration remains open.
@@ -135,7 +138,7 @@ Session detail now links the canonical run/task, parent topology, transcript cus
 
 ## Status correction, 2026-09-06 implementation wave 3
 
-Ticket 01 now carries an optional owner process id in the authenticated discovery identity.
+The Verified startup ticket now carries an optional owner process id in the authenticated discovery identity.
 Only unreachable stale endpoints are retryable during startup; an answered wrong listener or unauthorized runtime fails distinctly, and a losing launcher terminates its non-owner child before attaching.
-Ticket 18 now runs explicit bounded migration and candidate-startup commands from disposable fixtures without shell interpolation, records observations in the promotion journal, and preserves recovery metadata on failure.
+The Safe staged runtime promotion ticket now runs explicit bounded migration and candidate-startup commands from disposable fixtures without shell interpolation, records observations in the promotion journal, and preserves recovery metadata on failure.
 The public browser smoke demonstrations and some live supervised-run evidence remain open by design; these are evidence gaps, not reasons to retain obsolete planning drafts.

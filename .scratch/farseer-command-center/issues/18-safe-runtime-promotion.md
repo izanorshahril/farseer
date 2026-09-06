@@ -31,7 +31,8 @@ Use an isolated installation/data fixture for development and tests.
 
 ## Evidence
 
-`farseer-store::maintenance::FixturePromotion` now stages a digest-checked candidate beside an active fixture, requires a zero-run drain and matched backup gate, runs an explicitly configured bounded migration before activation when the schema changes, switches directory identities only through an explicit call, runs an explicitly configured bounded candidate startup probe, verifies authenticated health and smoke evidence, and restores the prior directory without consulting the candidate during rollback.
+`farseer-store::maintenance::FixturePromotion` now stages a digest-checked candidate beside an active fixture, requires a zero-run drain and matched backup gate, records an explicitly configured bounded migration observed by the outer supervisor before activation when the schema changes, switches directory identities only through an explicit call, records an explicitly configured bounded candidate startup probe, verifies authenticated health and smoke evidence, and restores the prior directory without consulting the candidate during rollback.
+The `farseer` CLI executes those probes through the runner's Windows Job Object and PATHEXT seams, records execution failures before returning, and rolls back post-switch failures.
 Promotion journal writes retain the previous metadata file during the Windows replacement window and restore it if publishing the new journal fails.
 The fixture tests cover stage, backup gate, activation, health verification, failed-health rollback, and an injected restore failure that records a stopped recovery note.
 `farseer promote-fixture` now drives those phases for a disposable root and persists each phase, while `farseer rollback-fixture` works from the durable journal without starting the candidate.

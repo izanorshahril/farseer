@@ -4,8 +4,10 @@
 //! for third-party UIs: the CLI can never skew from the runtime it talks to,
 //! because it is the same build.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::thread;
+use std::time::{Duration, Instant};
 
 mod acp_server;
 
@@ -15,8 +17,8 @@ use farseer_api::{AppState, RuntimeToken, serve, validate_dir};
 use farseer_core::RunnerConfig;
 use farseer_store::Store;
 use farseer_store::maintenance::{
-    BackupIdentity, CommandSpec, FixturePromotion, HealthObservation, PromotionPlan,
-    read_runtime_identity,
+    BackupIdentity, CommandObservation, CommandSpec, FixturePromotion, HealthObservation,
+    PromotionPlan, read_runtime_identity,
 };
 
 struct FixtureCommands {
@@ -307,7 +309,24 @@ fn promote_fixture(
     controller.record_backup(&mut journal)?;
     controller.save_journal(&journal)?;
     if let Some(migration) = journal.plan.migration.clone() {
-        if let Err(error) = controller.run_migration(&mut journal, &migration) {
+        let observation = match run_fixture_command(&journal.staged_path, &migration) {
+            Ok(observation) => observation,
+            Err(error) => {
+                let failed = CommandObservation {
+                    command: migration.label(),
+                    status: None,
+                    timed_out: false,
+                };
+                let _ = controller.record_migration(&mut journal, &migration, failed);
+                journal.recovery = Some(format!(
+                    "migration command could not execute in {}; previous runtime remains active: {error}",
+                    journal.staged_path.display()
+                ));
+                let _ = controller.save_journal(&journal);
+                return Err(error);
+            }
+        };
+        if let Err(error) = controller.record_migration(&mut journal, &migration, observation) {
             let _ = controller.save_journal(&journal);
             return Err(error.into());
         }
@@ -316,7 +335,26 @@ fn promote_fixture(
     controller.activate(&mut journal)?;
     controller.save_journal(&journal)?;
     if let Some(startup) = journal.plan.startup.clone() {
-        if let Err(error) = controller.start_candidate(&mut journal, &startup) {
+        let observation = match run_fixture_command(&journal.active_path, &startup) {
+            Ok(observation) => observation,
+            Err(error) => {
+                let failed = CommandObservation {
+                    command: startup.label(),
+                    status: None,
+                    timed_out: false,
+                };
+                let _ = controller.record_startup(&mut journal, &startup, failed);
+                journal.recovery = Some(format!(
+                    "candidate startup command could not execute in {}; restore the previous runtime before admitting work: {error}",
+                    journal.active_path.display()
+                ));
+                let _ = controller.save_journal(&journal);
+                let _ = controller.rollback(&mut journal);
+                let _ = controller.save_journal(&journal);
+                return Err(error);
+            }
+        };
+        if let Err(error) = controller.record_startup(&mut journal, &startup, observation) {
             let _ = controller.save_journal(&journal);
             let _ = controller.rollback(&mut journal);
             let _ = controller.save_journal(&journal);
@@ -342,6 +380,113 @@ fn promote_fixture(
         journal.phase
     );
     Ok(())
+}
+
+/// Execute one bounded promotion fixture command through the runner's
+/// Windows Job Object and PATHEXT seams, as required by `18 safe staged
+/// runtime promotion` and `03 spike job objects`.
+fn run_fixture_command(cwd: &Path, spec: &CommandSpec) -> Result<CommandObservation> {
+    spec.validate()?;
+    let program = resolve_fixture_program(cwd, spec)?;
+    let label = spec.label();
+    let deadline = Instant::now() + Duration::from_millis(spec.timeout_ms);
+
+    #[cfg(windows)]
+    {
+        use farseer_runner::spawn::{StdinMode, SupervisedProcess};
+
+        let mut process =
+            SupervisedProcess::spawn(&program, &spec.args, cwd, &[], StdinMode::Closed)
+                .map_err(|error| anyhow::anyhow!("{label}: {error}"))?;
+        loop {
+            if let Some(status) = process.try_wait()? {
+                return Ok(CommandObservation {
+                    command: label,
+                    status: status.code(),
+                    timed_out: false,
+                });
+            }
+            if Instant::now() >= deadline {
+                process.kill();
+                return Ok(CommandObservation {
+                    command: label,
+                    status: None,
+                    timed_out: true,
+                });
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    #[cfg(not(windows))]
+    {
+        use std::process::{Command, Stdio};
+
+        let mut child = Command::new(program)
+            .args(&spec.args)
+            .current_dir(cwd)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .map_err(|error| anyhow::anyhow!("{label}: {error}"))?;
+        loop {
+            if let Some(status) = child.try_wait()? {
+                return Ok(CommandObservation {
+                    command: label,
+                    status: status.code(),
+                    timed_out: false,
+                });
+            }
+            if Instant::now() >= deadline {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Ok(CommandObservation {
+                    command: label,
+                    status: None,
+                    timed_out: true,
+                });
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
+}
+
+/// Resolve a fixture executable without a shell; Windows bare names use the
+/// `03 spike job objects` PATHEXT ordering from `farseer-runner`.
+fn resolve_fixture_program(cwd: &Path, spec: &CommandSpec) -> Result<PathBuf> {
+    let requested = Path::new(&spec.program);
+    let local = cwd.join(requested);
+    if requested.is_absolute() || requested.components().count() > 1 || local.is_file() {
+        let resolved = if requested.is_absolute() {
+            requested.to_path_buf()
+        } else {
+            local
+        };
+        let root = cwd
+            .canonicalize()
+            .map_err(|error| anyhow::anyhow!("{}: {error}", cwd.display()))?;
+        let canonical = resolved
+            .canonicalize()
+            .map_err(|error| anyhow::anyhow!("{}: {error}", resolved.display()))?;
+        if !requested.is_absolute() && !canonical.starts_with(&root) {
+            return Err(anyhow::anyhow!(
+                "maintenance command `{}` escapes its fixture directory",
+                spec.program
+            ));
+        }
+        return Ok(canonical);
+    }
+
+    #[cfg(windows)]
+    {
+        farseer_runner::resolve::resolve(&spec.program)
+            .ok_or_else(|| anyhow::anyhow!("maintenance command `{}` was not found", spec.program))
+    }
+    #[cfg(not(windows))]
+    {
+        Ok(requested.to_path_buf())
+    }
 }
 
 fn rollback_fixture(root: PathBuf) -> Result<()> {
@@ -449,4 +594,63 @@ fn default_record_path() -> Result<PathBuf> {
         .parent()
         .context("runtime path has no parent directory")?;
     Ok(dir.join("record.sqlite3"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn success_command() -> CommandSpec {
+        #[cfg(windows)]
+        {
+            CommandSpec {
+                program: "cmd".into(),
+                args: vec!["/C".into(), "exit 0".into()],
+                timeout_ms: 1_000,
+            }
+        }
+        #[cfg(not(windows))]
+        {
+            CommandSpec {
+                program: "sh".into(),
+                args: vec!["-c".into(), "exit 0".into()],
+                timeout_ms: 1_000,
+            }
+        }
+    }
+
+    fn timeout_command() -> CommandSpec {
+        #[cfg(windows)]
+        {
+            CommandSpec {
+                program: "cmd".into(),
+                args: vec!["/C".into(), "ping -n 5 127.0.0.1 > nul".into()],
+                timeout_ms: 20,
+            }
+        }
+        #[cfg(not(windows))]
+        {
+            CommandSpec {
+                program: "sh".into(),
+                args: vec!["-c".into(), "sleep 1".into()],
+                timeout_ms: 20,
+            }
+        }
+    }
+
+    #[test]
+    fn fixture_command_uses_the_runner_resolution_and_supervision_seam() {
+        let directory = tempfile::tempdir().unwrap();
+        let observation = run_fixture_command(directory.path(), &success_command()).unwrap();
+        assert_eq!(observation.status, Some(0));
+        assert!(!observation.timed_out);
+    }
+
+    #[test]
+    fn fixture_command_timeout_is_observed_and_supervised() {
+        let directory = tempfile::tempdir().unwrap();
+        let observation = run_fixture_command(directory.path(), &timeout_command()).unwrap();
+        assert_eq!(observation.status, None);
+        assert!(observation.timed_out);
+    }
 }

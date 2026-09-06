@@ -106,6 +106,9 @@ pub fn spawn(binary: &Path, cells: &Path, repo: &Path, record: &Path) -> Result<
                             .process_id
                             .is_some_and(|process_id| process_id != child.id())
                         {
+                            // `01 verified startup` reaches this branch
+                            // before the loser can admit work, so killing the
+                            // launcher's own child cannot orphan a worker tree.
                             let _ = child.kill();
                             let _ = child.wait();
                             return Ok(Attached {

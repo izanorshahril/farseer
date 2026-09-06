@@ -1,8 +1,9 @@
 //! Bounded maintenance proposals and explicit fixture promotion.
 //!
-//! This module owns reviewable metadata and file-layout primitives only.  It
-//! never starts a process, edits the active runtime, or decides to promote a
-//! candidate.  Callers must invoke each promotion phase explicitly.
+//! This module owns reviewable metadata, file-layout primitives, and command
+//! observations only.  It never starts a process, edits the active runtime,
+//! or decides to promote a candidate.  Callers must invoke each promotion
+//! phase explicitly.
 //!
 //! `17 bounded maintenance source proposals` and `18 safe staged runtime
 //! promotion` define the lineage, identity, drain, backup and rollback rules.
@@ -12,9 +13,6 @@ use sha2::{Digest, Sha256};
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
-use std::thread;
-use std::time::{Duration, Instant};
 
 pub const PROPOSAL_FORMAT_VERSION: u32 = 1;
 pub const PROMOTION_FORMAT_VERSION: u32 = 1;
@@ -423,11 +421,12 @@ pub struct PromotionPlan {
 }
 
 /// An explicitly named, bounded executable used only by a disposable
-/// promotion fixture.
+/// promotion fixture, as required by `18 safe staged runtime promotion`.
 ///
 /// The program and arguments are passed directly to the OS without a shell.
 /// A relative program is resolved below the fixture directory; a bare command
-/// name is resolved through PATH so tests can use `cmd.exe` or `sh`.
+/// name is resolved through PATH and Windows PATHEXT so tests can use `cmd.exe`
+/// or `sh`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct CommandSpec {
     pub program: String,
@@ -435,6 +434,18 @@ pub struct CommandSpec {
     pub args: Vec<String>,
     #[serde(default = "default_command_timeout_ms")]
     pub timeout_ms: u64,
+}
+
+impl CommandSpec {
+    /// Validate the bounded command contract from `18 safe staged runtime
+    /// promotion` before an outer process supervisor executes it.
+    pub fn validate(&self) -> Result<()> {
+        validate_command(self)
+    }
+
+    pub fn label(&self) -> String {
+        format!("{} {}", self.program, self.args.join(" "))
+    }
 }
 
 fn default_command_timeout_ms() -> u64 {
@@ -519,7 +530,9 @@ pub struct PromotionJournal {
     pub active_path: PathBuf,
     pub previous_path: PathBuf,
     pub health: Option<HealthObservation>,
+    #[serde(default)]
     pub migration: Option<CommandObservation>,
+    #[serde(default)]
     pub startup: Option<CommandObservation>,
     pub recovery: Option<String>,
 }
@@ -588,13 +601,14 @@ impl FixturePromotion {
         Ok(())
     }
 
-    /// Run the explicit schema migration from the staged fixture before any
-    /// directory switch.  A failed migration leaves the previous runtime
-    /// active and records a recovery note in the journal.
-    pub fn run_migration(
+    /// Record the explicit schema migration observed by the outer supervisor.
+    /// `18 safe staged runtime promotion` keeps process execution outside the
+    /// store so Windows Job Object and command-resolution rules stay shared.
+    pub fn record_migration(
         &self,
         journal: &mut PromotionJournal,
         command: &CommandSpec,
+        observation: CommandObservation,
     ) -> Result<CommandObservation> {
         if journal.phase != PromotionPhase::BackedUp {
             return Err(invalid_transition(
@@ -602,33 +616,18 @@ impl FixturePromotion {
                 PromotionPhase::Activated,
             ));
         }
-        validate_command(command)?;
-        let observation = run_command(&journal.staged_path, command)?;
+        ensure_planned_command(journal.plan.migration.as_ref(), command, "migration")?;
+        validate_observation(command, &observation)?;
         journal.migration = Some(observation.clone());
-        if observation.timed_out {
-            journal.recovery = Some(format!(
+        finish_command(
+            &mut journal.recovery,
+            &observation,
+            command.timeout_ms,
+            format!(
                 "migration failed in {}; previous runtime remains active",
                 journal.staged_path.display()
-            ));
-            return Err(MaintenanceError::CommandTimedOut {
-                command: observation.command,
-                timeout_ms: command.timeout_ms,
-            });
-        }
-        if observation.status != Some(0) {
-            journal.recovery = Some(format!(
-                "migration failed in {}; previous runtime remains active",
-                journal.staged_path.display()
-            ));
-            return Err(MaintenanceError::CommandFailed {
-                command: observation.command,
-                status: observation
-                    .status
-                    .map(|status| status.to_string())
-                    .unwrap_or_else(|| "timeout".into()),
-            });
-        }
-        Ok(observation)
+            ),
+        )
     }
 
     /// Record the existing runtime's drain result.  Activation cannot proceed
@@ -653,6 +652,7 @@ impl FixturePromotion {
                 PromotionPhase::Activated,
             ));
         }
+        validate_candidate_directory(&journal.staged_path, &journal.plan.candidate)?;
         if journal.previous_path.exists() {
             return Err(MaintenanceError::DestinationExists(
                 journal.previous_path.clone(),
@@ -676,6 +676,7 @@ impl FixturePromotion {
         if journal.phase != PromotionPhase::Activated {
             return Err(invalid_transition(&journal.phase, PromotionPhase::Healthy));
         }
+        validate_candidate_directory(&journal.active_path, &journal.plan.candidate)?;
         if observation.runtime != journal.plan.candidate {
             return Err(MaintenanceError::IdentityMismatch("health runtime"));
         }
@@ -689,15 +690,17 @@ impl FixturePromotion {
         Ok(())
     }
 
-    /// Start the activated candidate using its bounded fixture command.
+    /// Record the activated candidate's bounded startup observation.
     ///
     /// The command is expected to perform a deterministic startup/smoke probe
-    /// and exit.  Long-lived production processes are outside this fixture
-    /// seam and must use the runtime lifecycle instead.
-    pub fn start_candidate(
+    /// and exit.  `18 safe staged runtime promotion` keeps long-lived
+    /// production processes outside this fixture seam; they use the runtime
+    /// lifecycle instead.
+    pub fn record_startup(
         &self,
         journal: &mut PromotionJournal,
         command: &CommandSpec,
+        observation: CommandObservation,
     ) -> Result<CommandObservation> {
         if journal.phase != PromotionPhase::Activated {
             return Err(invalid_transition(
@@ -705,33 +708,18 @@ impl FixturePromotion {
                 PromotionPhase::Activated,
             ));
         }
-        validate_command(command)?;
-        let observation = run_command(&journal.active_path, command)?;
+        ensure_planned_command(journal.plan.startup.as_ref(), command, "startup")?;
+        validate_observation(command, &observation)?;
         journal.startup = Some(observation.clone());
-        if observation.timed_out {
-            journal.recovery = Some(format!(
-                "candidate startup timed out in {}; restore the previous runtime before admitting work",
-                journal.active_path.display()
-            ));
-            return Err(MaintenanceError::CommandTimedOut {
-                command: observation.command,
-                timeout_ms: command.timeout_ms,
-            });
-        }
-        if observation.status != Some(0) {
-            journal.recovery = Some(format!(
+        finish_command(
+            &mut journal.recovery,
+            &observation,
+            command.timeout_ms,
+            format!(
                 "candidate startup failed in {}; restore the previous runtime before admitting work",
                 journal.active_path.display()
-            ));
-            return Err(MaintenanceError::CommandFailed {
-                command: observation.command,
-                status: observation
-                    .status
-                    .map(|status| status.to_string())
-                    .unwrap_or_else(|| "unknown".into()),
-            });
-        }
-        Ok(observation)
+            ),
+        )
     }
 
     /// Restore the previous directory without consulting or starting the
@@ -812,64 +800,63 @@ fn validate_command(command: &CommandSpec) -> Result<()> {
     Ok(())
 }
 
-fn run_command(cwd: &Path, spec: &CommandSpec) -> Result<CommandObservation> {
-    let program_path = Path::new(&spec.program);
-    let local_program = cwd.join(program_path);
-    let program = if program_path.is_absolute()
-        || program_path.components().count() > 1
-        || local_program.is_file()
-    {
-        let resolved = if program_path.is_absolute() {
-            program_path.to_path_buf()
-        } else {
-            cwd.join(program_path)
-        };
-        if !program_path.is_absolute()
-            && resolved
-                .canonicalize()
-                .ok()
-                .and_then(|path| {
-                    path.strip_prefix(cwd.canonicalize().ok()?)
-                        .ok()
-                        .map(PathBuf::from)
-                })
-                .is_none()
-        {
-            return Err(MaintenanceError::InvalidCommand(spec.program.clone()));
-        }
-        resolved
-    } else {
-        program_path.to_path_buf()
-    };
-    let label = format!("{} {}", spec.program, spec.args.join(" "));
-    let mut child = Command::new(program)
-        .args(&spec.args)
-        .current_dir(cwd)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .map_err(|error| MaintenanceError::InvalidCommand(format!("{label}: {error}")))?;
-    let deadline = Instant::now() + Duration::from_millis(spec.timeout_ms);
-    loop {
-        if let Some(status) = child.try_wait()? {
-            return Ok(CommandObservation {
-                command: label,
-                status: status.code(),
-                timed_out: false,
-            });
-        }
-        if Instant::now() >= deadline {
-            let _ = child.kill();
-            let _ = child.wait();
-            return Ok(CommandObservation {
-                command: label,
-                status: None,
-                timed_out: true,
-            });
-        }
-        thread::sleep(Duration::from_millis(10));
+fn ensure_planned_command(
+    planned: Option<&CommandSpec>,
+    command: &CommandSpec,
+    phase: &str,
+) -> Result<()> {
+    validate_command(command)?;
+    if planned != Some(command) {
+        return Err(MaintenanceError::InvalidCommand(format!(
+            "{phase} command does not match the promotion plan"
+        )));
     }
+    Ok(())
+}
+
+fn validate_observation(command: &CommandSpec, observation: &CommandObservation) -> Result<()> {
+    if observation.command != command.label() {
+        return Err(MaintenanceError::InvalidCommand(
+            "command observation does not match the planned command".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn finish_command(
+    recovery: &mut Option<String>,
+    observation: &CommandObservation,
+    timeout_ms: u64,
+    recovery_note: String,
+) -> Result<CommandObservation> {
+    if observation.timed_out {
+        *recovery = Some(recovery_note);
+        return Err(MaintenanceError::CommandTimedOut {
+            command: observation.command.clone(),
+            timeout_ms,
+        });
+    }
+    if observation.status != Some(0) {
+        *recovery = Some(recovery_note);
+        return Err(MaintenanceError::CommandFailed {
+            command: observation.command.clone(),
+            status: observation
+                .status
+                .map(|status| status.to_string())
+                .unwrap_or_else(|| "unknown".into()),
+        });
+    }
+    Ok(observation.clone())
+}
+
+fn validate_candidate_directory(path: &Path, identity: &RuntimeIdentity) -> Result<()> {
+    if digest_tree(path)? != identity.artifact_digest {
+        return Err(MaintenanceError::IdentityMismatch("candidate artifact"));
+    }
+    if read_identity(path)? != *identity {
+        return Err(MaintenanceError::IdentityMismatch("candidate runtime"));
+    }
+    Ok(())
 }
 
 fn validate_backup_bundle(path: &Path, expected_schema: i64) -> Result<()> {
@@ -1031,40 +1018,30 @@ mod tests {
     use tempfile::{TempDir, tempdir};
 
     fn command(exit_code: i32) -> CommandSpec {
-        #[cfg(windows)]
-        {
-            CommandSpec {
-                program: "cmd.exe".into(),
-                args: vec!["/C".into(), format!("exit {exit_code}")],
-                timeout_ms: 1_000,
-            }
-        }
-        #[cfg(not(windows))]
-        {
-            CommandSpec {
-                program: "sh".into(),
-                args: vec!["-c".into(), format!("exit {exit_code}")],
-                timeout_ms: 1_000,
-            }
+        CommandSpec {
+            program: "fixture-command".into(),
+            args: vec![format!("exit-{exit_code}")],
+            timeout_ms: 1_000,
         }
     }
 
     fn timeout_command() -> CommandSpec {
-        #[cfg(windows)]
-        {
-            CommandSpec {
-                program: "cmd.exe".into(),
-                args: vec!["/C".into(), "ping 127.0.0.1 -n 3 > nul".into()],
-                timeout_ms: 10,
-            }
+        CommandSpec {
+            program: "fixture-timeout".into(),
+            args: vec![],
+            timeout_ms: 10,
         }
-        #[cfg(not(windows))]
-        {
-            CommandSpec {
-                program: "sh".into(),
-                args: vec!["-c".into(), "sleep 1".into()],
-                timeout_ms: 10,
-            }
+    }
+
+    fn observation(
+        command: &CommandSpec,
+        status: Option<i32>,
+        timed_out: bool,
+    ) -> CommandObservation {
+        CommandObservation {
+            command: command.label(),
+            status,
+            timed_out,
         }
     }
 
@@ -1363,10 +1340,22 @@ mod tests {
         controller.record_drain(&mut journal, 0).unwrap();
         controller.record_backup(&mut journal).unwrap();
         let migration = journal.plan.migration.clone().unwrap();
-        controller.run_migration(&mut journal, &migration).unwrap();
+        controller
+            .record_migration(
+                &mut journal,
+                &migration,
+                observation(&migration, Some(0), false),
+            )
+            .unwrap();
         controller.activate(&mut journal).unwrap();
         let startup = journal.plan.startup.clone().unwrap();
-        controller.start_candidate(&mut journal, &startup).unwrap();
+        controller
+            .record_startup(
+                &mut journal,
+                &startup,
+                observation(&startup, Some(0), false),
+            )
+            .unwrap();
         assert_eq!(journal.migration.as_ref().unwrap().status, Some(0));
         assert_eq!(journal.startup.as_ref().unwrap().status, Some(0));
     }
@@ -1382,7 +1371,11 @@ mod tests {
         controller.activate(&mut journal).unwrap();
         let startup = journal.plan.startup.clone().unwrap();
         assert!(matches!(
-            controller.start_candidate(&mut journal, &startup),
+            controller.record_startup(
+                &mut journal,
+                &startup,
+                observation(&startup, Some(7), false),
+            ),
             Err(MaintenanceError::CommandFailed { .. })
         ));
         assert!(
@@ -1411,7 +1404,11 @@ mod tests {
         controller.record_backup(&mut journal).unwrap();
         let migration = journal.plan.migration.clone().unwrap();
         assert!(matches!(
-            controller.run_migration(&mut journal, &migration),
+            controller.record_migration(
+                &mut journal,
+                &migration,
+                observation(&migration, Some(9), false),
+            ),
             Err(MaintenanceError::CommandFailed { .. })
         ));
         assert_eq!(journal.phase, PromotionPhase::BackedUp);
@@ -1439,9 +1436,119 @@ mod tests {
         controller.record_backup(&mut journal).unwrap();
         let migration = journal.plan.migration.clone().unwrap();
         assert!(matches!(
-            controller.run_migration(&mut journal, &migration),
+            controller.record_migration(
+                &mut journal,
+                &migration,
+                observation(&migration, None, true),
+            ),
             Err(MaintenanceError::CommandTimedOut { .. })
         ));
         assert_eq!(journal.phase, PromotionPhase::BackedUp);
+    }
+
+    #[test]
+    fn an_unplanned_migration_command_is_refused() {
+        let fixture = tempdir().unwrap();
+        let (controller, mut plan) = promotion_fixture(&fixture);
+        plan.candidate.schema_version = plan.previous.schema_version + 1;
+        write_runtime_identity(&plan.candidate_path, &plan.candidate).unwrap();
+        plan.migration = Some(command(0));
+        let mut journal = controller.stage(plan).unwrap();
+        controller.record_drain(&mut journal, 0).unwrap();
+        controller.record_backup(&mut journal).unwrap();
+        let other = command(1);
+        assert!(matches!(
+            controller.record_migration(&mut journal, &other, observation(&other, Some(0), false)),
+            Err(MaintenanceError::InvalidCommand(message))
+                if message.contains("does not match")
+        ));
+    }
+
+    #[test]
+    fn activation_rechecks_candidate_identity_after_migration() {
+        let fixture = tempdir().unwrap();
+        let (controller, mut plan) = promotion_fixture(&fixture);
+        plan.candidate.schema_version = plan.previous.schema_version + 1;
+        write_runtime_identity(&plan.candidate_path, &plan.candidate).unwrap();
+        let migration = command(0);
+        plan.migration = Some(migration.clone());
+        let mut journal = controller.stage(plan).unwrap();
+        controller.record_drain(&mut journal, 0).unwrap();
+        controller.record_backup(&mut journal).unwrap();
+        controller
+            .record_migration(
+                &mut journal,
+                &migration,
+                observation(&migration, Some(0), false),
+            )
+            .unwrap();
+        fs::write(
+            journal.staged_path.join("runtime.bin"),
+            b"migration changed it",
+        )
+        .unwrap();
+        assert!(matches!(
+            controller.activate(&mut journal),
+            Err(MaintenanceError::IdentityMismatch("candidate artifact"))
+        ));
+        assert_eq!(journal.phase, PromotionPhase::BackedUp);
+        assert_eq!(
+            fs::read(fixture.path().join("active/runtime.bin")).unwrap(),
+            b"previous"
+        );
+    }
+
+    #[test]
+    fn health_rechecks_candidate_identity_after_startup() {
+        let fixture = tempdir().unwrap();
+        let (controller, mut plan) = promotion_fixture(&fixture);
+        let startup = command(0);
+        plan.startup = Some(startup.clone());
+        let candidate = plan.candidate.clone();
+        let mut journal = controller.stage(plan).unwrap();
+        controller.record_drain(&mut journal, 0).unwrap();
+        controller.record_backup(&mut journal).unwrap();
+        controller.activate(&mut journal).unwrap();
+        controller
+            .record_startup(
+                &mut journal,
+                &startup,
+                observation(&startup, Some(0), false),
+            )
+            .unwrap();
+        fs::write(
+            journal.active_path.join("runtime.bin"),
+            b"startup changed it",
+        )
+        .unwrap();
+        assert!(matches!(
+            controller.verify_health(
+                &mut journal,
+                HealthObservation {
+                    runtime: candidate,
+                    authenticated: true,
+                    smoke_ok: true,
+                },
+            ),
+            Err(MaintenanceError::IdentityMismatch("candidate artifact"))
+        ));
+    }
+
+    #[test]
+    fn old_promotion_journals_without_command_observations_still_load() {
+        let fixture = tempdir().unwrap();
+        let (controller, plan) = promotion_fixture(&fixture);
+        let journal = controller.stage(plan).unwrap();
+        let mut value = serde_json::to_value(&journal).unwrap();
+        value.as_object_mut().unwrap().remove("migration");
+        value.as_object_mut().unwrap().remove("startup");
+        fs::write(
+            fixture.path().join("promotion.json"),
+            serde_json::to_vec(&value).unwrap(),
+        )
+        .unwrap();
+        let loaded = controller.load_journal().unwrap();
+        assert!(loaded.migration.is_none());
+        assert!(loaded.startup.is_none());
     }
 }
