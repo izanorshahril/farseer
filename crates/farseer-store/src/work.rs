@@ -1269,6 +1269,23 @@ impl Store {
         self.indexed_transcript_page_matching(None, limit, offset, byte_limit)
     }
 
+    pub fn indexed_transcript(&self, digest: &str) -> Result<Option<IndexedTranscript>> {
+        self.conn()
+            .query_row(
+                "SELECT digest, body, projection_version FROM transcript_index WHERE digest = ?1",
+                [digest],
+                |row| {
+                    Ok(IndexedTranscript {
+                        digest: row.get(0)?,
+                        body: row.get(1)?,
+                        projection_version: row.get(2)?,
+                    })
+                },
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+
     /// Read a bounded page of scrubbed transcript projections that match a
     /// query in SQLite before pagination, so an offset cannot skip matching
     /// documents hidden among non-matching rows.

@@ -81,4 +81,4 @@ Those increments do not close the remaining browser, live-runner, maintenance, p
 The current implementation wave adds additive task-card run summaries, public global/project board scope coverage, SQLite-filtered transcript search paging, explicit rotated-log labels, and project-team roster display/refusal coverage.
 These close the corresponding bounded read and profile acceptance items while session-detail topology, multi-cell profile switching, and browser/live demonstrations remain open.
 
-The follow-up review fixed byte-budget cursor advancement for transcript search, added explicit board loading/empty/stale states, exposed append-only project profile transition history, and synchronized the README route/tree documentation.
+The follow-up review fixed byte-budget cursor advancement for transcript search, added explicit board loading/empty/stale states, exposed append-only project profile transition history, added a linked session-detail projection, and synchronized the README route/tree documentation.

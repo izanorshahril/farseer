@@ -47,6 +47,7 @@ type Run = {
 type Session = { run_id: string; identifier_kind: string; identifier: string; log_pointer?: string };
 type SessionRow = { session: Session & { observed_ts: number }; task_id: string; runner: string; model: string; project_path?: string; log_available: boolean; log_status: "referenced" | "rotated" | "unavailable" };
 type SessionPage = { rows: SessionRow[]; next_offset?: number };
+type SessionDetail = { session: Session & { observed_ts: number }; task: Task; run: Run; parents: { run_id: string; parent_run_id: string; kind: string }[]; attachments: Attachment[]; excerpts: SearchHit[] };
 type SearchHit = { digest: string; excerpt: string; coverage: string; projection_version?: string };
 type SearchPage = { rows: SearchHit[]; next_offset?: number };
 type Projection = { status: "pending" | "complete" | "truncated" | "failed" | "cancelled"; error?: string; coverage: string; updated_ts: number };
@@ -96,6 +97,7 @@ export function WorkWidget({ bridge }: { bridge: Bridge }) {
   const [projectScope, setProjectScope] = useState("");
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [sessions, setSessions] = useState<SessionRow[]>([]);
+  const [sessionDetail, setSessionDetail] = useState<SessionDetail | null>(null);
   const [sessionOffset, setSessionOffset] = useState<number | undefined>();
   const [sessionsLoading, setSessionsLoading] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
@@ -206,6 +208,21 @@ export function WorkWidget({ bridge }: { bridge: Bridge }) {
     }
   }, [bridge, projectScope, subject.run, subject.task, subject.conversation]);
 
+  const openSession = async (row: SessionRow) => {
+    selectSubject({ task: row.task_id, run: row.session.run_id, project: row.project_path ?? null });
+    const params = new URLSearchParams({
+      run_id: row.session.run_id,
+      identifier_kind: row.session.identifier_kind,
+      identifier: row.session.identifier,
+    });
+    try {
+      setSessionDetail(await bridge.read<SessionDetail>(`/work/session?${params}`));
+      setError(null);
+    } catch (failure) {
+      setError((failure as Error).message);
+    }
+  };
+
   const loadSearch = useCallback(async (offset = 0) => {
     if (!searchQuery.trim()) {
       setSearchRows([]);
@@ -235,6 +252,7 @@ export function WorkWidget({ bridge }: { bridge: Bridge }) {
   useEffect(() => {
     if (face !== "sessions") return;
     setSessions([]);
+    setSessionDetail(null);
     setSessionOffset(undefined);
     void loadSessions();
   }, [face, projectScope, loadSessions]);
@@ -419,7 +437,7 @@ export function WorkWidget({ bridge }: { bridge: Bridge }) {
           <ul className="plain-list">
             {sessions.map((row) => (
               <li key={`${row.session.identifier_kind}:${row.session.identifier}:${row.session.run_id}`}>
-                <button className="row-button" onClick={() => selectSubject({ task: row.task_id, run: row.session.run_id, project: row.project_path ?? null })}>
+                <button className="row-button" onClick={() => void openSession(row)}>
                   <b>{mask(row.session.identifier, "session", privacy)}</b>
                   <small>{row.runner} · {row.model || "model unavailable"} · log {row.log_status}</small>
                   <span className="mono">{row.session.identifier_kind} · {new Date(row.session.observed_ts).toLocaleString()}</span>
@@ -428,6 +446,14 @@ export function WorkWidget({ bridge }: { bridge: Bridge }) {
             ))}
           </ul>
           {sessionOffset !== undefined && <button className="chip" onClick={() => void loadSessions(sessionOffset)} disabled={sessionsLoading}>{sessionsLoading ? "loading..." : "load more sessions"}</button>}
+          {sessionDetail && <aside className="session-detail" aria-label="Selected session detail">
+            <div className="row"><b>{mask(sessionDetail.session.identifier, "session", privacy)}</b><span className="badge">{sessionDetail.run.outcome ?? "running"}</span></div>
+            <p>{mask(sessionDetail.task.title, "diagnostic", privacy)} · {sessionDetail.run.runner}</p>
+            <p className="dim small">run {mask(sessionDetail.run.run_id.slice(0, 8), "session", privacy)} · log {sessionDetail.session.log_pointer ? "referenced" : "unavailable"}</p>
+            {sessionDetail.parents.length > 0 && <p className="dim small">topology: {sessionDetail.parents.map((parent) => `${parent.kind} ${mask(parent.parent_run_id.slice(0, 8), "session", privacy)}`).join(", ")}</p>}
+            {sessionDetail.attachments.map((attachment) => <p key={`${attachment.digest}:${attachment.run_id}`} className="dim small">{attachment.custody} · {mask(short(attachment.digest), "session", privacy)} · {attachment.projection?.status ?? "not indexed"}</p>)}
+            {sessionDetail.excerpts.map((excerpt) => <p key={excerpt.digest} className="dim small">{mask(short(excerpt.digest), "session", privacy)} · {excerpt.excerpt}</p>)}
+          </aside>}
         </div>
       )}
 

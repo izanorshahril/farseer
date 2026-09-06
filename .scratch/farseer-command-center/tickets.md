@@ -131,3 +131,4 @@ Ticket 14 now exposes manager and roster details and refuses missing specialist 
 
 The follow-up review also closed the board read-state acceptance with UI loading/empty/stale behavior and corrected transcript search cursors under the byte budget.
 Project profile reads now expose their recorded transition history; the profile-switch/future-task and multi-cell demonstration remains open.
+Session detail now links the canonical run/task, parent topology, transcript custody, and indexed excerpt; the two-protocol restart demonstration remains open.

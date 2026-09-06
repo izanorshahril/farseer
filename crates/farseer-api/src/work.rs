@@ -17,8 +17,8 @@ use farseer_core::{
     Actor, Conversation, ConversationId, RunId, Task, TaskId, TaskState, TranscriptCustody,
 };
 use farseer_store::{
-    GraphEdge, GraphFilter, GraphNode, SessionRow, SimilarityEdge, TaskCursor, TaskFilter,
-    TranscriptAttachment, TranscriptProjection,
+    GraphEdge, GraphFilter, GraphNode, RunParent, SessionRow, SimilarityEdge, TaskCursor,
+    TaskFilter, TranscriptAttachment, TranscriptProjection,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -460,6 +460,23 @@ pub(super) struct SessionPage {
     pub next_offset: Option<usize>,
 }
 
+#[derive(Debug, Default, Deserialize)]
+pub(super) struct SessionDetailQuery {
+    pub run_id: String,
+    pub identifier_kind: String,
+    pub identifier: String,
+}
+
+#[derive(Debug, Serialize)]
+pub(super) struct SessionDetail {
+    pub session: farseer_core::HarnessSession,
+    pub task: Task,
+    pub run: crate::RunView,
+    pub parents: Vec<RunParent>,
+    pub attachments: Vec<TranscriptAttachmentView>,
+    pub excerpts: Vec<SearchHit>,
+}
+
 /// Bounded session explorer projection from `40 work model and session explorer`.
 /// A missing log pointer is an honest unavailable state; farseer never guesses private harness paths.
 pub(super) async fn list_sessions(
@@ -488,6 +505,67 @@ pub(super) async fn list_sessions(
         run_id,
     )?;
     Ok(Json(SessionPage { rows, next_offset }))
+}
+
+/// Bounded detail for one observed harness session.
+/// All linked objects come from their canonical task, run, attachment, and
+/// projection rows; the route adds no second session store.
+pub(super) async fn get_session_detail(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<SessionDetailQuery>,
+) -> ApiResult<Json<SessionDetail>> {
+    if query.identifier_kind.trim().is_empty() || query.identifier.trim().is_empty() {
+        return Err(ApiError::BadRequest(
+            "session identifier kind and identifier are required",
+        ));
+    }
+    let run_id = parse_run(&query.run_id)?;
+    let store = state.store();
+    let row = store.run(run_id)?.ok_or(ApiError::NotFound("run"))?;
+    let session = store
+        .harness_sessions(Some(run_id))?
+        .into_iter()
+        .find(|session| {
+            session.identifier_kind == query.identifier_kind
+                && session.identifier == query.identifier
+        })
+        .ok_or(ApiError::NotFound("session"))?;
+    let task = store.task(row.task_id)?.ok_or(ApiError::NotFound("task"))?;
+    let parents = store
+        .run_parents()?
+        .into_iter()
+        .filter(|parent| parent.run_id == run_id || parent.parent_run_id == run_id)
+        .take(32)
+        .collect();
+    let mut attachments = Vec::new();
+    let mut excerpts = Vec::new();
+    for attachment in store.transcript_attachments(Some(run_id))? {
+        let projection = store.transcript_projection(&attachment.digest, run_id)?;
+        attachments.push(TranscriptAttachmentView {
+            attachment: attachment.clone(),
+            projection,
+        });
+        if let Some(indexed) = store.indexed_transcript(&attachment.digest)? {
+            excerpts.push(SearchHit {
+                digest: indexed.digest,
+                excerpt: indexed.body.chars().take(160).collect(),
+                coverage: "restricted",
+                projection_version: Some(indexed.projection_version),
+            });
+        }
+        if excerpts.len() >= 32 {
+            break;
+        }
+    }
+    drop(store);
+    Ok(Json(SessionDetail {
+        session,
+        task,
+        run: crate::run_view(&state, row),
+        parents,
+        attachments,
+        excerpts,
+    }))
 }
 
 pub(super) async fn get_task(

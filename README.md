@@ -223,7 +223,7 @@ Binds `127.0.0.1` only, opens the record, loads the definitions, and writes its 
 | `GET /v1/tasks/page` | bounded global or project kanban cards with scope-bound continuation and per-task run summaries |
 | `POST /v1/artifacts/manifests` | run a local authorized-directory manifest job with sorted SHA-256 entries and staged completion |
 | `GET /v1/work/graph`, `/v1/work/search` | query durable work edges and scrubbed transcript projections |
-| `GET /v1/work/sessions`, `/v1/work/search/page` | page harness sessions by project, conversation, task or run and search scrubbed transcript excerpts with source metadata |
+| `GET /v1/work/sessions`, `/v1/work/session`, `/v1/work/search/page` | page harness sessions, open linked session detail, and search scrubbed transcript excerpts with source metadata |
 | `GET`/`POST /v1/runs/{id}/transcripts` | read or add transcript custody metadata and derived text |
 | `GET /v1/runs/{id}/control` | read the current attach control state |
 | `POST /v1/runs/{id}/{observe,take-over,release,heartbeat,intervene}` | manage the run's operator lease and record intervention provenance |

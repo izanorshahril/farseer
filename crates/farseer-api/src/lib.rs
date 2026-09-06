@@ -727,6 +727,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/v1/tasks/{task_id}", get(work::get_task))
         .route("/v1/artifacts/manifests", post(artifacts::start_manifest))
         .route("/v1/work/sessions", get(work::list_sessions))
+        .route("/v1/work/session", get(work::get_session_detail))
         .route(
             "/v1/tasks/{task_id}/transition",
             post(work::transition_task),
@@ -7632,6 +7633,17 @@ runner = "{runner}"
                 "hash-tf-v1",
             )
             .unwrap();
+        h.state
+            .store()
+            .record_transcript_attachment(&farseer_store::TranscriptAttachment {
+                digest: "digest-one".into(),
+                run_id,
+                custody: farseer_core::TranscriptCustody::CopyPlusIndex,
+                source: "session-2.jsonl".into(),
+                stored_path: Some("objects/digest-one".into()),
+                created_ts: now,
+            })
+            .unwrap();
 
         let (status, page) = h.get("/v1/work/sessions?limit=1").await;
         assert_eq!(status, StatusCode::OK, "{page}");
@@ -7662,6 +7674,20 @@ runner = "{runner}"
             .await;
         assert_eq!(status, StatusCode::OK, "{scoped}");
         assert_eq!(scoped["rows"].as_array().unwrap().len(), 3);
+
+        let (status, detail) = h
+            .get(&format!(
+                "/v1/work/session?run_id={run_id}&identifier_kind=session&identifier=session-2"
+            ))
+            .await;
+        assert_eq!(status, StatusCode::OK, "{detail}");
+        assert_eq!(detail["session"]["identifier"], "session-2");
+        assert_eq!(detail["session"]["run_id"], run_id.to_string());
+        assert_eq!(detail["task"]["task_id"], task_id.to_string());
+        assert_eq!(detail["run"]["run_id"], run_id.to_string());
+        assert_eq!(detail["attachments"][0]["custody"], "copy-plus-index");
+        assert_eq!(detail["excerpts"][0]["digest"], "digest-one");
+        assert_eq!(detail["excerpts"][0]["projection_version"], "hash-tf-v1");
 
         let (status, search) = h.get("/v1/work/search/page?q=needle&limit=1").await;
         assert_eq!(status, StatusCode::OK, "{search}");

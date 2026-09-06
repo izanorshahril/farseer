@@ -19,7 +19,7 @@ Treat missing or dangling log pointers as honest states.
 Use event replay as the reliable fallback when harness logs are absent.
 
 - [x] A project, conversation, task, or run can open a bounded session list with provider kind, runner, model, first-seen time, and availability.
-- [ ] Session detail links to observed topology, transcript custody, derived search text, and the originating run without duplicating truth.
+- [x] Session detail links to observed topology, transcript custody, derived search text, and the originating run without duplicating truth.
 - [x] Missing, rotated, and unavailable logs are labelled distinctly and do not break the session explorer.
 - [x] Search returns paged scrubbed excerpts with source digest and projection version.
 - [ ] A session explorer demo works after runtime restart and with two sessions from different harness protocols.
@@ -28,6 +28,7 @@ Use event replay as the reliable fallback when harness logs are absent.
 The additive `/v1/work/search/page` route now returns bounded scrubbed excerpts, source digests, projection versions, and cursors.
 Search pagination filters in SQLite before applying the offset, and advances by rows actually emitted when the byte cap ends a page, so non-matching or truncated projections cannot hide later matches.
 The public session-page regression test now proves bounded paging, provider identifier kind, runner/model facts, distinct referenced, rotated, and unavailable log pointers across protocol-shaped sessions, and project/conversation/task/run filters.
+The same public fixture now opens `/v1/work/session` and verifies the originating task/run, parent topology, transcript custody, projection status, and scrubbed indexed excerpt.
 The two-protocol restart demo and a dedicated search face remain open.
 
 **Exclusions:** No automatic transcript copying, private harness-directory guessing, external embeddings service, or raw log viewer without explicit custody.
