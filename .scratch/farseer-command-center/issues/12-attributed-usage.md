@@ -22,14 +22,15 @@ Process CPU and memory sampling remains a later bounded extension.
 - [x] Capacity exposes provider windows, reset times, account sharing, and source provenance without deriving a percentage from farseer spend.
 - [x] Context usage shows `used / size` only when both were observed and labels absent denominators explicitly.
 - [x] Task and run views show tokens, reported cost, estimated cost, duration, runner, model, outcome, and denominator scope.
-- [ ] A parent aggregate and its child observations are not counted twice; a task with retries includes coordination and failed-attempt cost while naming its acceptance/outcome criterion.
+- [x] A parent aggregate and its child observations are not counted twice; a task with retries includes coordination and failed-attempt cost while naming its acceptance/outcome criterion.
 - [x] A bounded read returns stable page or cursor metadata and never loads all historical usage by default.
 
 **Evidence:** The API exposes bounded attributed cost pages and the Capacity widget renders observed spend groups.
 Provider windows remain source-labelled and do not derive a percentage from farseer spend.
 Run detail now exposes observed duration, cost basis (`reported`, `estimated`, or `unknown`), and run scope.
 Task detail aggregates distinct run rows with successful/failed counts, tokens, reported and estimated spend, duration, and an explicit task scope.
-Parent/child aggregate de-duplication evidence and the two-task acceptance demo remain open.
+`task_usage_counts_parent_and_child_runs_once_each` records one parent and one delegated child under one task and verifies each run contributes once to task totals, including the failed attempt.
+The broader two-task acceptance demo remains open.
 
 **Exclusions:** No GPU claim, one-second process sampler, fleet-wide invented billing, or model share presented as provider quota.
 

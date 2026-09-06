@@ -231,54 +231,62 @@ impl Store {
         fs::create_dir_all(parent)?;
         let staging = unique_path(parent, ".farseer-backup");
         fs::create_dir(&staging)?;
-        let result = (|| {
+        let result: Result<BackupManifest> = (|| {
+            // Read attachment rows from the copied database, not the live connection. This
+            // keeps the manifest aligned with the exact SQLite snapshot produced by backup.
             let database = staging.join(BACKUP_DATABASE);
             backup_database(&self.conn, &database)?;
-            let attachments = self.transcript_attachments(None)?;
-            let mut manifest = BackupManifest {
-                format_version: BACKUP_FORMAT_VERSION,
-                schema_version: STORE_FORMAT_VERSION,
-                attachments: Vec::with_capacity(attachments.len()),
-            };
-            let attachment_dir = staging.join("attachments");
-            fs::create_dir(&attachment_dir)?;
-            for attachment in attachments {
-                let Some(stored_path) = attachment.stored_path else {
+            let snapshot_store = Store::open(&database)?;
+            let attachments = snapshot_store.transcript_attachments(None)?;
+            let snapshot: Result<BackupManifest> = (|| {
+                let mut manifest = BackupManifest {
+                    format_version: BACKUP_FORMAT_VERSION,
+                    schema_version: STORE_FORMAT_VERSION,
+                    attachments: Vec::with_capacity(attachments.len()),
+                };
+                let attachment_dir = staging.join("attachments");
+                fs::create_dir(&attachment_dir)?;
+                for attachment in attachments {
+                    let Some(stored_path) = attachment.stored_path else {
+                        manifest.attachments.push(BackupAttachment {
+                            digest: attachment.digest,
+                            run_id: attachment.run_id.to_string(),
+                            source: attachment.source,
+                            path: None,
+                            size: None,
+                            sha256: None,
+                        });
+                        continue;
+                    };
+                    let source = PathBuf::from(&stored_path);
+                    let source = if source.is_absolute() {
+                        source
+                    } else {
+                        attachment_root.join(source)
+                    };
+                    let target_name = safe_attachment_name(&attachment.digest)?;
+                    let target = attachment_dir.join(target_name);
+                    let (size, digest) = copy_digest(&source, &target)?;
                     manifest.attachments.push(BackupAttachment {
                         digest: attachment.digest,
                         run_id: attachment.run_id.to_string(),
                         source: attachment.source,
-                        path: None,
-                        size: None,
-                        sha256: None,
+                        path: Some(format!(
+                            "attachments/{}",
+                            target.file_name().unwrap().to_string_lossy()
+                        )),
+                        size: Some(size),
+                        sha256: Some(digest),
                     });
-                    continue;
-                };
-                let source = PathBuf::from(&stored_path);
-                let source = if source.is_absolute() {
-                    source
-                } else {
-                    attachment_root.join(source)
-                };
-                let target_name = safe_attachment_name(&attachment.digest)?;
-                let target = attachment_dir.join(target_name);
-                let (size, digest) = copy_digest(&source, &target)?;
-                manifest.attachments.push(BackupAttachment {
-                    digest: attachment.digest,
-                    run_id: attachment.run_id.to_string(),
-                    source: attachment.source,
-                    path: Some(format!(
-                        "attachments/{}",
-                        target.file_name().unwrap().to_string_lossy()
-                    )),
-                    size: Some(size),
-                    sha256: Some(digest),
-                });
-            }
-            let bytes = serde_json::to_vec_pretty(&manifest)?;
-            let mut file = fs::File::create(staging.join(BACKUP_MANIFEST))?;
-            file.write_all(&bytes)?;
-            file.sync_all()?;
+                }
+                let bytes = serde_json::to_vec_pretty(&manifest)?;
+                let mut file = fs::File::create(staging.join(BACKUP_MANIFEST))?;
+                file.write_all(&bytes)?;
+                file.sync_all()?;
+                Ok(manifest)
+            })();
+            drop(snapshot_store);
+            let manifest = snapshot?;
             // Windows may keep SQLite directory handles alive briefly after backup.  Publish
             // the files with the manifest last; an incomplete directory is never restorable.
             fs::create_dir(destination)?;
@@ -332,11 +340,16 @@ impl Store {
         let parent = record.parent().unwrap_or_else(|| Path::new("."));
         fs::create_dir_all(parent)?;
         let staged = unique_path(parent, ".farseer-restore");
+        let attachment_parent = attachment_root.parent().unwrap_or_else(|| Path::new("."));
+        fs::create_dir_all(attachment_parent)?;
+        let attachment_staging = unique_path(attachment_parent, ".farseer-restore-attachments");
+        let mut published_attachments = Vec::new();
         let result = (|| {
             let source = Connection::open(&database)?;
             backup_database(&source, &staged)?;
             let store = Store::open(&staged)?;
-            fs::create_dir_all(attachment_root)?;
+            fs::create_dir(&attachment_staging)?;
+            let mut attachment_targets = Vec::new();
             for attachment in &manifest.attachments {
                 let Some(path) = &attachment.path else {
                     continue;
@@ -354,13 +367,18 @@ impl Store {
                 }
                 let source = backup.join(relative);
                 let target = attachment_root.join(safe_attachment_name(&attachment.digest)?);
-                let (size, digest) = copy_digest(&source, &target)?;
-                if Some(size) != attachment.size || Some(digest) != attachment.sha256 {
+                let staged_target =
+                    attachment_staging.join(safe_attachment_name(&attachment.digest)?);
+                let (size, digest) = copy_digest(&source, &staged_target)?;
+                if Some(size) != attachment.size
+                    || Some(digest.as_str()) != attachment.sha256.as_deref()
+                {
                     return Err(StoreError::InvalidBackupAttachment {
                         digest: attachment.digest.clone(),
                     });
                 }
                 store.set_attachment_path(&attachment.digest, &attachment.run_id, &target)?;
+                attachment_targets.push((staged_target, target, size, digest));
             }
             drop(store);
             let restored = Store::open(&staged)?;
@@ -370,11 +388,35 @@ impl Store {
                 });
             }
             drop(restored);
+            fs::create_dir_all(attachment_root)?;
+            for (staged_target, target, size, digest) in attachment_targets {
+                if target.exists() {
+                    let existing = digest_file(&target)?;
+                    if existing != (size, digest) {
+                        return Err(StoreError::InvalidBackupAttachment {
+                            digest: target
+                                .file_name()
+                                .and_then(|name| name.to_str())
+                                .unwrap_or_default()
+                                .to_owned(),
+                        });
+                    }
+                    let _ = fs::remove_file(&staged_target);
+                } else {
+                    fs::rename(&staged_target, &target)?;
+                    published_attachments.push(target);
+                }
+            }
+            fs::remove_dir(&attachment_staging)?;
             fs::rename(&staged, record)?;
             Ok(manifest)
         })();
         if result.is_err() {
             let _ = fs::remove_file(&staged);
+            let _ = fs::remove_dir_all(&attachment_staging);
+            for path in published_attachments.drain(..) {
+                let _ = fs::remove_file(path);
+            }
         }
         result
     }
@@ -739,6 +781,26 @@ fn copy_digest(source: &Path, target: &Path) -> Result<(u64, String)> {
         size += read as u64;
     }
     output.sync_all()?;
+    let mut digest = String::with_capacity(64);
+    for byte in hasher.finalize() {
+        write!(&mut digest, "{byte:02x}").expect("writing to String cannot fail");
+    }
+    Ok((size, digest))
+}
+
+fn digest_file(path: &Path) -> Result<(u64, String)> {
+    let mut input = fs::File::open(path)?;
+    let mut hasher = Sha256::new();
+    let mut bytes = [0_u8; 64 * 1024];
+    let mut size = 0_u64;
+    loop {
+        let read = input.read(&mut bytes)?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&bytes[..read]);
+        size += read as u64;
+    }
     let mut digest = String::with_capacity(64);
     for byte in hasher.finalize() {
         write!(&mut digest, "{byte:02x}").expect("writing to String cannot fail");
@@ -1427,6 +1489,19 @@ mod tests {
             .unwrap()
             .backup_to(&backup, &transcripts)
             .unwrap();
+        let mismatched_record = source.path().join("mismatched.sqlite3");
+        let mismatched_transcripts = source.path().join("mismatched-transcripts");
+        fs::create_dir(&mismatched_transcripts).unwrap();
+        fs::write(mismatched_transcripts.join(&digest), b"do not overwrite").unwrap();
+        assert!(matches!(
+            Store::restore_from(&backup, &mismatched_record, &mismatched_transcripts),
+            Err(StoreError::InvalidBackupAttachment { .. })
+        ));
+        assert_eq!(
+            fs::read(mismatched_transcripts.join(&digest)).unwrap(),
+            b"do not overwrite"
+        );
+        assert!(!mismatched_record.exists());
         let restored = source.path().join("restored.sqlite3");
         let restored_transcripts = source.path().join("restored-transcripts");
         Store::restore_from(&backup, &restored, &restored_transcripts).unwrap();

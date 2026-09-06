@@ -36,4 +36,5 @@ Implemented in `crates/farseer-store/src/lib.rs`, `crates/farseer-store/Cargo.to
 `a_migrated_store_reopens_without_losing_work_lineage_or_associations` covers the legacy upgrade, durable task/run lineage, repeated digest associations, and idempotent reopen.
 `a_failed_migration_rolls_back_to_the_original_fixture` injects an invalid legacy fixture and proves the original rows remain while new schema tables are not published.
 `crates/farseer/tests/recovery.rs` invokes the public binary for future-schema refusal and backup/restore while a writer holds committed WAL data, then opens the restored record and verifies the run, task, attachment reference, and bytes.
+The store backup test also refuses a mismatched pre-existing attachment without overwriting it or publishing a partial record.
 The full store suite and the two CLI recovery tests pass.

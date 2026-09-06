@@ -70,3 +70,10 @@ An unexpected failure of an acceptance contract is evidence to update that ticke
 
 Done: package approved; implementation partly complete.
 Next: select unfinished work from [the ticket index](tickets.md); verify named blockers and acceptance criteria.
+
+## Status correction, 2026-09-06
+
+The earlier implementation-state sentence calling verified startup fully implemented is historical and is superseded by [Verified startup](issues/01-verified-startup.md).
+The authenticated handshake and timeout diagnostics are implemented, while launch convergence, child-owned cleanup, and desktop smoke evidence remain open.
+The current branch also hardened recoverable backup publication, terminal workspace leases, anchor-only project context, session-to-task navigation, parent/child usage accounting, and the honest authority acceptance evidence.
+Those increments do not close the remaining browser, live-runner, maintenance, promotion, and resource-monitor demonstrations.

@@ -42,7 +42,7 @@ type Run = {
   cost_basis?: "reported" | "estimated" | "unknown";
 };
 type Session = { run_id: string; identifier_kind: string; identifier: string; log_pointer?: string };
-type SessionRow = { session: Session & { observed_ts: number }; runner: string; model: string; project_path?: string; log_available: boolean };
+type SessionRow = { session: Session & { observed_ts: number }; task_id: string; runner: string; model: string; project_path?: string; log_available: boolean };
 type SessionPage = { rows: SessionRow[]; next_offset?: number };
 type SearchHit = { digest: string; excerpt: string; coverage: string; projection_version?: string };
 type SearchPage = { rows: SearchHit[]; next_offset?: number };
@@ -403,7 +403,7 @@ export function WorkWidget({ bridge }: { bridge: Bridge }) {
           <ul className="plain-list">
             {sessions.map((row) => (
               <li key={`${row.session.identifier_kind}:${row.session.identifier}:${row.session.run_id}`}>
-                <button className="row-button" onClick={() => selectSubject({ run: row.session.run_id, project: row.project_path ?? null })}>
+                <button className="row-button" onClick={() => selectSubject({ task: row.task_id, run: row.session.run_id, project: row.project_path ?? null })}>
                   <b>{mask(row.session.identifier, "session", privacy)}</b>
                   <small>{row.runner} · {row.model || "model unavailable"} · {row.log_available ? "log available" : "log unavailable"}</small>
                   <span className="mono">{row.session.identifier_kind} · {new Date(row.session.observed_ts).toLocaleString()}</span>

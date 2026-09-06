@@ -6,7 +6,7 @@
 
 **Blocked by:** None; package approved.
 
-**Status:** implemented.
+**Status:** in-progress; handshake verification is implemented, launch-convergence and smoke evidence remain open.
 
 **Execution:** package approved; verify named blockers before implementation.
 
@@ -33,3 +33,5 @@ Keep unsupported features visible as unavailable rather than silently emulating 
 Implemented in `crates/farseer-api/src/security.rs`, `crates/farseer-api/src/lib.rs`, and `crates/farseer-shell/src/runtime.rs`.
 `cargo test -p farseer-shell runtime::tests` passes all three handshake tests.
 The shell rejects empty ports, empty tokens, mismatched data fingerprints, incompatible identity, wrong listeners, and missing required features, and leaves successful sidecars alive after UI exit.
+Startup timeout errors now retain the last observed cause, such as an unpublished runtime file, a previous-runtime identity, or an unauthenticated health response, instead of collapsing every failure into one opaque timeout.
+The two-launch convergence, child-owned cleanup, and desktop smoke demonstrations remain open.

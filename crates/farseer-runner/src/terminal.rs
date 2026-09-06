@@ -350,10 +350,14 @@ impl Drop for TerminalSession {
 pub struct TerminalManager {
     sessions: Mutex<HashMap<Uuid, Arc<TerminalSession>>>,
     pending_cleanup: Mutex<HashMap<PathBuf, Option<PathBuf>>>,
+    cleanup_gate: Mutex<()>,
 }
 
 impl TerminalManager {
     pub fn open(&self, spec: TerminalSpec) -> Result<Arc<TerminalSession>, TerminalError> {
+        // Serialize session registration with deferred teardown. Otherwise a terminal that is
+        // opening while a run exits can miss the lease check and be stranded in a deleted cwd.
+        let _cleanup_gate = self.cleanup_gate.lock().unwrap_or_else(|e| e.into_inner());
         let session = TerminalSession::start(spec)?;
         self.sessions
             .lock()
@@ -379,7 +383,11 @@ impl TerminalManager {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .values()
-            .any(|session| session.cwd == workspace)
+            .any(|session| {
+                session.cwd == workspace
+                    && *session.state.lock().unwrap_or_else(|e| e.into_inner())
+                        == TerminalState::Active
+            })
     }
 
     /// Defer run-workspace teardown while a terminal's cwd still holds it.
@@ -390,6 +398,7 @@ impl TerminalManager {
         workspace: &Path,
         repo: Option<&Path>,
     ) -> Result<bool, TerminalError> {
+        let _cleanup_gate = self.cleanup_gate.lock().unwrap_or_else(|e| e.into_inner());
         let workspace =
             std::fs::canonicalize(workspace).unwrap_or_else(|_| workspace.to_path_buf());
         if self.holds_workspace(&workspace) {
@@ -405,6 +414,7 @@ impl TerminalManager {
     }
 
     pub fn end(&self, id: &str) -> Result<(), TerminalError> {
+        let _cleanup_gate = self.cleanup_gate.lock().unwrap_or_else(|e| e.into_inner());
         let session = self.reconnect(id)?;
         session.end();
         self.sessions
@@ -412,11 +422,11 @@ impl TerminalManager {
             .unwrap_or_else(|e| e.into_inner())
             .remove(&session.id);
         drop(session);
-        self.cleanup_ready()?;
+        self.cleanup_ready_locked()?;
         Ok(())
     }
 
-    fn cleanup_ready(&self) -> Result<(), TerminalError> {
+    fn cleanup_ready_locked(&self) -> Result<(), TerminalError> {
         let ready = {
             let mut pending = self
                 .pending_cleanup
@@ -517,5 +527,21 @@ mod tests {
             manager.reconnect(&id),
             Err(TerminalError::NotFound(_))
         ));
+    }
+
+    #[test]
+    fn an_exited_session_does_not_hold_workspace_teardown() {
+        let manager = TerminalManager::default();
+        let cwd = tempfile::tempdir().unwrap();
+        let session = manager
+            .open(TerminalSpec::new(
+                TerminalProfile::Cmd,
+                cwd.path(),
+                "operator",
+            ))
+            .expect("cmd should be available on Windows");
+        *session.state.lock().unwrap() = TerminalState::Exited;
+        assert!(!manager.holds_workspace(cwd.path()));
+        manager.end(&session.id()).unwrap();
     }
 }

@@ -20,11 +20,11 @@ Shell-capable execution is not presented as per-tool containment.
 
 ## Acceptance criteria
 
-- [ ] Validation and Fleet/definition detail distinguish enforced reach, observed capability, and recorded-only tool declarations.
-- [ ] A tool entry with no serving path has no misleading approve/run affordance.
-- [ ] Missing explicit shell grant remains refused for a shell-equivalent launch even when ToolLevel defaults to Shell; restricted runner fixtures retain their observed enforcement rules.
-- [ ] Existing unauthorized launch/delegation requests remain refused server-side; presentation cannot create a grant.
-- [ ] Fixtures demonstrate both a supported constrained runner and shell-capable reach without claiming control of arbitrary third-party calls.
+- [x] Validation and Fleet/definition detail distinguish enforced reach, observed capability, and recorded-only tool declarations.
+- [x] A tool entry with no serving path has no misleading approve/run affordance.
+- [x] Missing explicit shell grant remains refused for a shell-equivalent launch even when ToolLevel defaults to Shell; restricted runner fixtures retain their observed enforcement rules.
+- [x] Existing unauthorized launch/delegation requests remain refused server-side; presentation cannot create a grant.
+- [x] Fixtures demonstrate both a supported constrained runner and shell-capable reach without claiming control of arbitrary third-party calls.
 
 **Exclusions:** Universal action approvals, third-party MCP proxying, new tool-grant concepts, and any claim that a shell cannot bypass a decorative tool label.
 **Test seam/demo:** Load definitions with differing ToolLevel and shell-grant metadata, inspect effective behavior/advisories, and attempt an ungranted launch and delegation.

@@ -96,6 +96,7 @@ pub struct IndexedTranscript {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct SessionRow {
     pub session: HarnessSession,
+    pub task_id: TaskId,
     pub runner: String,
     pub model: String,
     pub project_path: Option<String>,
@@ -935,7 +936,7 @@ impl Store {
         let limit = limit.clamp(1, 500);
         let mut stmt = self.conn.prepare_cached(
             "SELECT h.run_id, h.identifier_kind, h.identifier, h.log_pointer, h.observed_ts,
-                    r.runner, r.model, t.project_path
+                    r.task_id, r.runner, r.model, t.project_path
              FROM harness_sessions h
              JOIN runs r ON r.run_id = h.run_id
              JOIN tasks t ON t.task_id = r.task_id
@@ -953,9 +954,10 @@ impl Store {
                         row.get::<_, String>(2)?,
                         row.get::<_, Option<String>>(3)?,
                         row.get::<_, i64>(4)?,
-                        row.get::<_, String>(5)?,
+                        row.get::<_, Vec<u8>>(5)?,
                         row.get::<_, String>(6)?,
-                        row.get::<_, Option<String>>(7)?,
+                        row.get::<_, String>(7)?,
+                        row.get::<_, Option<String>>(8)?,
                     ))
                 },
             )?
@@ -972,9 +974,10 @@ impl Store {
                         log_pointer: row.3,
                         observed_ts: row.4,
                     },
-                    runner: row.5,
-                    model: row.6,
-                    project_path: row.7,
+                    task_id: TaskId::from_bytes(uuid_bytes(&row.5, "session.task_id")?),
+                    runner: row.6,
+                    model: row.7,
+                    project_path: row.8,
                     log_available,
                 })
             })

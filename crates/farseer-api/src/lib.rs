@@ -1312,11 +1312,19 @@ async fn instruct_cell(
         return Err(ApiError::NotFound("task"));
     }
 
-    let project = match body.project.as_deref().or_else(|| {
-        existing
-            .as_ref()
-            .and_then(|conversation| conversation.project_path.as_deref())
-    }) {
+    let project = match body
+        .project
+        .as_deref()
+        .or_else(|| {
+            body.anchor
+                .as_ref()
+                .and_then(|anchor| anchor.project.as_deref())
+        })
+        .or_else(|| {
+            existing
+                .as_ref()
+                .and_then(|conversation| conversation.project_path.as_deref())
+        }) {
         Some(path) => Some(projects::resolve(&state, path)?),
         None => None,
     };
@@ -3954,7 +3962,10 @@ grants_shell = true
         let (status, body) = h
             .post(
                 "/v1/cells/zero/instruct",
-                json!({ "goal": "must be refused", "project": project.display().to_string() }),
+                json!({
+                    "goal": "must be refused",
+                    "anchor": { "widget": "Work", "project": project.display().to_string() }
+                }),
             )
             .await;
         assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
@@ -7528,6 +7539,7 @@ runner = "{runner}"
         assert_eq!(status, StatusCode::OK, "{page}");
         assert_eq!(page["rows"].as_array().unwrap().len(), 1);
         assert_eq!(page["rows"][0]["session"]["identifier_kind"], "session");
+        assert_eq!(page["rows"][0]["task_id"], task_id.to_string());
         assert_eq!(page["rows"][0]["runner"], "claude-code");
         assert_eq!(page["rows"][0]["model"], "model-a");
         assert_eq!(page["rows"][0]["log_available"], false);
@@ -7538,6 +7550,75 @@ runner = "{runner}"
         assert_eq!(next["rows"][0]["session"]["identifier_kind"], "thread");
         assert_eq!(next["rows"][0]["log_available"], true);
         assert!(next["next_offset"].is_null());
+    }
+
+    #[tokio::test]
+    async fn task_usage_counts_parent_and_child_runs_once_each() {
+        let h = harness();
+        let now = now_ms();
+        let conversation_id = farseer_core::ConversationId::new();
+        let task_id = TaskId::new();
+        let parent = RunId::new();
+        let child = RunId::new();
+        h.state
+            .store()
+            .create_conversation(&farseer_core::Conversation {
+                conversation_id,
+                title: "Usage fixture".into(),
+                project_path: None,
+                manager_runner: Some("claude-code".into()),
+                created_ts: now,
+                updated_ts: now,
+                archived_ts: None,
+            })
+            .unwrap();
+        h.state
+            .store()
+            .create_task(&farseer_core::Task {
+                task_id,
+                conversation_id,
+                goal: "count usage".into(),
+                title: "count usage".into(),
+                project_path: None,
+                state: farseer_core::TaskState::Done,
+                priority: 0,
+                created_ts: now,
+                updated_ts: now,
+            })
+            .unwrap();
+        for (run_id, outcome, tokens, usd_micros) in [
+            (parent, Some("ok"), 7, 3_000),
+            (child, Some("failed"), 5, 2_000),
+        ] {
+            h.state
+                .store()
+                .upsert_run(&RunRow {
+                    run_id,
+                    task_id,
+                    cell_id: CellId::new("zero"),
+                    runner: "claude-code".into(),
+                    model: "model".into(),
+                    outcome: outcome.map(str::to_string),
+                    usd_micros,
+                    tokens,
+                    operator_touched: false,
+                    started_ts: now,
+                    finished_ts: Some(now + 10),
+                })
+                .unwrap();
+        }
+        h.state
+            .store()
+            .record_run_parent(child, parent, "delegation")
+            .unwrap();
+
+        let (status, body) = h.get(&format!("/v1/tasks/{task_id}")).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["usage"]["runs"], 2);
+        assert_eq!(body["usage"]["successful_runs"], 1);
+        assert_eq!(body["usage"]["failed_runs"], 1);
+        assert_eq!(body["usage"]["tokens"], 12);
+        assert_eq!(body["usage"]["usd_micros"], 5_000);
     }
 
     #[tokio::test]

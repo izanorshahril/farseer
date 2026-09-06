@@ -72,6 +72,7 @@ pub fn spawn(binary: &Path, cells: &Path, repo: &Path, record: &Path) -> Result<
         .with_context(|| format!("starting {}", binary.display()))?;
 
     let deadline = Instant::now() + STARTUP_TIMEOUT;
+    let mut last_observation = "runtime file not published".to_owned();
     while Instant::now() < deadline {
         if let Some(status) = child
             .try_wait()
@@ -86,6 +87,7 @@ pub fn spawn(binary: &Path, cells: &Path, repo: &Path, record: &Path) -> Result<
                 .as_ref()
                 .is_some_and(|old| same_identity(old, &runtime))
             {
+                last_observation = "runtime file still names the previous runtime".to_owned();
                 std::thread::sleep(Duration::from_millis(100));
                 continue;
             }
@@ -97,14 +99,17 @@ pub fn spawn(binary: &Path, cells: &Path, repo: &Path, record: &Path) -> Result<
                     });
                 }
                 Err(VerifyError::Unauthenticated(error)) => {
-                    let _ = error;
+                    last_observation = error.to_string();
                 }
                 Err(VerifyError::Incompatible(error)) => return fail_child(child, error),
             }
         }
         std::thread::sleep(Duration::from_millis(100));
     }
-    fail_child(child, anyhow!("startup: timed out after 20 seconds"))
+    fail_child(
+        child,
+        anyhow!("startup: timed out after 20 seconds ({last_observation})"),
+    )
 }
 
 fn fail_child(mut child: Child, error: anyhow::Error) -> Result<Attached> {

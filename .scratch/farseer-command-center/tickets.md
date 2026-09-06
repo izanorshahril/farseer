@@ -89,7 +89,8 @@ No paid or external action is inferred from a deterministic test requirement.
 New dependencies must be checked, exact-pinned, and optional where this plan says they are optional.
 
 Done: 21 approved slices linked to all 15 review packets; implementation remains partial.
-The current implementation has completed tickets 01, 02, 03, 04, 05, 16, and 19.
+The current implementation has completed tickets 02, 03, 04, 05, 16, and 19.
+Ticket 01 has the authenticated handshake and diagnostic timeout increment, but its launch-convergence and desktop smoke acceptance remains open.
 Tickets 06, 07, 08, 09, 10, 11, 12, 13, and 14 have bounded work in progress and are not complete until their acceptance evidence is recorded.
 Tickets 15, 17, 18, 20, and 21 have no implementation in this branch.
 Next: finish the in-progress operator, session, routing, and team slices before starting terminal, maintenance, promotion, manifest, or resource work.
@@ -111,3 +112,13 @@ Ticket 20 now has the deterministic local manifest worker, durable artifact rows
 Ticket 21 now has first/final Windows Job Object samples, durable retention, a public run-resource read, and run-detail labels, with periodic sampling, a runtime toggle, and PID-reuse fixtures still open.
 Tickets 17 and 18 remain bounded store primitives without public maintenance task or promotion commands.
 No ticket is marked complete solely from source presence; acceptance checkboxes record the verified boundary and the remaining demonstration.
+
+## Status correction, 2026-09-06
+
+The current branch status is the later wave plus the review fixes, not the older snapshot above.
+Ticket 01 remains partial because launch convergence and desktop smoke evidence are open.
+Ticket 03 has bounded board reads and transition coverage, but its cross-scope and UI acceptance demo remains open.
+Ticket 12 now has explicit parent/child de-duplication coverage; its broader two-task acceptance demo remains open.
+Ticket 15 now serializes terminal leases and ignores naturally exited sessions when deciding teardown; the ConPTY/manual demonstration remains open.
+Ticket 16 remains implemented after backup consistency and restore publication hardening.
+Ticket 19 acceptance evidence is complete.
