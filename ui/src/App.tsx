@@ -1217,6 +1217,31 @@ export function App() {
                 {anchor.widget === "canvas" ? "global context" : `clear ${anchor.widget}`}
               </button>
             </div>
+            <div className="composer-controls" aria-label="Composer routing and context controls">
+              <label className="composer-control">
+                <span>harness / agent</span>
+                <select
+                  aria-label="composer harness or agent"
+                  value={subject.managerRunner ?? ""}
+                  onChange={(event) => selectSubject({ managerRunner: event.currentTarget.value || null })}
+                >
+                  <option value="">automatic</option>
+                  {subject.managerRunner && !managerRunners.includes(subject.managerRunner) && <option value={subject.managerRunner}>{subject.managerRunner} (current)</option>}
+                  {managerRunners.map((runner) => <option key={runner}>{runner}</option>)}
+                </select>
+              </label>
+              <span className="composer-policy" title="Model selection is owned by the selected harness runner configuration.">model: runner config</span>
+              <span className="composer-policy" title="Reasoning effort is owned by the selected harness runner configuration.">reasoning: runner config</span>
+              <span
+                className={composerContextOpen ? "composer-context-info context-open" : "composer-context-info"}
+                title={"project: " + (subject.project ? mask(subject.project, "path", privacy) : "global") + "; conversation: " + (subject.conversation ? mask(subject.conversation, "session", privacy) : "new") + "; task: " + (subject.task ? mask(subject.task, "session", privacy) : "none") + "; anchor: " + anchor.widget}
+              >
+                {subject.project ? "project: " + mask(subject.project.split(/[\\/]/).at(-1) ?? subject.project, "path", privacy) : "global"}
+                {" · "}
+                {subject.conversation ? "session: " + mask(subject.conversation.slice(0, 8), "session", privacy) : "new session"}
+                {subject.task ? " · task: " + mask(subject.task.slice(0, 8), "session", privacy) : ""}
+              </span>
+            </div>
             {composerContextOpen && (
               <div className="composer-pickers" aria-label="Explicit composer context">
               <label>
@@ -1287,17 +1312,6 @@ export function App() {
                   <option value="">none</option>
                   {contextTasks.map((task) => <option key={task.task_id} value={task.task_id}>{mask(task.title, "diagnostic", privacy)}</option>)}
                   {subject.task && !contextTasks.some((task) => task.task_id === subject.task) && <option value={subject.task}>{mask(subject.task.slice(0, 8), "session", privacy)}</option>}
-                </select>
-              </label>
-              <label>
-                <span>manager</span>
-                <select
-                  aria-label="composer manager runner"
-                  value={subject.managerRunner ?? ""}
-                  onChange={(event) => selectSubject({ managerRunner: event.currentTarget.value || null })}
-                >
-                  <option value="">automatic</option>
-                  {managerRunners.map((runner) => <option key={runner}>{runner}</option>)}
                 </select>
               </label>
               </div>

@@ -8,7 +8,7 @@ Start with [the active work map](.scratch/farseer-command-center/map.md) for nex
 The original v1 decision route is complete through ticket 28, while follow-on tickets through 40 record implementation corrections, shipped surfaces and a small set of open boundaries.
 Use the map and linked tickets as the specification rather than treating the historical research drafts as current plans.
 `POST /v1/cells/{id}/instruct` runs a cell's manager against a goal and returns a `run_id` immediately.
-The operator surface is a separate client under [`ui/`](ui/README.md): a Berd-inspired customizable workbench of persisted widgets, system/light/dark themes, per-project Work views, a bottom runtime/usage strip, one composer addressed to the top manager, and a host bridge that is the only thing a widget may reach.
+The operator surface is a separate client under [`ui/`](ui/README.md): a Berd-inspired customizable workbench of persisted widgets, system/light/dark themes, per-project Work views, a bottom runtime/usage strip, and a top-manager composer with harness/agent routing, runner-owned model/reasoning policy, and explicit context.
 
 A Claude Code manager receives farseer's own MCP face under a per-run capability and can call `delegate_to_worker`, or `delegate_to_cell` for a granted cell, during the same live conversation; cancel and steer remain available through the run API.
 See [What runs today](#what-runs-today).
@@ -91,7 +91,7 @@ An external protocol is spoken at a boundary, never shaped into internals.
 │  ├─ farseer/         the binary: runtime and CLI in one
 │  └─ farseer-shell/   the desktop shell: finds a farseer, serves the canvas and its widgets, holds the token, remembers the window, and puts each provider's quota in the tray
 ├─ ui/                 the Berd-inspired canvas: the operator surface, a client of /v1 like any other
-│  ├─ src/App.tsx      the sidebar, saved widget canvas and one top-manager composer
+│  ├─ src/App.tsx      the sidebar, saved widget canvas and top-manager composer controls
 │  ├─ src/bridge.ts    everything a widget may reach, and nothing else
 │  ├─ src/layout.ts    validates, snaps and bounds the persisted widget arrangement
 │  ├─ src/stream.ts    one SSE connection for the whole page, fanned out
