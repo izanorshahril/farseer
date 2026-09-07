@@ -140,10 +140,14 @@ Opens the desktop shell, which is what running farseer means: it attaches to a d
 The startup check binds the authenticated runtime to its `(process id, process creation time)` on Windows, so a recycled PID or unrelated loopback listener cannot be mistaken for the daemon that was launched.
 It also puts the most constrained subscription window in the system tray. See [Tray](#tray).
 
-Build the canvas once first, and rebuild it after any `ui/` change, because `cargo run` serves the compiled `ui/dist` rather than the Vite source:
+Build the canvas and daemon once before the first shell launch, and rebuild the canvas after any `ui/` change, because `cargo run` serves the compiled `ui/dist` and starts the sibling `farseer` daemon:
 
 ```bash
 bun run --cwd ui build
+```
+
+```bash
+cargo build -p farseer --bin farseer
 ```
 
 `cargo build` and `cargo test` follow the same default, so **both cover the shell alone** - pass `--workspace` to build or test everything:

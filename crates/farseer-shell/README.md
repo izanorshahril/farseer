@@ -24,6 +24,12 @@ Build the UI before starting the desktop shell:
 bun run --cwd ui build
 ```
 
+Build the daemon sidecar once in a fresh checkout because the workspace default builds only the shell:
+
+```bash
+cargo build -p farseer --bin farseer
+```
+
 ```bash
 cargo run -p farseer-shell
 ```

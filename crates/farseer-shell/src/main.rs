@@ -48,7 +48,13 @@ fn run() -> anyhow::Result<()> {
         }
         None => {
             let binary = runtime::sidecar_path().ok_or_else(|| {
-                anyhow::anyhow!("no farseer binary beside this executable, and none running")
+                if cfg!(debug_assertions) {
+                    anyhow::anyhow!(
+                        "no farseer binary beside this executable, and none running; run `cargo build -p farseer --bin farseer` first"
+                    )
+                } else {
+                    anyhow::anyhow!("no farseer binary beside this executable, and none running")
+                }
             })?;
             let owned = runtime::spawn(&binary, &cells_dir(), &repo_root(), &record)?;
             println!("farseer-shell: started farseer on {}", owned.runtime.port);
