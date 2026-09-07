@@ -53,6 +53,7 @@ describe("canvas layout", () => {
       span: { conversation: { w: 1, h: 1 } },
       unit: DEFAULT_WIDGET_UNIT,
       sidebarCollapsed: true,
+      theme: "dark",
       focused: "conversation",
       focusPane: "navigation",
       focusOrigin: {
@@ -68,6 +69,7 @@ describe("canvas layout", () => {
       },
     }, fallback)).toMatchObject({
       sidebarCollapsed: true,
+      theme: "dark",
       focused: "conversation",
       focusPane: "navigation",
       focusOrigin: {

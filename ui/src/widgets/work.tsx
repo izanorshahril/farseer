@@ -274,6 +274,9 @@ export function WorkWidget({ bridge }: { bridge: Bridge }) {
 
   useEffect(() => onSubjectSelection(setSubject), []);
   useEffect(() => {
+    setProjectScope(subject.project ?? "");
+  }, [subject.project]);
+  useEffect(() => {
     if (!subject.task) {
       setDetail(null);
       return;

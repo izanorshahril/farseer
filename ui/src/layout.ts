@@ -52,6 +52,7 @@ export type CanvasLayout = {
   focusPane?: "navigation" | "main" | "inspector" | "comparison";
   comparison?: string | null;
   focusOrigin?: FocusOrigin | null;
+  theme?: "system" | "light" | "dark";
 };
 
 /** The first standard size is the default for every newly mounted widget. */
@@ -156,6 +157,7 @@ export function normalizeLayout(value: unknown, fallback: CanvasLayout): CanvasL
     ...(typeof value.comparison === "string" ? { comparison: value.comparison } : {}),
     ...(value.comparison === null ? { comparison: null } : {}),
     ...(focusOrigin(value.focusOrigin) !== undefined ? { focusOrigin: focusOrigin(value.focusOrigin) } : {}),
+    ...(value.theme === "system" || value.theme === "light" || value.theme === "dark" ? { theme: value.theme } : {}),
   };
 }
 

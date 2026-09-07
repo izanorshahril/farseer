@@ -8,7 +8,7 @@ Start with [the active work map](.scratch/farseer-command-center/map.md) for nex
 The original v1 decision route is complete through ticket 28, while follow-on tickets through 40 record implementation corrections, shipped surfaces and a small set of open boundaries.
 Use the map and linked tickets as the specification rather than treating the historical research drafts as current plans.
 `POST /v1/cells/{id}/instruct` runs a cell's manager against a goal and returns a `run_id` immediately.
-The operator surface is a separate client under [`ui/`](ui/README.md): a Berd-inspired pale workbench of persisted widgets, an optional clock, one composer addressed to the top manager, and a host bridge that is the only thing a widget may reach.
+The operator surface is a separate client under [`ui/`](ui/README.md): a Berd-inspired customizable workbench of persisted widgets, system/light/dark themes, per-project Work views, a bottom runtime/usage strip, one composer addressed to the top manager, and a host bridge that is the only thing a widget may reach.
 
 A Claude Code manager receives farseer's own MCP face under a per-run capability and can call `delegate_to_worker`, or `delegate_to_cell` for a granted cell, during the same live conversation; cancel and steer remain available through the run API.
 See [What runs today](#what-runs-today).

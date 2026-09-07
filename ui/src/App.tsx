@@ -118,6 +118,8 @@ type ProjectRoot = { projects: { name: string; path: string }[] };
 type ContextConversation = { conversation_id: string; title: string; project_path?: string; manager_runner?: string };
 type ContextTask = { task_id: string; title: string; conversation_id: string; project_path?: string };
 type ManagerCell = { manager: { runners: string[] } };
+type RuntimeSummary = { state: string; active_runs: number; resource_monitor_enabled: boolean };
+type QuotaSummary = { windows: { status: string; used_percent?: number }[] };
 
 
 const LAYOUT_VERSION = 8;
@@ -136,6 +138,7 @@ const DEFAULT_LAYOUT: CanvasLayout = {
     capacity: DEFAULT_WIDGET_SPAN,
   },
   unit: DEFAULT_WIDGET_UNIT,
+  theme: "system",
 };
 
 /**
@@ -357,6 +360,11 @@ export function App() {
   const [error, setError] = useState<string | null>(null);
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+  const [theme, setTheme] = useState<"system" | "light" | "dark">("system");
+  const [composerContextOpen, setComposerContextOpen] = useState(false);
+  const [usageOpen, setUsageOpen] = useState(false);
+  const [runtimeStatus, setRuntimeStatus] = useState<RuntimeSummary | null>(null);
+  const [quotaSummary, setQuotaSummary] = useState<QuotaSummary | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [privacy, setPrivacy] = useState(true);
   const [focusedId, setFocusedId] = useState<WidgetId | null>(null);
@@ -383,6 +391,8 @@ export function App() {
     x: number;
     y: number;
   } | null>(null);
+  const contextMenuFirst = useRef<HTMLDivElement | null>(null);
+  const contextMenuReturn = useRef<HTMLElement | null>(null);
 
   const pinContext = useCallback((widget: string, subjectName?: string) => {
     setAnchor({
@@ -394,6 +404,23 @@ export function App() {
       managerRunner: subject.managerRunner,
     });
   }, [subject]);
+
+  const openWidgetMenu = useCallback((id: WidgetId, title: string, target: HTMLElement) => {
+    const rect = target.getBoundingClientRect();
+    contextMenuReturn.current = target;
+    pinContext(title);
+    setContextMenu({
+      id,
+      title,
+      x: Math.max(8, Math.min(rect.right - 188, window.innerWidth - 196)),
+      y: Math.max(8, Math.min(rect.bottom + 6, window.innerHeight - 174)),
+    });
+  }, [pinContext]);
+
+  useEffect(() => {
+    if (!contextMenu) return;
+    requestAnimationFrame(() => contextMenuFirst.current?.focus());
+  }, [contextMenu]);
 
   const clearContext = useCallback(() => {
     setAnchor({ widget: "canvas" });
@@ -419,6 +446,7 @@ export function App() {
         layoutRef.current = next;
         setLayout(next);
         setSidebarCollapsed(next.sidebarCollapsed ?? false);
+        setTheme(next.theme ?? "system");
         setFocusedId(next.focused ?? null);
         setFocusPane(next.focusPane ?? "inspector");
         setComparisonId(next.comparison ?? null);
@@ -457,6 +485,20 @@ export function App() {
       setManagerRunners(cell.manager.runners);
     }).catch(() => undefined);
   }, []);
+
+  const refreshRuntime = useCallback(async () => {
+    try {
+      setRuntimeStatus(await bridge.read<RuntimeSummary>("/runtime"));
+    } catch {
+      setRuntimeStatus(null);
+    }
+  }, []);
+
+  useEffect(() => {
+    void refreshRuntime();
+    const timer = window.setInterval(() => void refreshRuntime(), 10000);
+    return () => window.clearInterval(timer);
+  }, [refreshRuntime]);
 
   useEffect(() => onSubjectSelection(setSubject), []);
   useEffect(() => onPrivacy(setPrivacy), []);
@@ -506,6 +548,11 @@ export function App() {
   useEffect(() => {
     const closeOverlays = (event: KeyboardEvent) => {
       if (event.key !== "Escape") return;
+      if (contextMenu) {
+        setContextMenu(null);
+        requestAnimationFrame(() => contextMenuReturn.current?.focus());
+        return;
+      }
       setSidebarOpen(false);
       setContextMenu(null);
       setSettingsOpen(false);
@@ -522,7 +569,7 @@ export function App() {
       document.removeEventListener("keydown", closeOverlays);
       document.removeEventListener("pointerdown", closeContextMenu);
     };
-  }, [leaveFocus]);
+  }, [contextMenu, leaveFocus]);
 
   // A removed or failed authored face must never leave the canvas in a blank
   // focused route. Return to the last valid face and preserve execution state.
@@ -580,6 +627,7 @@ export function App() {
     <div
       className={[
         "app",
+        "theme-" + theme,
         sidebarOpen ? "sidebar-open" : "",
         sidebarCollapsed ? "sidebar-collapsed" : "",
         focusedId ? "focus-mode" : "",
@@ -690,6 +738,18 @@ export function App() {
           <div className="top-actions">
             <span className="saved-state"><span className="status-orb" aria-hidden />arrangement saved</span>
             <button
+              className="icon-button theme-toggle"
+              aria-label={"Theme: " + theme + ". Change theme"}
+              title={"Theme: " + theme}
+              onClick={() => {
+                const next = theme === "system" ? "dark" : theme === "dark" ? "light" : "system";
+                setTheme(next);
+                persist((current) => ({ ...current, theme: next }));
+              }}
+            >
+              {theme === "dark" ? "☾" : theme === "light" ? "☀" : "◐"}
+            </button>
+            <button
               className="icon-button"
               aria-pressed={privacy}
               aria-label={privacy ? "Disable presentation privacy mode" : "Enable presentation privacy mode"}
@@ -783,13 +843,7 @@ export function App() {
               onClick={() => pinContext(widget.title)}
               onContextMenu={(event) => {
                 event.preventDefault();
-                pinContext(widget.title);
-                setContextMenu({
-                  id,
-                  title: widget.title,
-                  x: Math.max(8, Math.min(event.clientX, window.innerWidth - 196)),
-                  y: Math.max(8, Math.min(event.clientY, window.innerHeight - 174)),
-                });
+                openWidgetMenu(id, widget.title, event.currentTarget);
               }}
             >
               <div className="head">
@@ -903,6 +957,18 @@ export function App() {
                 >
                   focus
                 </button>
+                <button
+                  type="button"
+                  className="icon-button widget-menu-button"
+                  aria-label={"Open " + widget.title + " actions"}
+                  title="Widget actions"
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    openWidgetMenu(id, widget.title, event.currentTarget);
+                  }}
+                >
+                  ⋯
+                </button>
                 <select
                   className="badge size"
                   aria-label={`Size of ${widget.title} widget`}
@@ -1000,13 +1066,58 @@ export function App() {
           </aside>
         )}
       </main>
+        <div className="status-bar" aria-label="Runtime and usage status">
+          <button
+            type="button"
+            className="status-action"
+            aria-expanded={usageOpen}
+            onClick={() => {
+              setUsageOpen((current) => !current);
+              if (!quotaSummary) void bridge.read<QuotaSummary>("/quota").then(setQuotaSummary).catch(() => setQuotaSummary(null));
+              persist((current) => current.mounted.includes("capacity") ? current : toggleMounted(current, "capacity"));
+            }}
+          >
+            <span className="status-orb" aria-hidden />
+            usage {runtimeStatus ? runtimeStatus.active_runs + " active" : "unavailable"}
+          </button>
+          <span className="status-item">project: {subject.project ? mask(subject.project.split(/[\\/]/).at(-1) ?? subject.project, "path", privacy) : "global"}</span>
+          <span className="status-item">harnesses: {managerRunners.length}</span>
+          <span className="status-item">runtime: {runtimeStatus?.state ?? "offline"}</span>
+          {usageOpen && (
+            <div className="status-popover" role="dialog" aria-label="Usage and resource breakdown">
+              <b>Usage and resources</b>
+              <p>{runtimeStatus ? runtimeStatus.active_runs + " active run" + (runtimeStatus.active_runs === 1 ? "" : "s") : "Runtime status unavailable"}</p>
+              <p>resource monitor: {runtimeStatus ? (runtimeStatus.resource_monitor_enabled ? "on" : "off") : "unknown"}</p>
+              <p>quota windows: {quotaSummary ? quotaSummary.windows.length : "reading..."}</p>
+              {quotaSummary && <p>provider meters: {quotaSummary.windows.filter((window) => window.used_percent !== undefined).length}</p>}
+              <button
+                type="button"
+                className="chip"
+                onClick={() => {
+                  setUsageOpen(false);
+                  persist((current) => current.mounted.includes("capacity") ? current : toggleMounted(current, "capacity"));
+                }}
+              >
+                open capacity breakdown
+              </button>
+            </div>
+          )}
+        </div>
         {contextMenu && (
           <div
             className="widget-context-menu"
+            ref={contextMenuFirst}
+            tabIndex={-1}
             role="menu"
             aria-label={`${contextMenu.title} widget actions`}
             style={{ left: contextMenu.x, top: contextMenu.y }}
             onContextMenu={(event) => event.preventDefault()}
+            onKeyDown={(event) => {
+              if (event.key !== "Escape") return;
+              event.preventDefault();
+              setContextMenu(null);
+              requestAnimationFrame(() => contextMenuReturn.current?.focus());
+            }}
           >
             <p>{contextMenu.title}</p>
             <button
@@ -1090,6 +1201,15 @@ export function App() {
               {subject.conversation && <span className="route-chip" title={mask(subject.conversation, "session", privacy)}>conversation: {mask(subject.conversation.slice(0, 8), "session", privacy)}</span>}
               <button
                 type="button"
+                className="context-toggle"
+                aria-expanded={composerContextOpen}
+                title="Choose project, session, task, or manager runner"
+                onClick={() => setComposerContextOpen((current) => !current)}
+              >
+                {composerContextOpen ? "hide context" : "context"}
+              </button>
+              <button
+                type="button"
                 className="anchor-chip"
                 title="clear the pinned request context"
                 onClick={clearContext}
@@ -1097,7 +1217,8 @@ export function App() {
                 {anchor.widget === "canvas" ? "global context" : `clear ${anchor.widget}`}
               </button>
             </div>
-            <div className="composer-pickers" aria-label="Explicit composer context">
+            {composerContextOpen && (
+              <div className="composer-pickers" aria-label="Explicit composer context">
               <label>
                 <span>face</span>
                 <select
@@ -1179,7 +1300,8 @@ export function App() {
                   {managerRunners.map((runner) => <option key={runner}>{runner}</option>)}
                 </select>
               </label>
-            </div>
+              </div>
+            )}
             <textarea
               name="ask"
               rows={1}
