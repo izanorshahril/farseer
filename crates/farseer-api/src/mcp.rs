@@ -11,7 +11,7 @@
 //! The same face reaches non-Claude managers through the transports in `31 manager delegation reach`:
 //! Codex app-server handshake configuration, ACP `session/new` MCP servers, and the pi/omp extension.
 //!
-//! [What transport carries a cell-to-cell call?]: ../../../.scratch/farseer/issues/06-cell-transport.md
+//! Transport and authority rules are defined in [CORE.md](../../../CORE.md#application-services).
 //!
 //! The service is nested into the existing router, not a second process.
 //! [Is the cell the right primitive?] gives farseer one API and [Store: SQLite edge tables and CTEs, or an embedded graph engine?] gives the record one writer by construction: one process and one `Store`.
@@ -20,10 +20,10 @@
 //!
 //! Every tool is manager-scoped: `manager_run_id` plus its per-run capability resolves runtime-owned identity and a pinned definition rather than trusting a caller-supplied cell.
 //!
-//! [Record scope]: ../../../.scratch/farseer/issues/02-record-scope.md
-//! [Which cells may a manager call, and does an instruction route or delegate?]: ../../../.scratch/farseer/issues/22-cell-addressing.md
-//! [Is the cell the right primitive?]: ../../../.scratch/farseer/issues/01-cell-primitive.md
-//! [Store: SQLite edge tables and CTEs, or an embedded graph engine?]: ../../../.scratch/farseer/issues/09-store-decision.md
+//! Record scope is defined in [CORE.md](../../../CORE.md#record-and-projections).
+//! Cell addressing is defined in [CORE.md](../../../CORE.md#projects-and-multi-harness-teams).
+//! The cell primitive is defined in [CORE.md](../../../CORE.md#domain-model).
+//! Storage policy is defined in [CORE.md](../../../CORE.md#record-and-projections).
 
 use std::sync::Arc;
 

@@ -5,7 +5,7 @@ This file is the widget contract. Read it, write the required files, and leave t
 
 ## What a widget is
 
-A **face for a cell**, per [28 operator surface](../.scratch/farseer/issues/28-operator-surface.md).
+A **client face for a cell**, per [CORE.md](../CORE.md#capability-and-feature-seams).
 It renders. The cell behind it thinks.
 
 A widget **displays** a cell and never **addresses** one.

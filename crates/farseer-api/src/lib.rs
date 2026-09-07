@@ -1347,7 +1347,7 @@ fn mcp_error(error: rmcp::ErrorData) -> ApiError {
 /// It may also call `delegate_to_cell`, which preserves the task while a granted cell runs its own manager - fire-and-forget, per `06 cell transport`.
 /// Managers using another native runner still execute the goal directly because no equivalent MCP launch shape has been verified for those CLIs.
 ///
-/// [What is the local API surface?]: ../../../.scratch/farseer/issues/16-local-api-surface.md
+/// [What is the local API surface?]: ../../../CORE.md#application-services
 async fn instruct_cell(
     State(state): State<Arc<AppState>>,
     UrlPath(cell_id): UrlPath<String>,

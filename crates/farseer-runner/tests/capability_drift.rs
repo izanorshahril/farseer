@@ -1,6 +1,6 @@
 //! Does each runner still do what farseer's tables say it does?
 //!
-//! Every capability table in this repo - `HARNESS.md`'s matrix,
+//! Every capability table in this repo - `CORE.md`'s capability rules,
 //! `pi::loads_skills_by_path`, `pi::takes_tool_allowlist`,
 //! `farseer_manager::deny_discovered_tools` - was written from a live probe on
 //! one machine on one day. `10 runner inventory`'s rule is **observed, never
@@ -46,7 +46,7 @@ fn assert_flag(text: &str, flag: &str, expected: bool, runner: &str, table: &str
         expected,
         "{runner} {} `{flag}`, and {table} says it {}. \
          Re-probe the runner and update the table - do not edit this assertion \
-         to match. See `HARNESS.md` section 6a.",
+         to match. See `CORE.md` capability and feature seams.",
         if found { "offers" } else { "no longer offers" },
         if expected { "does" } else { "does not" },
     );

@@ -4,7 +4,7 @@
 //! `farseer-api` exposes `delegate_to_worker` through MCP, then calls this same synchronous engine for the selected roster worker.
 //! The four verbs from [Run state model and control semantics] also call this engine.
 //!
-//! [Run state model and control semantics]: ../../../.scratch/farseer/issues/05-run-state-model.md
+//! [Run state model and control semantics]: ../../../CORE.md#invariants
 //!
 //! **The watchdog only reports.**
 //! [Hang detection prior art] and [Run state model and control semantics] make `120s` stalled, `600s` likely-hung, and no auto-kill.
@@ -17,7 +17,7 @@
 //! Cancellation before any terminal result carries unknown report values and records zero usage.
 //! This keeps the record honest about a human choosing not to proceed rather than something breaking.
 //!
-//! [Hang detection prior art]: ../../../.scratch/farseer/issues/18-hang-detection-prior-art.md
+//! [Hang detection prior art]: ../../../CORE.md#terminal-and-observations
 //!
 //! Windows only, like the runner it drives - `farseer-runner`'s `spawn` and
 //! `drive` modules are themselves `cfg(windows)`, so this crate would fail to

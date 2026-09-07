@@ -1,6 +1,6 @@
 //! A runner's child process, reaped as one tree.
 //!
-//! `jobspike` (`.scratch/farseer/spikes/jobspike`) proved a Win32 Job Object
+//! the Windows process evidence summarized in `CORE.md` proved a Win32 Job Object
 //! with `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` reaps a five-deep process tree in
 //! 300-400us on handle close with zero survivors, against five of six
 //! surviving a root-only `TerminateProcess`. This is that mechanism, wired to
