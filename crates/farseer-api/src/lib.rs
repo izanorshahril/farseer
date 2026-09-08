@@ -31,27 +31,38 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router, middleware};
 use serde::{Deserialize, Serialize};
+use tokio::sync::{Notify, Semaphore};
 
 use farseer_core::RunnerConfig;
 use farseer_core::policy::Budget;
 use farseer_core::run::{WorkerContract, WorkerContractSpec, WorkspaceStrategy};
-use farseer_core::{CellDefinition, CellId, LivenessThresholds, NewEvent, RunId, Seq, TaskId};
+use farseer_core::{
+    CellDefinition, CellId, LivenessThresholds, NewEvent, RosterEntry, RunId, Seq, TaskId,
+};
 use farseer_manager::{
     LivenessHandle, MANAGER_CELL_FIELD, RUN_ROLE_FIELD, RunOptions, RunRole, RunSink, SteerHandle,
 };
 use farseer_runner::spawn::CancelToken;
+use farseer_runner::terminal::TerminalManager;
 use farseer_store::{RunRow, ScanFilter, Store, StoreError, UI_STATE_CAP_BYTES};
 
 mod a2a;
+mod artifacts;
 mod attach;
 mod lifecycle;
+mod maintenance;
 mod mcp;
 mod notify;
+mod project_profiles;
 mod projects;
 pub mod security;
+mod terminals;
 mod work;
 
 pub use security::{RuntimeToken, runtime_file_path, write_runtime_file};
+
+const API_VERSION: &str = "v1";
+const RUNTIME_FEATURES: &[&str] = &["health", "sse", "commands"];
 
 /// How often the stream looks for new events.
 ///
@@ -70,6 +81,7 @@ pub struct AppState {
     cells: Mutex<BTreeMap<CellId, CellDefinition>>,
     cells_dir: PathBuf,
     token: RuntimeToken,
+    runtime_id: String,
     thresholds: LivenessThresholds,
     /// Where a run's workspace is created - a plain directory under here for
     /// `WorkspaceStrategy::PlainDirectory`, a `git worktree` under here for
@@ -108,6 +120,14 @@ pub struct AppState {
     worker_counts: Mutex<HashMap<CellId, u32>>,
     /// Set exactly once after `serve` binds, including an OS-selected port.
     base_url: OnceLock<String>,
+    /// Optional operator shell sessions. Their output is adapter state, never
+    /// canonical run truth.
+    terminals: TerminalManager,
+    /// Keep local artifact work bounded even when several clients submit at
+    /// once; queued work remains visible through the normal task record.
+    artifact_slots: Arc<Semaphore>,
+    /// Bounded single-worker queue for optional transcript projections.
+    transcript_queue: OnceLock<tokio::sync::mpsc::Sender<work::ProjectionRequest>>,
     /// The last snapshot [`poll_windows`] took, or empty if nothing has polled.
     ///
     /// Cached rather than fetched per request for two reasons, and the second is
@@ -116,6 +136,130 @@ pub struct AppState {
     /// launch. Empty is the honest resting state - farseer reports what it
     /// observed, and before the first poll it has observed nothing.
     polled_windows: Mutex<Vec<farseer_core::WindowObservation>>,
+    /// Optional Job Object sampling is operator-controlled and failure-isolated.
+    resource_monitor: AtomicBool,
+    /// Serialized access to the small JSON proposal ledger. The work itself
+    /// remains in the canonical SQLite task/run/artifact rows.
+    maintenance_gate: Mutex<()>,
+    maintenance_worker_active: AtomicBool,
+    maintenance_path: PathBuf,
+    runtime: RuntimeControl,
+}
+
+const DEFAULT_DRAIN_DEADLINE: Duration = Duration::from_secs(30);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RuntimePhase {
+    Running,
+    Draining { deadline_ts: i64 },
+    ForceRequested,
+}
+
+impl RuntimePhase {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Running => "running",
+            Self::Draining { .. } => "draining",
+            Self::ForceRequested => "forcing",
+        }
+    }
+}
+
+#[derive(Debug)]
+struct RuntimeControl {
+    phase: Mutex<RuntimePhase>,
+    active: Mutex<usize>,
+    notify: Notify,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct RuntimeStatus {
+    pub state: &'static str,
+    pub active_runs: usize,
+    pub drain_deadline_ts: Option<i64>,
+    pub drain_expired: bool,
+    /// Set on the force response to make the operator's blast radius explicit.
+    pub affected_runs: Option<usize>,
+    /// Whether new supervised runs collect periodic resource observations.
+    pub resource_monitor_enabled: bool,
+}
+
+impl RuntimeControl {
+    fn new() -> Self {
+        Self {
+            phase: Mutex::new(RuntimePhase::Running),
+            active: Mutex::new(0),
+            notify: Notify::new(),
+        }
+    }
+
+    fn status(&self, now: i64) -> RuntimeStatus {
+        let phase = *self.phase.lock().unwrap_or_else(|e| e.into_inner());
+        let deadline = match phase {
+            RuntimePhase::Draining { deadline_ts } => Some(deadline_ts),
+            _ => None,
+        };
+        RuntimeStatus {
+            state: phase.as_str(),
+            active_runs: *self.active.lock().unwrap_or_else(|e| e.into_inner()),
+            drain_deadline_ts: deadline,
+            drain_expired: deadline.is_some_and(|deadline| now >= deadline),
+            affected_runs: None,
+            resource_monitor_enabled: false,
+        }
+    }
+
+    /// Reserve admission atomically with the running-state check.
+    fn admit(&self) -> bool {
+        let phase = self.phase.lock().unwrap_or_else(|e| e.into_inner());
+        if *phase != RuntimePhase::Running {
+            return false;
+        }
+        *self.active.lock().unwrap_or_else(|e| e.into_inner()) += 1;
+        true
+    }
+
+    fn release(&self) {
+        let mut active = self.active.lock().unwrap_or_else(|e| e.into_inner());
+        *active = active.saturating_sub(1);
+        self.notify.notify_waiters();
+    }
+
+    fn drain(&self, deadline_ts: i64) -> (RuntimePhase, bool) {
+        let mut phase = self.phase.lock().unwrap_or_else(|e| e.into_inner());
+        if *phase == RuntimePhase::Running {
+            *phase = RuntimePhase::Draining { deadline_ts };
+            self.notify.notify_waiters();
+            (*phase, true)
+        } else {
+            (*phase, false)
+        }
+    }
+
+    fn force(&self) -> (RuntimePhase, bool) {
+        let mut phase = self.phase.lock().unwrap_or_else(|e| e.into_inner());
+        if *phase == RuntimePhase::ForceRequested {
+            return (*phase, false);
+        }
+        *phase = RuntimePhase::ForceRequested;
+        self.notify.notify_waiters();
+        (*phase, true)
+    }
+
+    fn should_stop(&self) -> bool {
+        let phase = *self.phase.lock().unwrap_or_else(|e| e.into_inner());
+        phase != RuntimePhase::Running
+            && *self.active.lock().unwrap_or_else(|e| e.into_inner()) == 0
+    }
+
+    async fn wait_for_shutdown(&self) {
+        loop {
+            if self.should_stop() {
+                return;
+            }
+            self.notify.notified().await;
+        }
+    }
 }
 
 /// What `farseer_manager::run_worker`'s `on_started` callback hands back for
@@ -123,8 +267,8 @@ pub struct AppState {
 struct RunHandle {
     cancel: CancelToken,
     liveness: LivenessHandle,
-    /// `None` when this run's runner has no steering path - Codex today,
-    /// per `farseer_manager::start_worker`.
+    /// `None` when this run's runner has no steering path, per
+    /// `farseer_manager::start_worker`.
     steer: Option<SteerHandle>,
 }
 
@@ -265,13 +409,19 @@ impl AppState {
     ) -> Self {
         let runs_dir = runs_dir.into();
         let transcript_dir = runs_dir.parent().unwrap_or(&runs_dir).join("transcripts");
+        let maintenance_path = runs_dir.join("maintenance.json");
         Self {
             store: Mutex::new(store),
             cells: Mutex::new(BTreeMap::new()),
             cells_dir: cells_dir.into(),
             token,
+            runtime_id: uuid::Uuid::new_v4().to_string(),
             thresholds: LivenessThresholds::default(),
             polled_windows: Mutex::new(Vec::new()),
+            resource_monitor: AtomicBool::new(true),
+            maintenance_gate: Mutex::new(()),
+            maintenance_worker_active: AtomicBool::new(false),
+            maintenance_path,
             runs_dir,
             transcript_dir,
             repo_root: repo_root.into(),
@@ -282,7 +432,55 @@ impl AppState {
             pending_cancellations: Mutex::new(HashMap::new()),
             worker_counts: Mutex::new(HashMap::new()),
             base_url: OnceLock::new(),
+            terminals: TerminalManager::default(),
+            artifact_slots: Arc::new(Semaphore::new(2)),
+            transcript_queue: OnceLock::new(),
+            runtime: RuntimeControl::new(),
         }
+    }
+
+    pub fn runtime_status(&self) -> RuntimeStatus {
+        let mut status = self.runtime.status(now_ms());
+        status.resource_monitor_enabled = self.resource_monitor.load(Ordering::Acquire);
+        status
+    }
+
+    fn set_resource_monitor(&self, enabled: bool) {
+        self.resource_monitor.store(enabled, Ordering::Release);
+    }
+
+    fn resource_monitor_enabled(&self) -> bool {
+        self.resource_monitor.load(Ordering::Acquire)
+    }
+
+    fn admit_run(&self) -> ApiResult<()> {
+        if self.runtime.admit() {
+            Ok(())
+        } else {
+            Err(ApiError::Policy(
+                "runtime is draining and accepts no new work".into(),
+            ))
+        }
+    }
+
+    fn release_run(&self) {
+        self.runtime.release();
+    }
+
+    fn append_runtime_event(&self, action: &str, payload: serde_json::Value) -> ApiResult<()> {
+        self.store().append(&NewEvent::new(
+            CellId::new("runtime"),
+            RunId::none(),
+            farseer_core::EventKind::RUNTIME_LIFECYCLE,
+            farseer_core::Actor::Operator,
+            now_ms(),
+            serde_json::json!({
+                "action": action,
+                "state": self.runtime_status().state,
+                "details": payload,
+            }),
+        ))?;
+        Ok(())
     }
 
     /// Re-read every definition from disk.
@@ -338,6 +536,39 @@ impl AppState {
 
     pub fn runner_config(&self) -> &RunnerConfig {
         &self.runner_config
+    }
+
+    pub(crate) fn terminals(&self) -> &TerminalManager {
+        &self.terminals
+    }
+
+    pub(crate) fn runs_dir(&self) -> &std::path::Path {
+        &self.runs_dir
+    }
+
+    pub(crate) fn maintenance_gate(&self) -> std::sync::MutexGuard<'_, ()> {
+        self.maintenance_gate
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+    }
+
+    pub(crate) fn try_start_maintenance_worker(&self) -> bool {
+        self.maintenance_worker_active
+            .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
+            .is_ok()
+    }
+
+    pub(crate) fn finish_maintenance_worker(&self) {
+        self.maintenance_worker_active
+            .store(false, Ordering::Release);
+    }
+
+    pub(crate) fn maintenance_path(&self) -> &Path {
+        &self.maintenance_path
+    }
+
+    pub(crate) fn active_run_ids(&self) -> Vec<String> {
+        self.runs().keys().map(ToString::to_string).collect()
     }
 
     pub fn reload(&self) -> ReloadReport {
@@ -460,6 +691,33 @@ impl RunSink for AppState {
         self.store()
             .observe_window(cell_id, run_id, observation, ts)
     }
+
+    fn observe_resource(
+        &self,
+        observation: &farseer_runner::resource::ResourceObservation,
+    ) -> Result<(), StoreError> {
+        let run_id = observation
+            .run_id
+            .parse()
+            .map_err(|_| StoreError::Corrupt {
+                field: "resource run_id",
+                value: observation.run_id.clone(),
+            })?;
+        self.store()
+            .record_resource(&farseer_store::ResourceSample {
+                run_id,
+                source: observation.source.clone(),
+                scope: observation.scope.clone(),
+                cpu_time_100ns: observation.cpu_time_100ns,
+                memory_high_water_bytes: observation.memory_high_water_bytes,
+                cpu_unit: observation.cpu_unit.to_string(),
+                memory_unit: observation.memory_unit.to_string(),
+                timestamp_ms: observation.timestamp_ms,
+                collector_version: observation.collector_version.to_string(),
+                status: observation.status.to_string(),
+                final_sample: observation.final_sample,
+            })
+    }
 }
 
 #[derive(Debug, Default, Serialize)]
@@ -479,6 +737,26 @@ pub struct ReloadError {
 pub fn router(state: Arc<AppState>) -> Router {
     Router::new()
         .route("/v1/health", get(health))
+        .route("/v1/runtime", get(runtime_status))
+        .route("/v1/runtime/drain", post(drain_runtime))
+        .route("/v1/runtime/force", post(force_runtime))
+        .route("/v1/runtime/resources", post(set_resource_monitor))
+        .route(
+            "/v1/maintenance/proposals",
+            get(maintenance::list).post(maintenance::begin),
+        )
+        .route(
+            "/v1/maintenance/proposals/{proposal_id}/evidence",
+            post(maintenance::record_evidence),
+        )
+        .route(
+            "/v1/maintenance/proposals/{proposal_id}/execute",
+            post(maintenance::execute),
+        )
+        .route(
+            "/v1/maintenance/proposals/{proposal_id}/cancel",
+            post(maintenance::cancel),
+        )
         .route("/v1/cells", get(list_cells))
         .route("/v1/cells/{cell_id}", get(get_cell))
         .route("/v1/cells/reload", post(reload_cells))
@@ -499,6 +777,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/v1/stream", get(stream_events))
         .route("/v1/runs", get(list_runs))
         .route("/v1/runs/{run_id}", get(get_run))
+        .route("/v1/runs/{run_id}/resources", get(get_run_resources))
         .route("/v1/runs/{run_id}/cancel", post(cancel_run))
         .route("/v1/runs/{run_id}/steer", post(steer_run))
         .route("/v1/runs/{run_id}/rerun", post(rerun_run))
@@ -508,16 +787,29 @@ pub fn router(state: Arc<AppState>) -> Router {
             get(work::list_conversations).post(work::create_conversation),
         )
         .route("/v1/tasks", get(work::list_tasks))
+        .route("/v1/tasks/page", get(work::list_task_page))
         .route("/v1/tasks/{task_id}", get(work::get_task))
+        .route("/v1/artifacts/manifests", post(artifacts::start_manifest))
+        .route("/v1/work/sessions", get(work::list_sessions))
+        .route("/v1/work/session", get(work::get_session_detail))
         .route(
             "/v1/tasks/{task_id}/transition",
             post(work::transition_task),
         )
         .route("/v1/work/graph", get(work::graph))
         .route("/v1/work/search", get(work::search_transcripts))
+        .route("/v1/work/search/page", get(work::search_transcript_page))
         .route(
             "/v1/runs/{run_id}/transcripts",
             get(work::list_transcripts).post(work::add_transcript),
+        )
+        .route(
+            "/v1/runs/{run_id}/transcripts/{digest}/retry",
+            post(work::retry_transcript),
+        )
+        .route(
+            "/v1/runs/{run_id}/transcripts/{digest}/cancel",
+            post(work::cancel_transcript),
         )
         // `07 attach semantics`'s three control states. Attach is read-only by
         // default and `intervene` refuses without a takeover, because silent
@@ -537,10 +829,26 @@ pub fn router(state: Arc<AppState>) -> Router {
             "/v1/projects/roots",
             post(projects::add_root).delete(projects::remove_root),
         )
+        .route("/v1/projects/profile", get(project_profiles::get))
+        .route(
+            "/v1/projects/profile/reload",
+            post(project_profiles::reload),
+        )
+        .route(
+            "/v1/terminals",
+            get(terminals::profiles).post(terminals::open),
+        )
+        .route(
+            "/v1/terminals/{id}",
+            get(terminals::read).delete(terminals::end),
+        )
+        .route("/v1/terminals/{id}/input", post(terminals::input))
+        .route("/v1/terminals/{id}/resize", post(terminals::resize))
         .route("/v1/skills", get(skills))
         .route("/v1/quota", get(quota))
         .route("/v1/quota/refresh", post(refresh_quota))
         .route("/v1/analytics/cost", get(analytics_cost))
+        .route("/v1/analytics/cost/page", get(analytics_cost_page))
         .route("/v1/analytics/intervention", get(analytics_intervention))
         .route("/v1/analytics/rework", get(analytics_rework))
         .route("/v1/analytics/lessons", get(analytics_lessons))
@@ -562,12 +870,36 @@ pub async fn serve(state: Arc<AppState>, port: u16) -> std::io::Result<()> {
     let listener = tokio::net::TcpListener::bind(("127.0.0.1", port)).await?;
     let bound = listener.local_addr()?.port();
     state.set_mcp_endpoint(bound);
-    write_runtime_file(&runtime_file_path(), bound, &state.token)?;
+    let data_dir = state.runs_dir.parent().unwrap_or(&state.runs_dir);
+    let identity = security::RuntimeIdentity {
+        runtime_id: state.runtime_id.clone(),
+        data_dir_fingerprint: security::data_dir_fingerprint(data_dir),
+        api_version: API_VERSION.to_owned(),
+        build_provenance: format!("farseer-api/{}", env!("CARGO_PKG_VERSION")),
+        features: RUNTIME_FEATURES
+            .iter()
+            .map(|feature| (*feature).into())
+            .collect(),
+        process_id: Some(std::process::id()),
+        process_creation_time: security::process_creation_time(std::process::id()),
+    };
+    security::write_runtime_file_with_identity(
+        &runtime_file_path(),
+        bound,
+        &state.token,
+        &identity,
+    )?;
+    work::spawn_projection_worker(Arc::clone(&state));
     // `35 notification plane`: off unless the operator set a URL, and never in
     // the path of anything - a failed notification must not fail a run.
     notify::spawn(Arc::clone(&state));
     spawn_window_poll(Arc::clone(&state));
-    axum::serve(listener, router(state)).await
+    let shutdown_state = Arc::clone(&state);
+    axum::serve(listener, router(state))
+        .with_graceful_shutdown(async move {
+            shutdown_state.runtime.wait_for_shutdown().await;
+        })
+        .await
 }
 
 async fn guard(
@@ -649,6 +981,8 @@ enum ApiError {
     Steer(String),
     #[error("transcript storage failed: {0}")]
     Transcript(String),
+    #[error("terminal session failed: {0}")]
+    Terminal(#[from] farseer_runner::terminal::TerminalError),
 }
 
 impl IntoResponse for ApiError {
@@ -672,6 +1006,20 @@ impl IntoResponse for ApiError {
             | Self::Corrupt(_)
             | Self::Steer(_)
             | Self::Transcript(_) => StatusCode::INTERNAL_SERVER_ERROR,
+            Self::Terminal(error) => match error {
+                farseer_runner::terminal::TerminalError::ProfileUnavailable(_)
+                | farseer_runner::terminal::TerminalError::NotFound(_) => StatusCode::NOT_FOUND,
+                farseer_runner::terminal::TerminalError::MissingOwner
+                | farseer_runner::terminal::TerminalError::InvalidWorkspace(_)
+                | farseer_runner::terminal::TerminalError::InvalidDimensions
+                | farseer_runner::terminal::TerminalError::Ended => StatusCode::BAD_REQUEST,
+                farseer_runner::terminal::TerminalError::Input(_)
+                | farseer_runner::terminal::TerminalError::Spawn(_)
+                | farseer_runner::terminal::TerminalError::Reader(_)
+                | farseer_runner::terminal::TerminalError::Cleanup(_) => {
+                    StatusCode::INTERNAL_SERVER_ERROR
+                }
+            },
         };
         (
             status,
@@ -683,11 +1031,107 @@ impl IntoResponse for ApiError {
 
 type ApiResult<T> = std::result::Result<T, ApiError>;
 
-async fn health() -> Json<serde_json::Value> {
+async fn health(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
+    let data_dir = state.runs_dir.parent().unwrap_or(&state.runs_dir);
     Json(serde_json::json!({
-        "api_version": "v1",
+        "api_version": API_VERSION,
         "runtime_version": env!("CARGO_PKG_VERSION"),
+        "runtime_id": state.runtime_id,
+        "data_dir_fingerprint": security::data_dir_fingerprint(data_dir),
+        "build_provenance": format!("farseer-api/{}", env!("CARGO_PKG_VERSION")),
+        "features": RUNTIME_FEATURES,
+        "process_id": std::process::id(),
+        "process_creation_time": security::process_creation_time(std::process::id()),
+        "lifecycle": state.runtime_status(),
     }))
+}
+
+async fn runtime_status(State(state): State<Arc<AppState>>) -> Json<RuntimeStatus> {
+    Json(state.runtime_status())
+}
+
+#[derive(Debug, Deserialize)]
+struct ResourceMonitorBody {
+    enabled: bool,
+}
+
+async fn set_resource_monitor(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<ResourceMonitorBody>,
+) -> ApiResult<Json<RuntimeStatus>> {
+    state.set_resource_monitor(body.enabled);
+    state.append_runtime_event(
+        "resource_monitor",
+        serde_json::json!({ "enabled": body.enabled }),
+    )?;
+    Ok(Json(state.runtime_status()))
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct DrainBody {
+    /// Test and operator override; the normal deadline is 30 seconds.
+    deadline_secs: Option<u64>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct ForceBody {
+    reason: Option<String>,
+}
+
+async fn drain_runtime(
+    State(state): State<Arc<AppState>>,
+    body: Option<Json<DrainBody>>,
+) -> ApiResult<Json<RuntimeStatus>> {
+    let seconds = body
+        .and_then(|Json(body)| body.deadline_secs)
+        .unwrap_or(DEFAULT_DRAIN_DEADLINE.as_secs())
+        .min(i64::MAX as u64);
+    let deadline = now_ms().saturating_add((seconds as i64).saturating_mul(1_000));
+    let (_, changed) = state.runtime.drain(deadline);
+    if changed {
+        state.append_runtime_event(
+            "drain",
+            serde_json::json!({
+                "deadline_ts": deadline,
+                "pending_runs": state.runtime_status().active_runs,
+            }),
+        )?;
+    }
+    Ok(Json(state.runtime_status()))
+}
+
+async fn force_runtime(
+    State(state): State<Arc<AppState>>,
+    body: Option<Json<ForceBody>>,
+) -> ApiResult<Json<RuntimeStatus>> {
+    let reason = body
+        .and_then(|Json(body)| body.reason)
+        .filter(|reason| !reason.trim().is_empty())
+        .unwrap_or_else(|| "operator requested force".into());
+    let pending = state.runtime_status().active_runs;
+    let (_, changed) = state.runtime.force();
+    if changed {
+        state.append_runtime_event(
+            "force",
+            serde_json::json!({
+                "reason": reason,
+                "pending_runs": pending,
+            }),
+        )?;
+        let ids = state
+            .pending_cancellations
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .keys()
+            .copied()
+            .collect::<Vec<_>>();
+        for run_id in ids {
+            let _ = cancel_run_inner(&state, run_id).await;
+        }
+    }
+    let mut status = state.runtime_status();
+    status.affected_runs = Some(pending);
+    Ok(Json(status))
 }
 
 async fn list_cells(State(state): State<Arc<AppState>>) -> Json<Vec<CellSummary>> {
@@ -701,6 +1145,7 @@ async fn list_cells(State(state): State<Arc<AppState>>) -> Json<Vec<CellSummary>
                 description: c.description.clone(),
                 version: c.version.clone(),
                 roster_size: c.roster.len(),
+                authority: cell_authority(c),
             })
             .collect(),
     )
@@ -713,6 +1158,81 @@ pub struct CellSummary {
     pub description: String,
     pub version: String,
     pub roster_size: usize,
+    pub authority: CellAuthority,
+}
+
+#[derive(Debug, Serialize)]
+pub struct CellAuthority {
+    pub tool_level: farseer_core::ToolLevel,
+    pub shell_grant: bool,
+    pub runners: Vec<RunnerAuthority>,
+    pub tools: Vec<DeclaredTool>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct RunnerAuthority {
+    pub runner: String,
+    /// `enforced` means farseer passes a runner-owned allowlist.
+    /// `not_requested` is the honest meaning of `shell`.
+    /// `refused` means the requested level cannot be imposed on this runner.
+    pub tool_level: &'static str,
+    /// Shell reach is observed only for the runner faces in this table.
+    /// Unknown faces stay unknown rather than being advertised as safe.
+    pub shell_reach: &'static str,
+}
+
+#[derive(Debug, Serialize)]
+pub struct DeclaredTool {
+    pub name: String,
+    pub grants_shell: bool,
+    pub serving_path: bool,
+    pub authority: &'static str,
+}
+
+fn cell_authority(cell: &CellDefinition) -> CellAuthority {
+    let tool_level = cell.manager.tools;
+    let shell_grant = cell.has_shell_grant();
+    let runners = cell
+        .manager
+        .runners
+        .iter()
+        .map(|runner| RunnerAuthority {
+            runner: runner.clone(),
+            tool_level: if tool_level == farseer_core::ToolLevel::Shell {
+                "not_requested"
+            } else if farseer_runner::pi::takes_tool_allowlist(runner) {
+                "enforced"
+            } else {
+                "refused"
+            },
+            shell_reach: if runner_has_shell_reach(runner) {
+                if shell_grant { "authorized" } else { "refused" }
+            } else {
+                "unobserved"
+            },
+        })
+        .collect();
+    let tools = cell
+        .roster
+        .iter()
+        .filter_map(|entry| match entry {
+            RosterEntry::Tool {
+                name, grants_shell, ..
+            } => Some(DeclaredTool {
+                name: name.clone(),
+                grants_shell: *grants_shell,
+                serving_path: false,
+                authority: "recorded_only",
+            }),
+            _ => None,
+        })
+        .collect();
+    CellAuthority {
+        tool_level,
+        shell_grant,
+        runners,
+        tools,
+    }
 }
 
 async fn get_cell(
@@ -741,6 +1261,27 @@ pub struct InstructBody {
     #[serde(default)]
     pub conversation_id: Option<String>,
     /// One candidate declared by this cell's manager definition.
+    #[serde(default)]
+    pub manager_runner: Option<String>,
+    /// Explicit UI context captured at submission time, per `07 explicit composer context`.
+    #[serde(default)]
+    pub anchor: Option<OperatorAnchor>,
+    /// Existing task the operator deliberately pinned as context, per `40 work model and session explorer`.
+    #[serde(default)]
+    pub task_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OperatorAnchor {
+    pub widget: String,
+    #[serde(default)]
+    pub subject: Option<String>,
+    #[serde(default)]
+    pub project: Option<String>,
+    #[serde(default)]
+    pub conversation: Option<String>,
+    #[serde(default)]
+    pub task: Option<String>,
     #[serde(default)]
     pub manager_runner: Option<String>,
 }
@@ -806,7 +1347,7 @@ fn mcp_error(error: rmcp::ErrorData) -> ApiError {
 /// It may also call `delegate_to_cell`, which preserves the task while a granted cell runs its own manager - fire-and-forget, per `06 cell transport`.
 /// Managers using another native runner still execute the goal directly because no equivalent MCP launch shape has been verified for those CLIs.
 ///
-/// [What is the local API surface?]: ../../../.scratch/farseer/issues/16-local-api-surface.md
+/// [What is the local API surface?]: ../../../CORE.md#application-services
 async fn instruct_cell(
     State(state): State<Arc<AppState>>,
     UrlPath(cell_id): UrlPath<String>,
@@ -816,16 +1357,16 @@ async fn instruct_cell(
     if goal.is_empty() {
         return Err(ApiError::BadRequest("goal must not be empty"));
     }
-    let cell = state
-        .cells()
-        .get(&CellId::new(cell_id))
-        .cloned()
-        .ok_or(ApiError::NotFound("cell"))?;
-    lifecycle::ensure_accepts_work(&state, &cell.cell_id)?;
+    validate_operator_anchor(&state, &body)?;
 
     let requested_conversation = body
         .conversation_id
         .as_deref()
+        .or_else(|| {
+            body.anchor
+                .as_ref()
+                .and_then(|anchor| anchor.conversation.as_deref())
+        })
         .map(|id| {
             id.parse::<farseer_core::ConversationId>()
                 .map_err(|_| ApiError::NotFound("conversation"))
@@ -839,32 +1380,97 @@ async fn instruct_cell(
         return Err(ApiError::NotFound("conversation"));
     }
 
-    let runner = body
-        .manager_runner
+    let requested_task = body
+        .task_id
         .as_deref()
+        .or_else(|| {
+            body.anchor
+                .as_ref()
+                .and_then(|anchor| anchor.task.as_deref())
+        })
+        .map(|id| id.parse::<TaskId>().map_err(|_| ApiError::NotFound("task")))
+        .transpose()?;
+    let requested_task_row = requested_task
+        .map(|id| state.store().task(id))
+        .transpose()?
+        .flatten();
+    if requested_task.is_some() && requested_task_row.is_none() {
+        return Err(ApiError::NotFound("task"));
+    }
+
+    let project = match body
+        .project
+        .as_deref()
+        .or_else(|| {
+            body.anchor
+                .as_ref()
+                .and_then(|anchor| anchor.project.as_deref())
+        })
         .or_else(|| {
             existing
                 .as_ref()
-                .and_then(|conversation| conversation.manager_runner.as_deref())
-        })
-        .unwrap_or_else(|| cell.manager.runner())
-        .to_owned();
+                .and_then(|conversation| conversation.project_path.as_deref())
+        }) {
+        Some(path) => Some(projects::resolve(&state, path)?),
+        None => None,
+    };
+    let project_profile = if cell_id == "zero" {
+        project
+            .as_deref()
+            .map(|path| project_profiles::effective(&state, path))
+            .transpose()?
+    } else {
+        None
+    };
+    let selected_cell_id = project_profile
+        .as_ref()
+        .map(|(profile, _)| profile.coordinating_cell.as_str())
+        .unwrap_or(&cell_id);
+    let cell = state
+        .cells()
+        .get(&CellId::new(selected_cell_id))
+        .cloned()
+        .ok_or_else(|| {
+            if project_profile.is_some() {
+                ApiError::BadRequest(
+                    "project profile references an unavailable coordinating cell; repair .farseer/profile.toml",
+                )
+            } else {
+                ApiError::NotFound("cell")
+            }
+        })?;
+    lifecycle::ensure_accepts_work(&state, &cell.cell_id)?;
+    let project_path = project.as_deref().map(projects::display);
+    let old_profile = project_path
+        .as_deref()
+        .and_then(|path| project_profiles::prior_profile(&state, path));
+    let requested_runner = body.manager_runner.as_deref().or_else(|| {
+        body.anchor
+            .as_ref()
+            .and_then(|anchor| anchor.manager_runner.as_deref())
+    });
+    let conversation_runner = existing
+        .as_ref()
+        .and_then(|conversation| conversation.manager_runner.as_deref())
+        .map(str::to_owned);
+    let (runner, routing_fallback) = if let Some(runner) = requested_runner {
+        (runner.to_owned(), None)
+    } else if let Some(runner) = conversation_runner.as_ref() {
+        (runner.clone(), None)
+    } else {
+        let preferred = cell.manager.runner().to_owned();
+        let selected = first_available_runner(&state, &cell.manager.runners).ok_or(
+            ApiError::BadRequest("all declared manager runners are currently exhausted"),
+        )?;
+        let fallback = (selected != preferred).then(|| (preferred, selected.clone()));
+        (selected, fallback)
+    };
     if !cell.manager.has_runner(&runner) {
         return Err(ApiError::BadRequest(
             "manager runner is not a candidate for this cell",
         ));
     }
     check_tool_level(&runner, cell.manager.tools)?;
-
-    let project = match body.project.as_deref().or_else(|| {
-        existing
-            .as_ref()
-            .and_then(|conversation| conversation.project_path.as_deref())
-    }) {
-        Some(path) => Some(projects::resolve(&state, path)?),
-        None => None,
-    };
-    let project_path = project.as_deref().map(projects::display);
     let now = now_ms();
     let title = title_of(goal).unwrap_or_else(|| "Untitled task".into());
     let conversation_id = if let Some(conversation) = existing {
@@ -882,6 +1488,21 @@ async fn instruct_cell(
         state.store().create_conversation(&conversation)?;
         conversation.conversation_id
     };
+    if let Some(task) = requested_task_row.as_ref() {
+        if task.conversation_id != conversation_id {
+            return Err(ApiError::BadRequest(
+                "task does not belong to the selected conversation",
+            ));
+        }
+        if let (Some(project), Some(task_project)) =
+            (project_path.as_deref(), task.project_path.as_deref())
+            && project != task_project
+        {
+            return Err(ApiError::BadRequest(
+                "task does not belong to the selected project",
+            ));
+        }
+    }
     let previous_run = state.store().latest_run_for_conversation(conversation_id)?;
     state
         .store()
@@ -893,7 +1514,7 @@ async fn instruct_cell(
         conversation_id,
         goal: goal.to_owned(),
         title,
-        project_path,
+        project_path: project_path.clone(),
         state: farseer_core::TaskState::Inbox,
         priority: 0,
         created_ts: now,
@@ -913,14 +1534,36 @@ async fn instruct_cell(
         cell_id: cell.cell_id.clone(),
         goal: goal.to_owned(),
         workspace: cell.workspace_strategy,
-        runner,
+        runner: runner.clone(),
         tool_grants: cell.tool_grants(),
         tool_level: cell.manager.tools,
         autonomy_ceiling: cell.policy.autonomy_ceiling,
         budget: cell.budget,
         definition_of_done: String::new(),
     });
-    let run_id = match spawn_run(&state, contract, RunRole::Manager, cell, project, None) {
+    let run_id = match spawn_run(
+        &state,
+        contract,
+        RunRole::Manager,
+        cell.clone(),
+        project,
+        None,
+        Some(routing_provenance(
+            &state,
+            &cell,
+            &runner,
+            if requested_runner.is_some() {
+                "explicit_runner_pin"
+            } else if conversation_runner.is_some() {
+                "conversation_runner_pin"
+            } else if routing_fallback.is_some() {
+                "availability_fallback"
+            } else {
+                "cell_preference"
+            },
+            cell.budget,
+        )),
+    ) {
         Ok(run_id) => run_id,
         Err(error) => {
             state.store().transition_task(
@@ -939,6 +1582,43 @@ async fn instruct_cell(
             .record_run_parent(run_id, parent, "continuation")?;
     }
 
+    state.store().append(&farseer_core::NewEvent::new(
+        cell.cell_id.clone(),
+        run_id,
+        farseer_core::EventKind::new(farseer_core::EventKind::OPERATOR_CONTEXT),
+        farseer_core::Actor::Operator,
+        now_ms(),
+        serde_json::json!({
+            "anchor": body.anchor,
+            "project": project_path,
+            "project_profile": project_profile.as_ref().map(|(profile, _)| serde_json::json!({
+                "old": old_profile,
+                "new": profile.coordinating_cell,
+                "actor": "operator",
+                "reason": "operator instruction accepted",
+            })),
+            "conversation_id": conversation_id,
+            "context_task_id": requested_task,
+            "manager_runner": runner,
+            "accepted_run_id": run_id,
+        }),
+    ))?;
+    if let Some((preferred, chosen)) = routing_fallback {
+        state.store().append(&farseer_core::NewEvent::new(
+            cell.cell_id.clone(),
+            run_id,
+            farseer_core::EventKind::new(farseer_core::EventKind::STATUS_CHANGED),
+            farseer_core::Actor::System,
+            now_ms(),
+            serde_json::json!({
+                "routing": "preferred_runner_unavailable",
+                "preferred": preferred,
+                "chosen": chosen,
+                "candidates": cell.manager.runners,
+            }),
+        ))?;
+    }
+
     Ok((
         StatusCode::ACCEPTED,
         Json(InstructResponse {
@@ -949,11 +1629,61 @@ async fn instruct_cell(
     ))
 }
 
-/// `12 autonomy and deny list`: every currently implemented native LLM runner has shell-equivalent reach, so launching one without an explicit shell-capable roster grant would silently widen authority.
-pub(crate) fn ensure_runner_authority(cell: &CellDefinition, runner: &str) -> ApiResult<()> {
-    if matches!(runner, "claude-code" | "codex" | "cursor-agent" | "goose")
-        && !cell.has_shell_grant()
+/// Reject a request whose displayed anchor disagrees with its explicit body
+/// fields before any conversation, task, or run row is created.
+fn validate_operator_anchor(state: &AppState, body: &InstructBody) -> ApiResult<()> {
+    let Some(anchor) = body.anchor.as_ref() else {
+        return Ok(());
+    };
+    if let (Some(body_project), Some(anchor_project)) =
+        (body.project.as_deref(), anchor.project.as_deref())
     {
+        let body_project = projects::resolve(state, body_project)?;
+        let anchor_project = projects::resolve(state, anchor_project)?;
+        if body_project != anchor_project {
+            return Err(ApiError::BadRequest(
+                "anchor project does not match request project",
+            ));
+        }
+    }
+    for (label, outer, inner) in [
+        (
+            "conversation",
+            body.conversation_id.as_deref(),
+            anchor.conversation.as_deref(),
+        ),
+        ("task", body.task_id.as_deref(), anchor.task.as_deref()),
+        (
+            "manager runner",
+            body.manager_runner.as_deref(),
+            anchor.manager_runner.as_deref(),
+        ),
+    ] {
+        if let (Some(outer), Some(inner)) = (outer, inner)
+            && outer != inner
+        {
+            return Err(ApiError::BadRequest(match label {
+                "manager runner" => "anchor manager runner does not match request runner",
+                "conversation" => "anchor conversation does not match request conversation",
+                _ => "anchor task does not match request task",
+            }));
+        }
+    }
+    Ok(())
+}
+
+/// Observed runner faces whose default tool set includes shell-equivalent reach.
+/// Keep this list explicit: an unknown face must not be advertised as bounded.
+fn runner_has_shell_reach(runner: &str) -> bool {
+    matches!(
+        runner,
+        "claude-code" | "codex" | "codex-app-server" | "cursor-agent" | "goose" | "pi" | "omp"
+    )
+}
+
+/// `12 autonomy and deny list`: every current shell-capable runner requires an explicit shell-capable roster grant.
+pub(crate) fn ensure_runner_authority(cell: &CellDefinition, runner: &str) -> ApiResult<()> {
+    if runner_has_shell_reach(runner) && !cell.has_shell_grant() {
         return Err(ApiError::Policy(format!(
             "runner `{runner}` exposes shell-equivalent reach, but cell `{}` grants no shell-capable tool",
             cell.cell_id
@@ -1067,6 +1797,7 @@ fn manager_run_options(
         usd_micros_per_mtok: state.runner_config().price_for(&contract.runner),
         // The manager's own declared skills, resolved to directories.
         skills: skill_paths(state, &contract.runner, &cell.manager.skills)?,
+        resource_monitor: state.resource_monitor_enabled(),
         // What the operator pinned, or nothing at all. `30 codex app
         // server`: farseer passes a model or an effort only when a
         // person wrote one down, so an unpinned runner keeps whatever
@@ -1354,6 +2085,7 @@ pub(crate) fn spawn_run(
     pinned_cell: CellDefinition,
     project: Option<PathBuf>,
     caller_children: Option<Arc<Mutex<HashSet<RunId>>>>,
+    routing: Option<serde_json::Value>,
 ) -> ApiResult<RunId> {
     ensure_runner_authority(&pinned_cell, &contract.runner)?;
     if let Some(dimension) = unenforceable_budget_dimension(&contract.runner, contract.budget) {
@@ -1378,8 +2110,43 @@ pub(crate) fn spawn_run(
         None
     };
     let run_id = contract.run_id;
+    // Admission comes before the provenance write so a draining runtime does
+    // not retain a routing event for work it refused.  The route is still
+    // sealed before any workspace or process is created.
+    state.admit_run()?;
+    // Build the payload before taking the store lock. `routing_provenance`
+    // reads the same store, so evaluating it inside the `append` call would
+    // re-enter the non-reentrant mutex and hang every run with an inferred
+    // route.
+    let routing = routing.unwrap_or_else(|| {
+        routing_provenance(
+            state,
+            &pinned_cell,
+            &contract.runner,
+            "sealed_contract",
+            contract.budget,
+        )
+    });
+    let routing_event = NewEvent::new(
+        contract.cell_id.clone(),
+        run_id,
+        farseer_core::EventKind::new(farseer_core::EventKind::ROUTING_SEALED),
+        farseer_core::Actor::System,
+        now_ms(),
+        routing,
+    );
+    if let Err(error) = state.store().append(&routing_event) {
+        state.release_run();
+        return Err(error.into());
+    }
     let (cwd, repo_for_teardown) =
-        create_workspace(state, contract.workspace, run_id, project.as_deref())?;
+        match create_workspace(state, contract.workspace, run_id, project.as_deref()) {
+            Ok(workspace) => workspace,
+            Err(error) => {
+                state.release_run();
+                return Err(error);
+            }
+        };
     let cancel_requested = Arc::new(AtomicBool::new(false));
     let manager_context = (role == RunRole::Manager).then(|| ManagerContext {
         manager_token: RuntimeToken::generate(),
@@ -1415,6 +2182,7 @@ pub(crate) fn spawn_run(
             // direct worker - carries no declared skills rather than
             // inheriting the cell manager's.
             skills: Vec::new(),
+            resource_monitor: state.resource_monitor_enabled(),
             // What the operator pinned, or nothing at all. `30 codex app
             // server`: farseer passes a model or an effort only when a
             // person wrote one down, so an unpinned runner keeps whatever
@@ -1436,8 +2204,10 @@ pub(crate) fn spawn_run(
         Err(error) => {
             let _ = std::fs::remove_file(security::manager_config_path(&run_id.to_string()));
             let _ = std::fs::remove_file(security::manager_prompt_path(&run_id.to_string()));
-            let _ =
-                farseer_runner::workspace::teardown_workspace(&cwd, repo_for_teardown.as_deref());
+            let _ = state
+                .terminals()
+                .defer_workspace_cleanup(&cwd, repo_for_teardown.as_deref());
+            state.release_run();
             return Err(error);
         }
     };
@@ -1498,11 +2268,13 @@ pub(crate) fn spawn_run(
             .remove(&run_id);
         drop(result);
 
-        if let Err(e) =
-            farseer_runner::workspace::teardown_workspace(&cwd, repo_for_teardown.as_deref())
+        if let Err(e) = background_state
+            .terminals()
+            .defer_workspace_cleanup(&cwd, repo_for_teardown.as_deref())
         {
             eprintln!("workspace teardown for run {run_id} did not complete: {e}");
         }
+        background_state.release_run();
     });
 
     Ok(run_id)
@@ -1683,8 +2455,8 @@ pub struct SteerBody {
 
 /// `05 run state model`'s **steer**: a follow-up message into a run's live process, on the
 /// frame `claude_code::steer_frame`'s 2026-08-23 probe verified.
-/// `400` when the run's runner has no steering path (Codex today) rather
-/// than writing a line nothing reads; `404` when the run is unknown or
+/// `400` when the run's runner has no steering path rather than writing a line
+/// nothing reads; `404` when the run is unknown or
 /// already finished, same as `cancel`.
 /// Mark a run as one a human stepped into, permanently.
 ///
@@ -1924,6 +2696,7 @@ async fn respawn(
         // An operator re-run belongs to the operator, not to whatever manager
         // owned the run it repeats.
         None,
+        None,
     ) {
         Ok(run_id) => run_id,
         Err(error) => {
@@ -2095,6 +2868,14 @@ pub struct RunView {
     pub operator_touched: bool,
     pub started_ts: i64,
     pub finished_ts: Option<i64>,
+    /// `12 attributed usage`: wall duration derived from observed start and finish timestamps.
+    /// This is a run-local observation and never a billing denominator.
+    pub duration_ms: i64,
+    /// `12 attributed usage`: whether the terminal report stated the cost or farseer derived it from
+    /// the configured list price.
+    pub cost_basis: &'static str,
+    /// `12 attributed usage`: the aggregation scope for the usage fields above.
+    pub usage_scope: &'static str,
     pub liveness_stalled_secs: u64,
     pub liveness_likely_hung_secs: u64,
     /// `18 hang detection prior art`/`05 run state model`'s watchdog state - `"live"`, `"stalled"` or `"likely_hung"` -
@@ -2182,6 +2963,19 @@ async fn get_run(
     Ok(Json(run_view(&state, row)))
 }
 
+/// Optional process evidence is read separately so an unavailable collector
+/// never changes the stable run shape or lifecycle response.
+async fn get_run_resources(
+    State(state): State<Arc<AppState>>,
+    UrlPath(run_id): UrlPath<String>,
+) -> ApiResult<Json<Vec<farseer_store::ResourceSample>>> {
+    let run_id: RunId = run_id.parse().map_err(|_| ApiError::NotFound("run"))?;
+    if state.store().run(run_id)?.is_none() {
+        return Err(ApiError::NotFound("run"));
+    }
+    Ok(Json(state.store().resource_samples(run_id, 256)?))
+}
+
 /// One row, on all three axes.
 ///
 /// Shared by the list and the single read so the two can never disagree about
@@ -2205,12 +2999,15 @@ fn title_of(goal: &str) -> Option<String> {
 
 /// The goal and role a run was queued with, read from its first recorded event.
 ///
-/// One indexed row per run - `events_run(run_id, seq)` makes `LIMIT 1` cheap -
+/// A small indexed prefix per run - `events_run(run_id, seq)` makes this cheap -
 /// rather than the full scan `original_run` does, because a list of fifty runs
 /// must not cost fifty full scans.
 fn queued_facts(state: &Arc<AppState>, run_id: RunId) -> (Option<String>, Option<String>) {
     let store = state.store();
-    let Ok(events) = store.scan(0, 1, &ScanFilter::run(run_id)) else {
+    // `13 explainable routing` seals one provenance event immediately before
+    // `run_queued`, so read the small fixed prefix and locate the queue event
+    // instead of assuming it is the first row.
+    let Ok(events) = store.scan(0, 4, &ScanFilter::run(run_id)) else {
         return (None, None);
     };
     let Some(queued) = events
@@ -2336,6 +3133,101 @@ fn first_available_runner(state: &AppState, candidates: &[String]) -> Option<Str
         .cloned()
 }
 
+/// Seal the route facts that led to a contract before its process is spawned.
+///
+/// This is deliberately a small projection over declared candidates and the
+/// latest observed windows.  It does not price work, discover runners, or
+/// turn unknown pressure into a score.  The candidate order is the cell
+/// author's order, which makes replaying the same observations deterministic.
+pub(crate) fn routing_provenance(
+    state: &AppState,
+    cell: &CellDefinition,
+    selected: &str,
+    reason: &str,
+    budget: Budget,
+) -> serde_json::Value {
+    routing_provenance_for_candidates(state, &cell.manager.runners, selected, reason, budget)
+}
+
+/// Variant used by a worker roster, whose candidates belong to the caller's
+/// pinned cell rather than to the cell manager itself.
+pub(crate) fn routing_provenance_for_candidates(
+    state: &AppState,
+    candidates: &[String],
+    selected: &str,
+    reason: &str,
+    budget: Budget,
+) -> serde_json::Value {
+    let config = state.runner_config();
+    let windows = state
+        .store()
+        .windows(|account| config.runners_on(account))
+        .unwrap_or_default();
+    let preferred = candidates.first().cloned();
+    let candidates = candidates
+        .iter()
+        .map(|runner| {
+            let account = config.account_for(runner);
+            let matching = windows
+                .iter()
+                .filter(|window| {
+                    config
+                        .runners_on(&window.account)
+                        .iter()
+                        .any(|name| name == runner)
+                })
+                .collect::<Vec<_>>();
+            let exhausted = matching
+                .iter()
+                .filter(|window| window.status == "exhausted_until")
+                .filter_map(|window| window.resets_at)
+                .collect::<Vec<_>>();
+            let overage = matching.iter().any(|window| window.is_using_overage);
+            let pressure = if !exhausted.is_empty() {
+                "exhausted"
+            } else if overage {
+                "overage"
+            } else if matching.is_empty() {
+                "unknown"
+            } else {
+                "available"
+            };
+            serde_json::json!({
+                "runner": runner,
+                "account": account,
+                "pressure": pressure,
+                "resets_at": exhausted,
+            })
+        })
+        .collect::<Vec<_>>();
+    let (model, effort) = config.launch_of(selected);
+    let cost_basis = match config.price_for(selected) {
+        Some(usd_micros_per_mtok) => serde_json::json!({
+            "kind": "configured_list_price_estimate",
+            "usd_micros_per_mtok": usd_micros_per_mtok,
+        }),
+        None => serde_json::json!({ "kind": "runner_reported_or_unknown" }),
+    };
+    serde_json::json!({
+        "version": 1,
+        "selected_runner": selected,
+        "preferred_runner": preferred,
+        "candidates": candidates,
+        "reason": reason,
+        "model_policy": {
+            "model": model,
+            "effort": effort,
+        },
+        "budget": budget,
+        "cost_basis": cost_basis,
+        "policy": {
+            "availability": "observed_windows",
+            "unknown_is_eligible": true,
+            "automatic_retries": 0,
+        },
+    })
+}
+
 /// Refuse a tool level farseer cannot actually impose on this runner.
 ///
 /// The third application of one rule, and the one `36 tool grant enforcement`
@@ -2406,6 +3298,13 @@ fn run_view(state: &Arc<AppState>, row: RunRow) -> RunView {
         operator_touched: row.operator_touched,
         started_ts: row.started_ts,
         finished_ts: row.finished_ts,
+        duration_ms: row
+            .finished_ts
+            .unwrap_or_else(now_ms)
+            .saturating_sub(row.started_ts)
+            .max(0),
+        cost_basis: cost_basis(state, run_id),
+        usage_scope: "run",
         liveness_stalled_secs: state.thresholds.stalled_secs,
         liveness_likely_hung_secs: state.thresholds.likely_hung_secs,
         liveness: state
@@ -2423,6 +3322,38 @@ fn run_view(state: &Arc<AppState>, row: RunRow) -> RunView {
         .to_string(),
     };
     view
+}
+
+/// `12 attributed usage` preserves the distinction manager reports make in `run_finished`.
+/// A positive value in the run row alone cannot say whether it was provider
+/// reported or a configured list-price estimate.
+fn cost_basis(state: &Arc<AppState>, run_id: RunId) -> &'static str {
+    let Ok(events) = state.store().scan_tail(8, &ScanFilter::run(run_id)) else {
+        return "unknown";
+    };
+    let Some(event) = events
+        .iter()
+        .rev()
+        .find(|event| event.kind.as_str() == farseer_core::EventKind::RUN_FINISHED)
+    else {
+        return "unknown";
+    };
+    if event
+        .payload
+        .get("cost_estimated")
+        .and_then(serde_json::Value::as_bool)
+        == Some(true)
+    {
+        "estimated"
+    } else if event
+        .payload
+        .get("cost_usd_micros")
+        .is_some_and(|value| !value.is_null())
+    {
+        "reported"
+    } else {
+        "unknown"
+    }
 }
 
 #[cfg(test)]
@@ -2801,6 +3732,33 @@ analytics_route!(
     cost_by_runner_and_model,
     farseer_store::CostRow
 );
+
+#[derive(Debug, Default, Deserialize)]
+struct CostPageQuery {
+    limit: Option<usize>,
+    offset: Option<usize>,
+    project: Option<String>,
+    from: Option<i64>,
+    to: Option<i64>,
+}
+
+async fn analytics_cost_page(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<CostPageQuery>,
+) -> ApiResult<Json<farseer_store::CostPage>> {
+    if let (Some(from), Some(to)) = (query.from, query.to)
+        && from > to
+    {
+        return Err(ApiError::BadRequest("from is after to"));
+    }
+    Ok(Json(state.store().cost_page(
+        query.limit.unwrap_or(50),
+        query.offset.unwrap_or(0),
+        query.project.as_deref(),
+        query.from,
+        query.to,
+    )?))
+}
 analytics_route!(
     analytics_intervention,
     intervention_rate_by_cell,
@@ -2838,7 +3796,7 @@ mod tests {
     use super::*;
     use axum::body::Body;
     use axum::http::Request;
-    use farseer_core::{Actor, NewEvent};
+    use farseer_core::{Actor, EventKind, NewEvent};
     use http_body_util::BodyExt;
     use serde_json::json;
     use tower::ServiceExt;
@@ -3038,6 +3996,720 @@ grants_shell = true
         );
     }
 
+    #[tokio::test]
+    async fn a_project_profile_projects_its_cell_manager_and_roster() {
+        let h = harness();
+        let root = tempfile::tempdir().unwrap();
+        let project = root.path().join("project");
+        std::fs::create_dir(&project).unwrap();
+        std::fs::create_dir(project.join(".farseer")).unwrap();
+        let project = std::fs::canonicalize(project).unwrap();
+        h.state
+            .store()
+            .authorize_root(
+                &projects::display(&std::fs::canonicalize(root.path()).unwrap()),
+                0,
+            )
+            .unwrap();
+        std::fs::write(
+            project.join(project_profiles::PROFILE_PATH),
+            format!(
+                "version = 1\nproject_path = {:?}\ncoordinating_cell = \"zero\"\n",
+                projects::display(&project)
+            ),
+        )
+        .unwrap();
+
+        let (status, body) = h
+            .get(&format!("/v1/projects/profile?path={}", project.display()))
+            .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["source"], "file");
+        assert_eq!(body["coordinating_cell"], "zero");
+        assert_eq!(body["cell"]["manager"]["runners"], json!(["claude-code"]));
+        assert_eq!(body["cell"]["roster"][0]["name"], "shell");
+        assert_eq!(body["specialist_cells"], json!([]));
+        assert_eq!(body["history"], json!([]));
+
+        h.state
+            .store()
+            .append(&NewEvent::new(
+                CellId::new("zero"),
+                RunId::new(),
+                EventKind::new(EventKind::OPERATOR_CONTEXT),
+                Actor::Operator,
+                42,
+                json!({
+                    "project": projects::display(&project),
+                    "project_profile": {
+                        "old": null,
+                        "new": "zero",
+                        "actor": "operator",
+                        "reason": "profile selected"
+                    }
+                }),
+            ))
+            .unwrap();
+        let (status, body) = h
+            .get(&format!("/v1/projects/profile?path={}", project.display()))
+            .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["history"][0]["new"], "zero");
+        assert_eq!(body["history"][0]["actor"], "operator");
+        assert_eq!(body["history"][0]["reason"], "profile selected");
+    }
+
+    #[tokio::test]
+    async fn an_unavailable_project_profile_refuses_before_creating_work() {
+        let h = harness();
+        let root = tempfile::tempdir().unwrap();
+        let project = root.path().join("project");
+        std::fs::create_dir(&project).unwrap();
+        std::fs::create_dir(project.join(".farseer")).unwrap();
+        let project = std::fs::canonicalize(project).unwrap();
+        h.state
+            .store()
+            .authorize_root(
+                &projects::display(&std::fs::canonicalize(root.path()).unwrap()),
+                0,
+            )
+            .unwrap();
+        std::fs::write(
+            project.join(project_profiles::PROFILE_PATH),
+            format!(
+                "version = 1\nproject_path = {:?}\ncoordinating_cell = \"missing\"\n",
+                projects::display(&project)
+            ),
+        )
+        .unwrap();
+
+        let (status, body) = h
+            .post(
+                "/v1/cells/zero/instruct",
+                json!({
+                    "goal": "must be refused",
+                    "anchor": { "widget": "Work", "project": project.display().to_string() }
+                }),
+            )
+            .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        assert!(body["error"].as_str().unwrap().contains("repair"));
+        assert!(
+            h.state
+                .store()
+                .scan(0, 100, &ScanFilter::default())
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn a_missing_specialist_profile_is_visible_and_refused_before_work() {
+        let h = harness();
+        let root = tempfile::tempdir().unwrap();
+        let project = root.path().join("project");
+        std::fs::create_dir(&project).unwrap();
+        std::fs::create_dir(project.join(".farseer")).unwrap();
+        let project = std::fs::canonicalize(project).unwrap();
+        h.state
+            .store()
+            .authorize_root(
+                &projects::display(&std::fs::canonicalize(root.path()).unwrap()),
+                0,
+            )
+            .unwrap();
+        std::fs::write(
+            project.join(project_profiles::PROFILE_PATH),
+            format!(
+                "version = 1\nproject_path = {:?}\ncoordinating_cell = \"zero\"\nspecialist_cells = [\"missing\"]\n",
+                projects::display(&project)
+            ),
+        )
+        .unwrap();
+
+        let (status, projection) = h
+            .get(&format!("/v1/projects/profile?path={}", project.display()))
+            .await;
+        assert_eq!(status, StatusCode::OK, "{projection}");
+        assert_eq!(projection["valid"], false);
+        assert!(projection["error"].as_str().unwrap().contains("specialist"));
+
+        let (status, body) = h
+            .post(
+                "/v1/cells/zero/instruct",
+                json!({ "goal": "must be refused", "project": project.display().to_string() }),
+            )
+            .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        assert!(
+            h.state
+                .store()
+                .scan(0, 100, &ScanFilter::default())
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    /// `14 project teams`: a multi-harness profile narrows the coordinating
+    /// cell's existing callable roster without copying grants or bypassing the
+    /// manager's task and budget ownership.
+    #[tokio::test]
+    async fn a_project_team_records_its_specialist_set_and_refuses_other_cells() {
+        const ZERO_WITH_TEAM: &str = r#"
+cell_id = "zero"
+name = "Cell Zero"
+workspace_strategy = "plain_directory"
+
+[manager]
+runner = "farseer-test-missing-runner"
+
+[[roster]]
+kind = "cell"
+name = "social"
+cell_id = "social"
+max_autonomy_ceiling = "reversible"
+
+[[roster]]
+kind = "cell"
+name = "abroad"
+cell_id = "abroad"
+max_autonomy_ceiling = "reversible"
+
+[[roster]]
+kind = "cell"
+name = "other"
+cell_id = "other"
+max_autonomy_ceiling = "reversible"
+"#;
+        const SOCIAL: &str = r#"
+cell_id = "social"
+name = "Social"
+workspace_strategy = "plain_directory"
+
+[manager]
+runner = "farseer-test-missing-runner"
+"#;
+        const ABROAD: &str = r#"
+cell_id = "abroad"
+name = "Abroad"
+workspace_strategy = "plain_directory"
+
+[manager]
+runner = "farseer-test-missing-runner"
+"#;
+        const OTHER: &str = r#"
+cell_id = "other"
+name = "Other"
+workspace_strategy = "plain_directory"
+
+[manager]
+runner = "farseer-test-missing-runner"
+"#;
+
+        let h = harness_with_cells(&[
+            ("zero", ZERO_WITH_TEAM),
+            ("social", SOCIAL),
+            ("abroad", ABROAD),
+            ("other", OTHER),
+        ]);
+        let root = tempfile::tempdir().unwrap();
+        let project = root.path().join("project");
+        std::fs::create_dir(&project).unwrap();
+        std::fs::create_dir(project.join(".farseer")).unwrap();
+        let project = std::fs::canonicalize(project).unwrap();
+        h.state
+            .store()
+            .authorize_root(&projects::display(&root.path().canonicalize().unwrap()), 0)
+            .unwrap();
+        std::fs::write(
+            project.join(project_profiles::PROFILE_PATH),
+            format!(
+                "version = 1\nproject_path = {:?}\ncoordinating_cell = \"zero\"\nspecialist_cells = [\"social\", \"abroad\"]\n",
+                projects::display(&project)
+            ),
+        )
+        .unwrap();
+
+        let (manager_run_id, _, manager_token) = register_manager(&h);
+        h.state.managers().get_mut(&manager_run_id).unwrap().project = Some(project.clone());
+
+        let request = |cell: &str| {
+            Request::builder()
+                .method("POST")
+                .uri("/v1/manager/delegate/cell")
+                .header(header::HOST, "127.0.0.1:9000")
+                .header(header::AUTHORIZATION, format!("Bearer {manager_token}"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    json!({
+                        "manager_run_id": manager_run_id.to_string(),
+                        "manager_token": manager_token,
+                        "cell": cell,
+                        "goal": format!("delegate to {cell}"),
+                    })
+                    .to_string(),
+                ))
+                .unwrap()
+        };
+
+        let (status, accepted) = h.send(request("social")).await;
+        assert_eq!(status, StatusCode::OK, "{accepted}");
+        assert_eq!(accepted["to_cell"], "social");
+
+        let events = h
+            .state
+            .store()
+            .scan(0, 100, &ScanFilter::default())
+            .unwrap();
+        let called = events
+            .iter()
+            .find(|event| event.kind == EventKind::CELL_CALLED.into())
+            .expect("accepted specialist call is recorded");
+        assert_eq!(
+            called.payload["project_specialists"],
+            json!(["social", "abroad"])
+        );
+        assert_eq!(called.payload["call"]["autonomy_ceiling"], "reversible");
+        let accepted_run_id = accepted["run_id"].as_str().unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
+        let run_count_after_first = loop {
+            let rows = h.state.store().recent_runs(100).unwrap();
+            if rows
+                .iter()
+                .any(|row| row.run_id.to_string() == accepted_run_id)
+            {
+                break rows.len();
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "accepted specialist call never created its run row"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        };
+        let call_count = events
+            .iter()
+            .filter(|event| event.kind == EventKind::CELL_CALLED.into())
+            .count();
+
+        let (status, accepted_second) = h.send(request("abroad")).await;
+        assert_eq!(status, StatusCode::OK, "{accepted_second}");
+        let events_after_second = h
+            .state
+            .store()
+            .scan(0, 100, &ScanFilter::default())
+            .unwrap();
+        let accepted_calls = events_after_second
+            .iter()
+            .filter(|event| event.kind == EventKind::CELL_CALLED.into())
+            .collect::<Vec<_>>();
+        assert_eq!(accepted_calls.len(), call_count + 1);
+        assert_eq!(accepted_calls[1].payload["call"]["to_cell"], "abroad");
+        assert_eq!(
+            accepted_calls[1].payload["project_specialists"],
+            json!(["social", "abroad"])
+        );
+        assert_eq!(
+            accepted_calls[1].payload["call"]["autonomy_ceiling"],
+            "reversible"
+        );
+        let run_count_after_second = h.state.store().recent_runs(100).unwrap().len();
+        assert!(run_count_after_second > run_count_after_first);
+
+        let (status, refused) = h.send(request("other")).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{refused}");
+        assert!(
+            refused["error"]
+                .as_str()
+                .unwrap()
+                .contains("not an eligible specialist")
+        );
+        let call_count_after = h
+            .state
+            .store()
+            .scan(0, 100, &ScanFilter::default())
+            .unwrap()
+            .iter()
+            .filter(|event| event.kind == EventKind::CELL_CALLED.into())
+            .count();
+        assert_eq!(
+            h.state.store().recent_runs(100).unwrap().len(),
+            run_count_after_second
+        );
+        assert_eq!(call_count_after, call_count + 1);
+    }
+
+    /// `14 project teams`, `12 attributed usage`, and `04 scoped graph`: drive
+    /// the public operator ingress with a disposable pi face, let that manager
+    /// call both nominated specialists, and read the same task through the
+    /// detail, graph, and global/project board projections.
+    ///
+    /// The fake face is a `.cmd` shim rather than a direct test hook. That keeps
+    /// this proof at the same PATHEXT-aware executable boundary as a real run,
+    /// while the HTTP calls still cross the bound router and authenticate with
+    /// the manager capability that farseer injected into the environment.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_top_manager_routes_a_project_team_through_public_ingress() {
+        static PATH_LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
+        let _path_lock = PATH_LOCK
+            .get_or_init(|| tokio::sync::Mutex::new(()))
+            .lock()
+            .await;
+
+        const CELL_WITH_TEAM: &str = r#"
+cell_id = "zero"
+name = "Cell Zero"
+workspace_strategy = "plain_directory"
+
+[manager]
+runner = "pi"
+
+[[roster]]
+kind = "tool"
+name = "shell"
+irreversibility = "reversible"
+grants_shell = true
+
+[[roster]]
+kind = "cell"
+name = "social"
+cell_id = "social"
+max_autonomy_ceiling = "reversible"
+
+[[roster]]
+kind = "cell"
+name = "abroad"
+cell_id = "abroad"
+max_autonomy_ceiling = "reversible"
+
+[[roster]]
+kind = "cell"
+name = "other"
+cell_id = "other"
+max_autonomy_ceiling = "reversible"
+"#;
+        const SPECIALIST: &str = r#"
+cell_id = "social"
+name = "Specialist"
+workspace_strategy = "plain_directory"
+
+[manager]
+runner = "pi"
+
+[[roster]]
+kind = "tool"
+name = "shell"
+irreversibility = "reversible"
+grants_shell = true
+"#;
+
+        let h = harness_with_cells(&[
+            ("zero", CELL_WITH_TEAM),
+            ("social", SPECIALIST),
+            ("abroad", &SPECIALIST.replace("social", "abroad")),
+            ("other", &SPECIALIST.replace("social", "other")),
+        ]);
+        std::fs::create_dir_all(h._repo.path().join("extensions/pi")).unwrap();
+        std::fs::write(
+            h._repo.path().join("extensions/pi/farseer-delegate.ts"),
+            "// disposable delegation extension marker\n",
+        )
+        .unwrap();
+
+        let fake = tempfile::tempdir().unwrap();
+        std::fs::write(
+            fake.path().join("pi.cmd"),
+            "@echo off\r\npowershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File \"%~dp0fake-pi.ps1\"\r\n",
+        )
+        .unwrap();
+        std::fs::write(
+            fake.path().join("fake-pi.ps1"),
+            r#"$headers = @{ Authorization = "Bearer $env:FARSEER_MANAGER_TOKEN" }
+$body = @{ manager_run_id = $env:FARSEER_MANAGER_RUN_ID; manager_token = $env:FARSEER_MANAGER_TOKEN; goal = "fixture specialist call" }
+foreach ($cell in @("social", "abroad")) {
+  $body.cell = $cell
+  try {
+    Invoke-RestMethod -Method Post -Uri "$env:FARSEER_ENDPOINT/v1/manager/delegate/cell" -Headers $headers -ContentType "application/json" -Body ($body | ConvertTo-Json -Compress) | Out-Null
+  } catch {}
+}
+Write-Output '{"type":"response","command":"get_state","success":true,"data":{"model":{"id":"fixture-model","name":"Fixture","provider":"fixture","contextWindow":1000},"thinkingLevel":"low","isStreaming":false,"sessionId":"fixture-session","messageCount":0}}'
+Write-Output '{"type":"agent_end","messages":[{"role":"assistant","content":[{"type":"text","text":"fixture manager finished"}],"usage":{"input":5,"output":6,"cacheRead":0,"cacheWrite":0,"reasoning":0,"totalTokens":11,"cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"total":0.000001}},"stopReason":"stop"}],"willRetry":false}'
+"#,
+        )
+        .unwrap();
+        let old_path = std::env::var_os("PATH");
+        let mut path = fake.path().display().to_string();
+        if let Some(old) = old_path.as_ref() {
+            path.push(';');
+            path.push_str(&old.to_string_lossy());
+        }
+        // Rust 2024 makes process-environment mutation explicitly unsafe; the
+        // lock above keeps this test from racing another resolver in the suite,
+        // and the guard below restores the exact prior value on every exit.
+        unsafe { std::env::set_var("PATH", path) };
+        struct RestorePath(Option<std::ffi::OsString>);
+        impl Drop for RestorePath {
+            fn drop(&mut self) {
+                match self.0.take() {
+                    Some(path) => unsafe { std::env::set_var("PATH", path) },
+                    None => unsafe { std::env::remove_var("PATH") },
+                }
+            }
+        }
+        let _restore_path = RestorePath(old_path);
+
+        let root = tempfile::tempdir().unwrap();
+        let project = root.path().join("project");
+        std::fs::create_dir(&project).unwrap();
+        std::fs::create_dir(project.join(".farseer")).unwrap();
+        let project = std::fs::canonicalize(project).unwrap();
+        h.state
+            .store()
+            .authorize_root(&projects::display(&root.path().canonicalize().unwrap()), 0)
+            .unwrap();
+        std::fs::write(
+            project.join(project_profiles::PROFILE_PATH),
+            format!(
+                "version = 1\nproject_path = {:?}\ncoordinating_cell = \"zero\"\nspecialist_cells = [\"social\", \"abroad\"]\n",
+                projects::display(&project)
+            ),
+        )
+        .unwrap();
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        h.state.set_mcp_endpoint(port);
+        let router = h.router.clone();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, router).await.unwrap();
+        });
+
+        let (status, accepted) = h
+            .post(
+                "/v1/cells/zero/instruct",
+                json!({
+                    "goal": "coordinate the two project specialists",
+                    "project": project.display().to_string(),
+                }),
+            )
+            .await;
+        assert_eq!(status, StatusCode::ACCEPTED, "{accepted}");
+        let root_run = accepted["run_id"].as_str().unwrap().to_owned();
+        let task_id = accepted["task_id"].as_str().unwrap().to_owned();
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+        let (mut child_runs, mut calls): (Vec<String>, Vec<serde_json::Value>) =
+            (Vec::new(), Vec::new());
+        while calls.len() < 2 {
+            let events = h
+                .state
+                .store()
+                .scan(0, 5_000, &ScanFilter::default())
+                .unwrap();
+            calls = events
+                .iter()
+                .filter(|event| {
+                    event.run_id.to_string() == root_run
+                        && event.kind == EventKind::CELL_CALLED.into()
+                })
+                .map(|event| event.payload.clone())
+                .collect();
+            child_runs = calls
+                .iter()
+                .filter_map(|payload| payload["callee_run_id"].as_str())
+                .map(str::to_owned)
+                .collect();
+            if calls.len() < 2 {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "specialist calls were not recorded"
+                );
+                tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+            }
+        }
+        assert_eq!(calls[0]["project_specialists"], json!(["social", "abroad"]));
+        assert_eq!(calls[1]["project_specialists"], json!(["social", "abroad"]));
+        assert_eq!(calls[0]["call"]["autonomy_ceiling"], "reversible");
+        assert_eq!(calls[1]["call"]["autonomy_ceiling"], "reversible");
+        assert_eq!(child_runs.len(), 2);
+        let events = h
+            .state
+            .store()
+            .scan(0, 5_000, &ScanFilter::default())
+            .unwrap();
+        let routing = events
+            .iter()
+            .find(|event| {
+                event.run_id.to_string() == root_run
+                    && event.kind == EventKind::ROUTING_SEALED.into()
+            })
+            .expect("public ingress seals routing before the manager starts");
+        assert_eq!(routing.actor.as_str(), "system");
+        assert_eq!(routing.payload["selected_runner"], "pi");
+        assert_eq!(routing.payload["candidates"][0]["runner"], "pi");
+
+        let root_row = h
+            .wait_for_finished(&root_run, std::time::Duration::from_secs(15))
+            .await;
+        assert_eq!(root_row["outcome"], "ok");
+        for child_run in &child_runs {
+            let row = h
+                .wait_for_finished(child_run, std::time::Duration::from_secs(15))
+                .await;
+            assert_eq!(row["outcome"], "ok", "child {child_run}: {row}");
+            assert_eq!(row["task_id"], task_id);
+            assert_eq!(row["tokens"], 11);
+        }
+
+        let (status, detail) = h.get(&format!("/v1/tasks/{task_id}")).await;
+        assert_eq!(status, StatusCode::OK, "{detail}");
+        assert_eq!(detail["usage"]["runs"], 3);
+        assert_eq!(detail["usage"]["tokens"], 33);
+        assert_eq!(detail["runs"].as_array().unwrap().len(), 3);
+
+        let (status, graph) = h
+            .get(&format!(
+                "/v1/work/graph?project={}",
+                projects::display(&project)
+            ))
+            .await;
+        assert_eq!(status, StatusCode::OK, "{graph}");
+        assert!(
+            graph["nodes"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|node| { node["kind"] == "task" && node["target"] == task_id })
+        );
+        assert!(
+            graph["observed_edges"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|edge| edge["kind"] == "cell_call"),
+            "graph should expose the observed cell-call edge: {graph}"
+        );
+
+        let (status, global) = h.get("/v1/tasks/page?limit=10").await;
+        assert_eq!(status, StatusCode::OK, "{global}");
+        let (status, scoped) = h
+            .get(&format!(
+                "/v1/tasks/page?project={}&limit=10",
+                projects::display(&project)
+            ))
+            .await;
+        assert_eq!(status, StatusCode::OK, "{scoped}");
+        let global_task = global["tasks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["task_id"] == task_id)
+            .expect("global board contains the public-ingress task");
+        let scoped_task = scoped["tasks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["task_id"] == task_id)
+            .expect("project board contains the same task");
+        for field in ["task_id", "project_path", "state", "run_summary"] {
+            assert_eq!(global_task[field], scoped_task[field], "field {field}");
+        }
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn switching_a_project_profile_records_history_and_only_affects_future_tasks() {
+        const ZERO: &str = r#"
+cell_id = "zero"
+name = "Cell Zero"
+workspace_strategy = "plain_directory"
+
+[manager]
+runner = "not-a-real-runner"
+"#;
+        const SOCIAL: &str = r#"
+cell_id = "social"
+name = "Social"
+workspace_strategy = "plain_directory"
+
+[manager]
+runner = "not-a-real-runner"
+"#;
+        let h = harness_with_cells(&[("zero", ZERO), ("social", SOCIAL)]);
+        let root = tempfile::tempdir().unwrap();
+        let project = root.path().join("project");
+        std::fs::create_dir(&project).unwrap();
+        std::fs::create_dir(project.join(".farseer")).unwrap();
+        let project = std::fs::canonicalize(project).unwrap();
+        h.state
+            .store()
+            .authorize_root(&projects::display(&root.path().canonicalize().unwrap()), 0)
+            .unwrap();
+        let profile = project.join(project_profiles::PROFILE_PATH);
+        std::fs::write(
+            &profile,
+            format!(
+                "version = 1\nproject_path = {:?}\ncoordinating_cell = \"zero\"\n",
+                projects::display(&project)
+            ),
+        )
+        .unwrap();
+        let (status, first) = h
+            .post(
+                "/v1/cells/zero/instruct",
+                json!({ "goal": "first profile task", "project": project.display().to_string() }),
+            )
+            .await;
+        assert_eq!(status, StatusCode::ACCEPTED, "{first}");
+
+        std::fs::write(
+            &profile,
+            format!(
+                "version = 1\nproject_path = {:?}\ncoordinating_cell = \"social\"\n",
+                projects::display(&project)
+            ),
+        )
+        .unwrap();
+        let (status, second) = h
+            .post(
+                "/v1/cells/zero/instruct",
+                json!({ "goal": "second profile task", "project": project.display().to_string() }),
+            )
+            .await;
+        assert_eq!(status, StatusCode::ACCEPTED, "{second}");
+        assert_ne!(first["task_id"], second["task_id"]);
+
+        let (status, projection) = h
+            .get(&format!("/v1/projects/profile?path={}", project.display()))
+            .await;
+        assert_eq!(status, StatusCode::OK, "{projection}");
+        assert_eq!(projection["coordinating_cell"], "social");
+        assert_eq!(projection["history"].as_array().unwrap().len(), 2);
+        assert_eq!(projection["history"][0]["new"], "zero");
+        assert_eq!(projection["history"][1]["old"], "zero");
+        assert_eq!(projection["history"][1]["new"], "social");
+
+        let project_path = projects::display(&project);
+        let global = h
+            .state
+            .store()
+            .tasks(&farseer_store::TaskFilter {
+                limit: 50,
+                ..Default::default()
+            })
+            .unwrap();
+        let project_tasks = h
+            .state
+            .store()
+            .tasks(&farseer_store::TaskFilter {
+                project_path: Some(&project_path),
+                limit: 50,
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(global.len(), project_tasks.len());
+        assert_eq!(global.len(), 2);
+    }
+
     fn register_manager(h: &Harness) -> (RunId, TaskId, String) {
         let cell = h.state.cells().get(&CellId::new("zero")).cloned().unwrap();
         let run_id = RunId::new();
@@ -3181,6 +4853,373 @@ grants_shell = true
     }
 
     #[tokio::test]
+    async fn a_maintenance_proposal_uses_ordinary_work_and_bounds_its_attempt() {
+        let h = harness();
+        let (status, created) = h
+            .post(
+                "/v1/maintenance/proposals",
+                json!({
+                    "trigger_id": "fixture-failure",
+                    "lineage_id": "lineage-1",
+                    "actor": "operator",
+                    "source_revision": "HEAD",
+                    "previous_revision": "parent",
+                    "scope": ["crates/farseer-api"],
+                    "goal": "repair the deterministic fixture"
+                }),
+            )
+            .await;
+        assert_eq!(status, StatusCode::CREATED);
+        let proposal_id = created["proposal"]["proposal_id"].as_str().unwrap();
+        let task_id = created["proposal"]["task_id"].as_str().unwrap();
+        assert_eq!(created["created"], true);
+
+        let (status, evidence) = h
+            .post(
+                &format!("/v1/maintenance/proposals/{proposal_id}/evidence"),
+                json!({
+                    "artifact": "runs/candidate",
+                    "branch": "farseer/maintenance/fixture",
+                    "reproducer": "tests/fixture.rs",
+                    "validation": [{"command": "cargo test -p farseer-api", "outcome": "ok", "exit_code": 0}],
+                    "outcome": "ok"
+                }),
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(evidence["proposal"]["status"], "succeeded");
+        assert_eq!(evidence["task_id"], task_id);
+        assert_eq!(evidence["artifact"]["kind"], "maintenance-candidate");
+        assert_eq!(
+            h.state
+                .store()
+                .task(task_id.parse().unwrap())
+                .unwrap()
+                .unwrap()
+                .state,
+            farseer_core::TaskState::Review
+        );
+        let (status, detail) = h.get(&format!("/v1/tasks/{task_id}")).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(detail["maintenance_proposal"]["proposal_id"], proposal_id);
+        assert_eq!(
+            detail["maintenance_proposal"]["previous_revision"],
+            "parent"
+        );
+        assert_eq!(
+            detail["maintenance_proposal"]["candidate"]["branch"],
+            "farseer/maintenance/fixture"
+        );
+        assert_eq!(
+            detail["maintenance_proposal"]["candidate"]["validation"][0]["outcome"],
+            "ok"
+        );
+
+        let (status, duplicate) = h
+            .post(
+                "/v1/maintenance/proposals",
+                json!({
+                    "trigger_id": "fixture-failure",
+                    "lineage_id": "lineage-1",
+                    "actor": "operator",
+                    "source_revision": "HEAD",
+                    "previous_revision": "parent",
+                    "goal": "same trigger"
+                }),
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(duplicate["created"], false);
+        assert_eq!(duplicate["proposal"]["proposal_id"], proposal_id);
+    }
+
+    #[tokio::test]
+    async fn maintenance_worker_keeps_the_active_checkout_untouched() {
+        let h = harness();
+        let before = std::process::Command::new("git")
+            .args(["-C", h._repo.path().to_str().unwrap(), "rev-parse", "HEAD"])
+            .output()
+            .unwrap();
+        assert!(before.status.success());
+        let before = String::from_utf8(before.stdout).unwrap();
+        let (status, created) = h
+            .post(
+                "/v1/maintenance/proposals",
+                json!({
+                    "trigger_id": "worker-fixture",
+                    "lineage_id": "worker-lineage",
+                    "actor": "system",
+                    "source_revision": "HEAD",
+                    "previous_revision": "parent",
+                    "scope": ["README.md"],
+                    "goal": "create an isolated deterministic candidate"
+                }),
+            )
+            .await;
+        assert_eq!(status, StatusCode::CREATED);
+        let proposal_id = created["proposal"]["proposal_id"].as_str().unwrap();
+
+        let (status, executed) = h
+            .post(
+                &format!("/v1/maintenance/proposals/{proposal_id}/execute"),
+                json!({}),
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK, "{executed}");
+        assert_eq!(executed["proposal"]["status"], "succeeded", "{executed}");
+        let candidate = &executed["proposal"]["candidate"];
+        let artifact = std::path::Path::new(candidate["artifact"].as_str().unwrap());
+        let reproducer = std::path::Path::new(candidate["reproducer"].as_str().unwrap());
+        assert!(artifact.is_file(), "{artifact:?}");
+        assert!(reproducer.is_file(), "{reproducer:?}");
+        assert!(
+            candidate["branch"]
+                .as_str()
+                .unwrap()
+                .starts_with("farseer/maintenance/")
+        );
+        assert_eq!(candidate["validation"][0]["outcome"], "ok");
+        assert_eq!(candidate["validation"][1]["outcome"], "ok");
+
+        let after = std::process::Command::new("git")
+            .args(["-C", h._repo.path().to_str().unwrap(), "rev-parse", "HEAD"])
+            .output()
+            .unwrap();
+        assert!(after.status.success());
+        assert_eq!(before, String::from_utf8(after.stdout).unwrap());
+
+        let branch = candidate["branch"].as_str().unwrap();
+        let workspace = artifact.parent().unwrap();
+        let removed = std::process::Command::new("git")
+            .args([
+                "-C",
+                h._repo.path().to_str().unwrap(),
+                "worktree",
+                "remove",
+                "--force",
+                workspace.to_str().unwrap(),
+            ])
+            .status()
+            .unwrap();
+        assert!(removed.success());
+        let deleted = std::process::Command::new("git")
+            .args([
+                "-C",
+                h._repo.path().to_str().unwrap(),
+                "branch",
+                "-D",
+                branch,
+            ])
+            .status()
+            .unwrap();
+        assert!(deleted.success());
+    }
+
+    #[tokio::test]
+    async fn maintenance_worker_rejects_an_invalid_revision_without_leaking_a_branch() {
+        let h = harness();
+        let (status, created) = h
+            .post(
+                "/v1/maintenance/proposals",
+                json!({
+                    "trigger_id": "worker-invalid-revision",
+                    "lineage_id": "worker-invalid-lineage",
+                    "actor": "system",
+                    "source_revision": "does-not-exist",
+                    "previous_revision": "parent",
+                    "goal": "reject an invalid candidate revision"
+                }),
+            )
+            .await;
+        assert_eq!(status, StatusCode::CREATED);
+        let proposal_id = created["proposal"]["proposal_id"].as_str().unwrap();
+        let (status, executed) = h
+            .post(
+                &format!("/v1/maintenance/proposals/{proposal_id}/execute"),
+                json!({}),
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK, "{executed}");
+        assert_eq!(executed["proposal"]["status"], "failed");
+        assert!(executed["proposal"]["candidate"]["branch"].is_null());
+        assert!(
+            executed["proposal"]["candidate"]["validation"][0]["detail"]
+                .as_str()
+                .unwrap()
+                .contains("source revision")
+        );
+        let branch = format!("farseer/maintenance/{proposal_id}");
+        let branches = std::process::Command::new("git")
+            .args([
+                "-C",
+                h._repo.path().to_str().unwrap(),
+                "branch",
+                "--list",
+                &branch,
+            ])
+            .output()
+            .unwrap();
+        assert!(branches.status.success());
+        assert!(branches.stdout.is_empty(), "{:?}", branches.stdout);
+    }
+
+    #[tokio::test]
+    async fn maintenance_worker_uses_the_authorized_project_repository() {
+        let h = harness();
+        let project = git_repo_with_a_commit();
+        let root = project.path().parent().unwrap();
+        h.state
+            .store()
+            .authorize_root(&projects::display(&root.canonicalize().unwrap()), 0)
+            .unwrap();
+        let (status, created) = h
+            .post(
+                "/v1/maintenance/proposals",
+                json!({
+                    "trigger_id": "worker-project",
+                    "lineage_id": "worker-project-lineage",
+                    "actor": "system",
+                    "source_revision": "HEAD",
+                    "previous_revision": "parent",
+                    "scope": ["README.md"],
+                    "project": project.path().display().to_string(),
+                    "goal": "create a candidate in the selected project"
+                }),
+            )
+            .await;
+        assert_eq!(status, StatusCode::CREATED);
+        let proposal_id = created["proposal"]["proposal_id"].as_str().unwrap();
+        let (status, executed) = h
+            .post(
+                &format!("/v1/maintenance/proposals/{proposal_id}/execute"),
+                json!({}),
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK, "{executed}");
+        assert_eq!(executed["proposal"]["status"], "succeeded");
+        let branch = executed["proposal"]["candidate"]["branch"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let branches = std::process::Command::new("git")
+            .args([
+                "-C",
+                project.path().to_str().unwrap(),
+                "branch",
+                "--list",
+                &branch,
+            ])
+            .output()
+            .unwrap();
+        assert!(branches.status.success());
+        assert!(!branches.stdout.is_empty());
+        let workspace = std::path::Path::new(
+            executed["proposal"]["candidate"]["artifact"]
+                .as_str()
+                .unwrap(),
+        )
+        .parent()
+        .unwrap();
+        assert!(
+            std::process::Command::new("git")
+                .args([
+                    "-C",
+                    project.path().to_str().unwrap(),
+                    "worktree",
+                    "remove",
+                    "--force",
+                    workspace.to_str().unwrap(),
+                ])
+                .status()
+                .unwrap()
+                .success()
+        );
+        assert!(
+            std::process::Command::new("git")
+                .args([
+                    "-C",
+                    project.path().to_str().unwrap(),
+                    "branch",
+                    "-D",
+                    &branch,
+                ])
+                .status()
+                .unwrap()
+                .success()
+        );
+    }
+
+    #[tokio::test]
+    async fn successful_maintenance_evidence_requires_validation() {
+        let h = harness();
+        let (status, created) = h
+            .post(
+                "/v1/maintenance/proposals",
+                json!({
+                    "trigger_id": "fixture-without-validation",
+                    "lineage_id": "lineage-validation",
+                    "actor": "operator",
+                    "source_revision": "HEAD",
+                    "previous_revision": "parent",
+                    "goal": "reject empty validation"
+                }),
+            )
+            .await;
+        assert_eq!(status, StatusCode::CREATED);
+        let proposal_id = created["proposal"]["proposal_id"].as_str().unwrap();
+        let (status, response) = h
+            .post(
+                &format!("/v1/maintenance/proposals/{proposal_id}/evidence"),
+                json!({
+                    "artifact": "runs/candidate",
+                    "outcome": "ok"
+                }),
+            )
+            .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(
+            response["error"],
+            "successful maintenance evidence requires validation"
+        );
+    }
+
+    #[tokio::test]
+    async fn cancelling_maintenance_records_an_inspectable_outcome() {
+        let h = harness();
+        let (status, created) = h
+            .post(
+                "/v1/maintenance/proposals",
+                json!({
+                    "trigger_id": "fixture-cancelled",
+                    "lineage_id": "lineage-cancelled",
+                    "actor": "operator",
+                    "source_revision": "HEAD",
+                    "previous_revision": "parent",
+                    "goal": "cancel the deterministic fixture"
+                }),
+            )
+            .await;
+        assert_eq!(status, StatusCode::CREATED);
+        let proposal_id = created["proposal"]["proposal_id"].as_str().unwrap();
+        let task_id = created["proposal"]["task_id"].as_str().unwrap();
+        let (status, cancelled) = h
+            .post(
+                &format!("/v1/maintenance/proposals/{proposal_id}/cancel"),
+                json!({}),
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(cancelled["status"], "cancelled");
+
+        let (status, detail) = h.get(&format!("/v1/tasks/{task_id}")).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(detail["task"]["state"], "cancelled");
+        assert_eq!(detail["runs"][0]["outcome"], "cancelled");
+        assert_eq!(detail["artifacts"][0]["status"], "cancelled");
+        assert_eq!(detail["artifacts"][0]["error"], "cancelled by operator");
+    }
+
+    #[tokio::test]
     async fn a_wrong_token_is_refused() {
         let h = harness();
         let request = Request::builder()
@@ -3273,6 +5312,153 @@ grants_shell = true
         let (status, body) = h.get("/v1/health").await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(body["api_version"], "v1");
+        assert!(body["runtime_id"].as_str().is_some_and(|id| !id.is_empty()));
+        assert!(
+            body["data_dir_fingerprint"]
+                .as_str()
+                .is_some_and(|fingerprint| fingerprint.starts_with("sha256:"))
+        );
+        assert_eq!(body["build_provenance"], "farseer-api/0.1.0");
+        assert_eq!(body["features"], json!(["health", "sse", "commands"]));
+    }
+
+    #[tokio::test]
+    async fn resource_monitor_toggle_is_recorded_without_changing_runtime_lifecycle() {
+        let h = harness();
+        let (_, before) = h.get("/v1/runtime").await;
+        assert_eq!(before["state"], "running");
+        assert_eq!(before["resource_monitor_enabled"], true);
+
+        let (status, disabled) = h
+            .post("/v1/runtime/resources", json!({ "enabled": false }))
+            .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(disabled["resource_monitor_enabled"], false);
+        assert_eq!(disabled["state"], "running");
+
+        let (status, enabled) = h
+            .post("/v1/runtime/resources", json!({ "enabled": true }))
+            .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(enabled["resource_monitor_enabled"], true);
+        assert!(
+            h.state
+                .store()
+                .scan(0, 20, &ScanFilter::default())
+                .unwrap()
+                .into_iter()
+                .any(|event| {
+                    event.kind == farseer_core::EventKind::RUNTIME_LIFECYCLE.into()
+                        && event.payload["action"] == "resource_monitor"
+                })
+        );
+    }
+
+    #[tokio::test]
+    async fn draining_is_visible_recorded_and_refuses_new_work() {
+        let h = harness();
+        let (status, body) = h.get("/v1/runtime").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["state"], "running");
+        assert_eq!(body["active_runs"], 0);
+
+        let (status, body) = h
+            .post("/v1/runtime/drain", json!({ "deadline_secs": 30 }))
+            .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["state"], "draining");
+        assert_eq!(body["drain_expired"], false);
+
+        let (status, body) = h
+            .post(
+                "/v1/cells/zero/instruct",
+                json!({ "goal": "must be refused" }),
+            )
+            .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(body["error"].as_str().unwrap().contains("draining"));
+
+        let (_, events) = h.get("/v1/events?tail=10").await;
+        assert!(events.as_array().unwrap().iter().any(|event| {
+            event["kind"] == farseer_core::EventKind::RUNTIME_LIFECYCLE
+                && event["payload"]["action"] == "drain"
+        }));
+    }
+
+    #[test]
+    fn runtime_control_drain_deadline_does_not_force() {
+        let control = RuntimeControl::new();
+        assert!(control.admit());
+        let (phase, changed) = control.drain(1);
+        assert!(changed);
+        assert_eq!(phase.as_str(), "draining");
+        assert!(!control.admit());
+        assert!(!control.should_stop());
+        control.release();
+        assert!(control.should_stop());
+        assert!(control.status(2).drain_expired);
+    }
+
+    #[tokio::test]
+    async fn force_records_reason_and_cancels_owned_processes() {
+        let h = harness();
+        let run_id = RunId::new();
+        let worker = farseer_manager::StartedWorker::spawn(
+            std::path::Path::new(r"C:\Windows\System32\cmd.exe"),
+            &["/c".into(), "ping -n 30 127.0.0.1 >nul".into()],
+            &std::env::current_dir().unwrap(),
+            &[],
+            LivenessThresholds::default(),
+            farseer_runner::claude_code::parse_line,
+            farseer_manager::Channel::OneShot,
+        )
+        .unwrap();
+        let token = worker.cancel_token();
+        h.state.runtime.admit();
+        h.state.runs().insert(
+            run_id,
+            RunHandle {
+                cancel: token.clone(),
+                liveness: worker.liveness_handle(),
+                steer: None,
+            },
+        );
+        h.state
+            .pending_cancellations
+            .lock()
+            .unwrap()
+            .insert(run_id, Arc::new(AtomicBool::new(false)));
+
+        let (status, body) = h
+            .post("/v1/runtime/force", json!({ "reason": "operator test" }))
+            .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["state"], "forcing");
+        assert_eq!(body["active_runs"], 1);
+        assert_eq!(body["affected_runs"], 1);
+        assert!(token.was_cancelled());
+        assert!(
+            h.get("/v1/events?tail=10")
+                .await
+                .1
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|event| {
+                    event["kind"] == farseer_core::EventKind::RUNTIME_LIFECYCLE
+                        && event["payload"]["action"] == "force"
+                        && event["payload"]["details"]["reason"] == "operator test"
+                })
+        );
+        token.cancel();
+        drop(worker);
+        h.state.runs().remove(&run_id);
+        h.state
+            .pending_cancellations
+            .lock()
+            .unwrap()
+            .remove(&run_id);
+        h.state.release_run();
     }
 
     #[tokio::test]
@@ -3280,6 +5466,16 @@ grants_shell = true
         let h = harness();
         let (_, list) = h.get("/v1/cells").await;
         assert_eq!(list[0]["cell_id"], "zero");
+        assert_eq!(list[0]["authority"]["shell_grant"], true);
+        assert_eq!(
+            list[0]["authority"]["runners"][0]["shell_reach"],
+            "authorized"
+        );
+        assert_eq!(
+            list[0]["authority"]["tools"][0]["authority"],
+            "recorded_only"
+        );
+        assert_eq!(list[0]["authority"]["tools"][0]["serving_path"], false);
 
         let (status, cell) = h.get("/v1/cells/zero").await;
         assert_eq!(status, StatusCode::OK);
@@ -3661,6 +5857,60 @@ runner = "claude-code"
     }
 
     #[tokio::test]
+    async fn a_pi_manager_without_an_explicit_shell_grant_is_refused_before_workspace_creation() {
+        let h = harness_with_cell(
+            r#"
+cell_id = "zero"
+name = "Cell Zero"
+workspace_strategy = "plain_directory"
+
+[manager]
+runner = "pi"
+"#,
+        );
+        let (status, body) = h
+            .post("/v1/cells/zero/instruct", json!({ "goal": "do the thing" }))
+            .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        assert!(body["error"].as_str().unwrap().contains("shell-equivalent"));
+        assert!(
+            std::fs::read_dir(&h.state.runs_dir)
+                .unwrap()
+                .next()
+                .is_none(),
+            "authority refusal must happen before creating a workspace"
+        );
+    }
+
+    #[test]
+    fn authority_detail_separates_allowlist_enforcement_and_recorded_tools() {
+        let cell = farseer_core::CellDefinition::load(
+            r#"
+cell_id = "detail"
+name = "Detail"
+workspace_strategy = "plain_directory"
+
+[manager]
+runners = ["pi", "goose-acp"]
+tools = "read"
+
+[[roster]]
+kind = "tool"
+name = "post"
+irreversibility = "undoable"
+"#,
+        )
+        .unwrap()
+        .0;
+        let detail = cell_authority(&cell);
+        assert_eq!(detail.tool_level, farseer_core::ToolLevel::Read);
+        assert_eq!(detail.runners[0].tool_level, "enforced");
+        assert_eq!(detail.runners[1].tool_level, "refused");
+        assert_eq!(detail.tools[0].authority, "recorded_only");
+        assert!(!detail.tools[0].serving_path);
+    }
+
+    #[tokio::test]
     async fn a_currency_budget_is_refused_before_claude_can_overspend_it() {
         let h = harness_with_cell(
             r#"
@@ -3693,6 +5943,42 @@ grants_shell = true
                 .next()
                 .is_none(),
             "budget refusal must happen before creating a workspace"
+        );
+    }
+
+    #[test]
+    fn every_bounded_dimension_is_rejected_before_spawn_when_unenforceable() {
+        for (budget, dimension) in [
+            (
+                Budget {
+                    tokens: Some(1),
+                    ..Budget::default()
+                },
+                "tokens",
+            ),
+            (
+                Budget {
+                    wall_secs: Some(1),
+                    ..Budget::default()
+                },
+                "wall-clock",
+            ),
+            (
+                Budget {
+                    usd_micros: Some(1),
+                    ..Budget::default()
+                },
+                "currency",
+            ),
+        ] {
+            assert_eq!(
+                unenforceable_budget_dimension("claude-code", budget),
+                Some(dimension)
+            );
+        }
+        assert_eq!(
+            unenforceable_budget_dimension("claude-code", Budget::default()),
+            None
         );
     }
 
@@ -3803,7 +6089,7 @@ grants_shell = true
         assert!(child_token.was_cancelled());
     }
 
-    /// A cell whose runner is not installed on this machine.
+    /// A cell whose runner is intentionally absent from every test machine.
     ///
     /// The point is a run that reaches `spawn_run`, registers, and then ends on
     /// its own at `ExecutableNotFound` - **without launching an agent**. A test
@@ -3814,7 +6100,7 @@ name = "Cell Zero"
 workspace_strategy = "plain_directory"
 
 [manager]
-runner = "cursor-agent"
+runner = "farseer-test-missing-runner"
 
 # `12 autonomy and deny list`: a runner with shell-equivalent reach needs the
 # cell to have granted one, or the run is refused before it is spawned.
@@ -3862,9 +6148,9 @@ grants_shell = true
             cell,
             None,
             Some(Arc::clone(&children)),
+            None,
         )
         .expect("the callee spawns");
-
         assert!(
             children.lock().unwrap().contains(&run_id),
             "an immediate cancel would race process startup and miss the callee              unless it is reachable before spawn_run returns"
@@ -3980,6 +6266,32 @@ grants_shell = true
             vec!["taken_over", "autonomous"],
             "who took the wheel and when is exactly what `07` asks the record to carry"
         );
+    }
+
+    #[tokio::test]
+    async fn a_contradictory_operator_anchor_is_refused_before_creating_work() {
+        let h = harness();
+        let before = h.state.store().conversations(100).unwrap().len();
+        let (status, body) = h
+            .post(
+                "/v1/cells/zero/instruct",
+                json!({
+                    "goal": "this must not create a task",
+                    "conversation_id": "conversation-a",
+                    "anchor": {
+                        "widget": "Work",
+                        "conversation": "conversation-b"
+                    }
+                }),
+            )
+            .await;
+
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(
+            body["error"],
+            "anchor conversation does not match request conversation"
+        );
+        assert_eq!(h.state.store().conversations(100).unwrap().len(), before);
     }
 
     /// `07` section 7: detaching without releasing must auto-release, because a
@@ -4190,15 +6502,18 @@ grants_shell = true
         let mut queued = serde_json::Value::Null;
         for _ in 0..100 {
             let (_, events) = h.get(&format!("/v1/events?run={task_id}&limit=5")).await;
-            if events.get(0).is_some() {
-                queued = events;
+            if let Some(event) = events
+                .as_array()
+                .and_then(|events| events.iter().find(|event| event["kind"] == "run_queued"))
+            {
+                queued = event.clone();
                 break;
             }
             tokio::time::sleep(std::time::Duration::from_millis(20)).await;
         }
-        assert_eq!(queued[0]["cell_id"], "zero", "{queued}");
+        assert_eq!(queued["cell_id"], "zero", "{queued}");
         assert!(
-            queued[0]["payload"]["goal"]
+            queued["payload"]["goal"]
                 .as_str()
                 .unwrap()
                 .contains("a friendly orchestrator"),
@@ -6002,6 +8317,111 @@ runner = "{runner}"
         assert_eq!(first_available_runner(&h.state, &pinned), None);
     }
 
+    #[test]
+    fn routing_provenance_is_bounded_and_replayable() {
+        let h = harness();
+        let mut cell = cell_with("pi");
+        cell.manager.runners = vec!["pi".into(), "omp".into()];
+        let spent = farseer_core::WindowObservation {
+            account: "pi".into(),
+            runner: "pi".into(),
+            availability: farseer_core::Availability::ExhaustedUntil {
+                resets_at: 1_787_000_000,
+            },
+            rate_limit_type: "five_hour".into(),
+            is_using_overage: false,
+            used_percent: None,
+            window_duration_mins: None,
+            provider: None,
+            label: None,
+        };
+        h.state
+            .store()
+            .observe_window(&CellId::new("zero"), RunId::new(), &spent, 1_000)
+            .unwrap();
+
+        let first = routing_provenance(
+            &h.state,
+            &cell,
+            "omp",
+            "availability_fallback",
+            farseer_core::Budget::default(),
+        );
+        let second = routing_provenance(
+            &h.state,
+            &cell,
+            "omp",
+            "availability_fallback",
+            farseer_core::Budget::default(),
+        );
+        assert_eq!(first, second, "same observations must replay identically");
+        assert_eq!(first["selected_runner"], "omp");
+        assert_eq!(first["preferred_runner"], "pi");
+        assert_eq!(first["candidates"][0]["runner"], "pi");
+        assert_eq!(first["candidates"][0]["pressure"], "exhausted");
+        assert_eq!(first["candidates"][1]["runner"], "omp");
+        assert_eq!(first["candidates"][1]["pressure"], "unknown");
+        assert_eq!(first["policy"]["automatic_retries"], 0);
+        assert_eq!(first["cost_basis"]["kind"], "runner_reported_or_unknown");
+    }
+
+    #[test]
+    fn run_usage_preserves_reported_estimated_and_unknown_cost_basis() {
+        let h = harness();
+        for (basis, payload) in [
+            (
+                "reported",
+                serde_json::json!({
+                    "outcome": "ok",
+                    "cost_usd_micros": 12,
+                    "cost_estimated": false
+                }),
+            ),
+            (
+                "estimated",
+                serde_json::json!({
+                    "outcome": "ok",
+                    "cost_usd_micros": 12,
+                    "cost_estimated": true
+                }),
+            ),
+            (
+                "unknown",
+                serde_json::json!({ "outcome": "failed", "cost_usd_micros": null }),
+            ),
+        ] {
+            let run_id = RunId::new();
+            h.state
+                .store()
+                .upsert_run(&RunRow {
+                    run_id,
+                    task_id: farseer_core::TaskId::new(),
+                    cell_id: CellId::new("zero"),
+                    runner: "pi".into(),
+                    model: "model".into(),
+                    outcome: Some("ok".into()),
+                    usd_micros: 12,
+                    tokens: 4,
+                    operator_touched: false,
+                    started_ts: 1,
+                    finished_ts: Some(3),
+                })
+                .unwrap();
+            h.state
+                .store()
+                .append(&NewEvent::new(
+                    CellId::new("zero"),
+                    run_id,
+                    EventKind::new(EventKind::RUN_FINISHED),
+                    Actor::System,
+                    3,
+                    payload,
+                ))
+                .unwrap();
+            assert_eq!(cost_basis(&h.state, run_id), basis);
+        }
+    }
+
     /// `runner = "pi"` and `runners = ["pi", "omp"]` are the same field, because
     /// `26` found a one-item list is the normal case and making every cell write
     /// brackets would tax the common path for the rare one.
@@ -6131,6 +8551,811 @@ runner = "{runner}"
             detail["allowed_transitions"],
             json!(["blocked", "review", "cancelled"])
         );
+    }
+
+    #[tokio::test]
+    async fn the_public_manifest_route_records_and_finishes_a_local_artifact() {
+        let h = harness();
+        let root = tempfile::tempdir().unwrap();
+        let project = root.path().join("project");
+        let input = project.join("input");
+        std::fs::create_dir_all(&input).unwrap();
+        std::fs::write(input.join("z.txt"), b"same").unwrap();
+        std::fs::write(input.join("a.txt"), b"bytes").unwrap();
+        let root_path = std::fs::canonicalize(root.path()).unwrap();
+        let project_path = std::fs::canonicalize(&project).unwrap();
+        let input_path = std::fs::canonicalize(&input).unwrap();
+        h.state
+            .store()
+            .authorize_root(&projects::display(&root_path), now_ms())
+            .unwrap();
+
+        let (status, response) = h
+            .post(
+                "/v1/artifacts/manifests",
+                json!({
+                    "project": projects::display(&project_path),
+                    "input": projects::display(&input_path),
+                }),
+            )
+            .await;
+        assert_eq!(status, StatusCode::ACCEPTED, "{response}");
+        let run_id = response["run_id"].as_str().unwrap();
+        let task_id = response["task_id"].as_str().unwrap();
+        let row = h
+            .wait_for_finished(run_id, std::time::Duration::from_secs(5))
+            .await;
+        assert_eq!(row["outcome"], "ok");
+
+        let (status, detail) = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            h.get(&format!("/v1/tasks/{task_id}")),
+        )
+        .await
+        .expect("task detail route should not hang");
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(detail["artifacts"][0]["status"], "complete");
+        let manifest = detail["artifacts"][0]["final_path"].as_str().unwrap();
+        assert!(std::path::Path::new(manifest).is_file());
+        let bytes = std::fs::read(manifest).unwrap();
+        assert!(String::from_utf8_lossy(&bytes).contains("a.txt"));
+        assert!(String::from_utf8_lossy(&bytes).contains("z.txt"));
+    }
+
+    #[tokio::test]
+    async fn the_public_manifest_route_cancels_a_large_fixture_without_promotion() {
+        let h = harness();
+        let root = tempfile::tempdir().unwrap();
+        let project = root.path().join("project");
+        let input = project.join("input");
+        std::fs::create_dir_all(&input).unwrap();
+        for index in 0..6_000 {
+            std::fs::write(input.join(format!("entry-{index:05}.txt")), b"fixture").unwrap();
+        }
+        let root_path = std::fs::canonicalize(root.path()).unwrap();
+        let project_path = std::fs::canonicalize(&project).unwrap();
+        let input_path = std::fs::canonicalize(&input).unwrap();
+        h.state
+            .store()
+            .authorize_root(&projects::display(&root_path), now_ms())
+            .unwrap();
+
+        let (status, response) = h
+            .post(
+                "/v1/artifacts/manifests",
+                json!({
+                    "project": projects::display(&project_path),
+                    "input": projects::display(&input_path),
+                }),
+            )
+            .await;
+        assert_eq!(status, StatusCode::ACCEPTED, "{response}");
+        let run_id = response["run_id"].as_str().unwrap().to_owned();
+        let task_id = response["task_id"].as_str().unwrap().to_owned();
+        let (status, cancelled) = h
+            .post(&format!("/v1/runs/{run_id}/cancel"), json!({}))
+            .await;
+        assert_eq!(status, StatusCode::ACCEPTED, "{cancelled}");
+
+        let row = h
+            .wait_for_finished(&run_id, std::time::Duration::from_secs(10))
+            .await;
+        assert_eq!(row["outcome"], "cancelled", "{row}");
+        let (status, detail) = h.get(&format!("/v1/tasks/{task_id}")).await;
+        assert_eq!(status, StatusCode::OK, "{detail}");
+        assert_eq!(detail["task"]["state"], "cancelled");
+        assert_eq!(detail["artifacts"][0]["status"], "cancelled");
+        assert!(detail["artifacts"][0]["final_path"].is_null());
+        let staged = detail["artifacts"][0]["staged_path"].as_str().unwrap();
+        assert!(std::path::Path::new(staged).is_file());
+        let final_candidate = staged.replace(".partial", "");
+        assert!(!std::path::Path::new(&final_candidate).exists());
+    }
+
+    #[tokio::test]
+    async fn the_session_explorer_page_preserves_protocol_and_log_availability() {
+        let h = harness();
+        let now = now_ms();
+        let project_root = tempfile::tempdir().unwrap();
+        let project_path = std::fs::canonicalize(project_root.path()).unwrap();
+        h.state
+            .store()
+            .authorize_root(&projects::display(&project_path), now)
+            .unwrap();
+        let conversation_id = farseer_core::ConversationId::new();
+        let task_id = TaskId::new();
+        let run_id = RunId::new();
+        h.state
+            .store()
+            .create_conversation(&farseer_core::Conversation {
+                conversation_id,
+                title: "Session explorer fixture".into(),
+                project_path: Some(projects::display(&project_path)),
+                manager_runner: Some("claude-code".into()),
+                created_ts: now,
+                updated_ts: now,
+                archived_ts: None,
+            })
+            .unwrap();
+        h.state
+            .store()
+            .create_task(&farseer_core::Task {
+                task_id,
+                conversation_id,
+                goal: "Inspect sessions".into(),
+                title: "Inspect sessions".into(),
+                project_path: Some(projects::display(&project_path)),
+                state: farseer_core::TaskState::Done,
+                priority: 0,
+                created_ts: now,
+                updated_ts: now,
+            })
+            .unwrap();
+        h.state
+            .store()
+            .upsert_run(&RunRow {
+                run_id,
+                task_id,
+                cell_id: CellId::new("zero"),
+                runner: "claude-code".into(),
+                model: "model-a".into(),
+                outcome: Some("ok".into()),
+                usd_micros: 0,
+                tokens: 0,
+                operator_touched: false,
+                started_ts: now,
+                finished_ts: Some(now + 1),
+            })
+            .unwrap();
+        for (kind, identifier, log_pointer, observed_ts) in [
+            ("thread", "thread-1", Some("C:\\logs\\thread-1.jsonl"), now),
+            ("session", "session-2", None, now + 1),
+            (
+                "session",
+                "session-3",
+                Some("rotated:C:\\logs\\session-3.jsonl"),
+                now + 2,
+            ),
+        ] {
+            h.state
+                .store()
+                .observe_harness_session(&farseer_core::HarnessSession {
+                    run_id,
+                    identifier_kind: kind.into(),
+                    identifier: identifier.into(),
+                    log_pointer: log_pointer.map(str::to_string),
+                    observed_ts,
+                })
+                .unwrap();
+        }
+        h.state
+            .store()
+            .index_transcript(
+                "digest-one",
+                "scrubbed needle excerpt",
+                "farseer-scrub-v1",
+                "hash-tf-v1",
+            )
+            .unwrap();
+        h.state
+            .store()
+            .record_transcript_attachment(&farseer_store::TranscriptAttachment {
+                digest: "digest-one".into(),
+                run_id,
+                custody: farseer_core::TranscriptCustody::CopyPlusIndex,
+                source: "session-2.jsonl".into(),
+                stored_path: Some("objects/digest-one".into()),
+                created_ts: now,
+            })
+            .unwrap();
+
+        let (status, page) = h.get("/v1/work/sessions?limit=1").await;
+        assert_eq!(status, StatusCode::OK, "{page}");
+        assert_eq!(page["rows"].as_array().unwrap().len(), 1);
+        assert_eq!(page["rows"][0]["session"]["identifier"], "session-3");
+        assert_eq!(page["rows"][0]["task_id"], task_id.to_string());
+        assert_eq!(page["rows"][0]["runner"], "claude-code");
+        assert_eq!(page["rows"][0]["model"], "model-a");
+        assert_eq!(page["rows"][0]["log_available"], true);
+        assert_eq!(page["rows"][0]["log_status"], "rotated");
+        assert_eq!(page["next_offset"], 1);
+
+        let (status, next) = h.get("/v1/work/sessions?limit=1&offset=1").await;
+        assert_eq!(status, StatusCode::OK, "{next}");
+        assert_eq!(next["rows"][0]["session"]["identifier"], "session-2");
+        assert_eq!(next["rows"][0]["log_available"], false);
+        assert_eq!(next["rows"][0]["log_status"], "unavailable");
+        assert_eq!(next["next_offset"], 2);
+
+        let (status, referenced) = h.get("/v1/work/sessions?limit=1&offset=2").await;
+        assert_eq!(status, StatusCode::OK, "{referenced}");
+        assert_eq!(referenced["rows"][0]["session"]["identifier"], "thread-1");
+        assert_eq!(referenced["rows"][0]["log_status"], "referenced");
+        assert!(referenced["next_offset"].is_null());
+
+        let (status, scoped) = h
+            .get(&format!("/v1/work/sessions?task_id={task_id}&limit=10"))
+            .await;
+        assert_eq!(status, StatusCode::OK, "{scoped}");
+        assert_eq!(scoped["rows"].as_array().unwrap().len(), 3);
+
+        let (status, detail) = h
+            .get(&format!(
+                "/v1/work/session?run_id={run_id}&identifier_kind=session&identifier=session-2"
+            ))
+            .await;
+        assert_eq!(status, StatusCode::OK, "{detail}");
+        assert_eq!(detail["session"]["identifier"], "session-2");
+        assert_eq!(detail["session"]["run_id"], run_id.to_string());
+        assert_eq!(detail["task"]["task_id"], task_id.to_string());
+        assert_eq!(detail["run"]["run_id"], run_id.to_string());
+        assert_eq!(detail["attachments"][0]["custody"], "copy-plus-index");
+        assert_eq!(detail["excerpts"][0]["digest"], "digest-one");
+        assert_eq!(detail["excerpts"][0]["projection_version"], "hash-tf-v1");
+
+        let (status, search) = h.get("/v1/work/search/page?q=needle&limit=1").await;
+        assert_eq!(status, StatusCode::OK, "{search}");
+        assert_eq!(search["rows"][0]["digest"], "digest-one");
+        assert_eq!(search["rows"][0]["projection_version"], "hash-tf-v1");
+
+        let (status, scoped) = h
+            .get(&format!("/v1/work/sessions?run_id={run_id}&limit=10"))
+            .await;
+        assert_eq!(status, StatusCode::OK, "{scoped}");
+        assert_eq!(scoped["rows"].as_array().unwrap().len(), 3);
+
+        let (status, scoped) = h
+            .get(&format!(
+                "/v1/work/sessions?project={}&limit=10",
+                projects::display(&project_path)
+            ))
+            .await;
+        assert_eq!(status, StatusCode::OK, "{scoped}");
+        assert_eq!(scoped["rows"].as_array().unwrap().len(), 3);
+
+        let (status, scoped) = h
+            .get(&format!(
+                "/v1/work/sessions?conversation_id={conversation_id}&limit=10"
+            ))
+            .await;
+        assert_eq!(status, StatusCode::OK, "{scoped}");
+        assert_eq!(scoped["rows"].as_array().unwrap().len(), 3);
+    }
+
+    /// `11 session explorer`: a desktop restart must reopen the durable record
+    /// and preserve provider-owned identifiers from more than one protocol.
+    #[tokio::test]
+    async fn the_session_explorer_survives_restart_with_two_harness_protocols() {
+        let cells = tempfile::tempdir().unwrap();
+        std::fs::write(
+            cells.path().join("zero.toml"),
+            r#"
+cell_id = "zero"
+name = "Cell Zero"
+workspace_strategy = "plain_directory"
+
+[manager]
+runner = "claude-code"
+"#,
+        )
+        .unwrap();
+        let runs_dir = tempfile::tempdir().unwrap();
+        let repo = git_repo_with_a_commit();
+        let record_dir = tempfile::tempdir().unwrap();
+        let record = record_dir.path().join("record.sqlite3");
+        let first_token = RuntimeToken::generate();
+        let first_state = Arc::new(AppState::new(
+            Store::open(&record).unwrap(),
+            cells.path(),
+            first_token.clone(),
+            runs_dir.path(),
+            repo.path(),
+        ));
+        first_state.reload();
+        let first = Harness {
+            router: router(first_state.clone()),
+            token: first_token,
+            state: first_state.clone(),
+            _dir: cells,
+            _runs_dir: runs_dir,
+            _repo: repo,
+        };
+        let now = now_ms();
+        for (runner, kind, identifier) in [
+            ("claude-code", "thread", "thread-restart"),
+            ("goose-acp", "acp-session", "acp-restart"),
+        ] {
+            let conversation_id = farseer_core::ConversationId::new();
+            let task_id = TaskId::new();
+            let run_id = RunId::new();
+            first
+                .state
+                .store()
+                .create_conversation(&farseer_core::Conversation {
+                    conversation_id,
+                    title: format!("Restart {runner}"),
+                    project_path: None,
+                    manager_runner: Some(runner.into()),
+                    created_ts: now,
+                    updated_ts: now,
+                    archived_ts: None,
+                })
+                .unwrap();
+            first
+                .state
+                .store()
+                .create_task(&farseer_core::Task {
+                    task_id,
+                    conversation_id,
+                    goal: format!("Observe {runner}"),
+                    title: format!("Observe {runner}"),
+                    project_path: None,
+                    state: farseer_core::TaskState::Done,
+                    priority: 0,
+                    created_ts: now,
+                    updated_ts: now,
+                })
+                .unwrap();
+            first
+                .state
+                .store()
+                .upsert_run(&RunRow {
+                    run_id,
+                    task_id,
+                    cell_id: CellId::new("zero"),
+                    runner: runner.into(),
+                    model: format!("{runner}-model"),
+                    outcome: Some("ok".into()),
+                    usd_micros: 0,
+                    tokens: 0,
+                    operator_touched: false,
+                    started_ts: now,
+                    finished_ts: Some(now + 1),
+                })
+                .unwrap();
+            first
+                .state
+                .store()
+                .observe_harness_session(&farseer_core::HarnessSession {
+                    run_id,
+                    identifier_kind: kind.into(),
+                    identifier: identifier.into(),
+                    log_pointer: None,
+                    observed_ts: now,
+                })
+                .unwrap();
+        }
+        drop(first);
+        drop(first_state);
+
+        let second_cells = tempfile::tempdir().unwrap();
+        std::fs::write(
+            second_cells.path().join("zero.toml"),
+            r#"
+cell_id = "zero"
+name = "Cell Zero"
+workspace_strategy = "plain_directory"
+
+[manager]
+runner = "claude-code"
+"#,
+        )
+        .unwrap();
+        let second_runs = tempfile::tempdir().unwrap();
+        let second_repo = git_repo_with_a_commit();
+        let second_token = RuntimeToken::generate();
+        let second_state = Arc::new(AppState::new(
+            Store::open(&record).unwrap(),
+            second_cells.path(),
+            second_token.clone(),
+            second_runs.path(),
+            second_repo.path(),
+        ));
+        second_state.reload();
+        let second = Harness {
+            router: router(second_state.clone()),
+            token: second_token,
+            state: second_state,
+            _dir: second_cells,
+            _runs_dir: second_runs,
+            _repo: second_repo,
+        };
+        let (status, page) = second.get("/v1/work/sessions?limit=10").await;
+        assert_eq!(status, StatusCode::OK, "{page}");
+        let rows = page["rows"].as_array().unwrap();
+        assert_eq!(rows.len(), 2);
+        assert!(
+            rows.iter()
+                .any(|row| row["session"]["identifier"] == "thread-restart")
+        );
+        assert!(
+            rows.iter()
+                .any(|row| row["session"]["identifier"] == "acp-restart")
+        );
+        assert!(rows.iter().any(|row| row["runner"] == "claude-code"));
+        assert!(rows.iter().any(|row| row["runner"] == "goose-acp"));
+    }
+
+    #[tokio::test]
+    async fn task_usage_counts_parent_and_child_runs_once_each() {
+        let h = harness();
+        let now = now_ms();
+        let conversation_id = farseer_core::ConversationId::new();
+        let task_id = TaskId::new();
+        let parent = RunId::new();
+        let child = RunId::new();
+        h.state
+            .store()
+            .create_conversation(&farseer_core::Conversation {
+                conversation_id,
+                title: "Usage fixture".into(),
+                project_path: None,
+                manager_runner: Some("claude-code".into()),
+                created_ts: now,
+                updated_ts: now,
+                archived_ts: None,
+            })
+            .unwrap();
+        h.state
+            .store()
+            .create_task(&farseer_core::Task {
+                task_id,
+                conversation_id,
+                goal: "count usage".into(),
+                title: "count usage".into(),
+                project_path: None,
+                state: farseer_core::TaskState::Done,
+                priority: 0,
+                created_ts: now,
+                updated_ts: now,
+            })
+            .unwrap();
+        for (run_id, outcome, tokens, usd_micros) in [
+            (parent, Some("ok"), 7, 3_000),
+            (child, Some("failed"), 5, 2_000),
+        ] {
+            h.state
+                .store()
+                .upsert_run(&RunRow {
+                    run_id,
+                    task_id,
+                    cell_id: CellId::new("zero"),
+                    runner: "claude-code".into(),
+                    model: "model".into(),
+                    outcome: outcome.map(str::to_string),
+                    usd_micros,
+                    tokens,
+                    operator_touched: false,
+                    started_ts: now,
+                    finished_ts: Some(now + 10),
+                })
+                .unwrap();
+        }
+        h.state
+            .store()
+            .record_run_parent(child, parent, "delegation")
+            .unwrap();
+
+        let (status, body) = h.get(&format!("/v1/tasks/{task_id}")).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["usage"]["runs"], 2);
+        assert_eq!(body["usage"]["successful_runs"], 1);
+        assert_eq!(body["usage"]["failed_runs"], 1);
+        assert_eq!(body["usage"]["tokens"], 12);
+        assert_eq!(body["usage"]["usd_micros"], 5_000);
+        let (status, board) = h.get("/v1/tasks/page?limit=10").await;
+        assert_eq!(status, StatusCode::OK, "{board}");
+        let card = board["tasks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|card| card["task_id"] == task_id.to_string())
+            .unwrap();
+        assert_eq!(card["run_summary"]["run_count"], 2);
+        assert_eq!(card["run_summary"]["active_runs"], 0);
+        assert_eq!(card["run_summary"]["latest_outcome"], "failed");
+    }
+
+    /// `12 attributed usage`: the public task and analytics projections must agree across two independent tasks, models, outcomes, and cost rows.
+    #[tokio::test]
+    async fn public_usage_pages_two_tasks_with_distinct_models_and_costs() {
+        let h = harness();
+        let now = now_ms();
+        let project_a = "C:/projects/alpha";
+        let project_b = "C:/projects/beta";
+        let mut fixtures = Vec::new();
+        for (title, project, runner, model) in [
+            ("Alpha task", project_a, "pi", "model-alpha"),
+            ("Beta task", project_b, "omp", "model-beta"),
+        ] {
+            let conversation_id = farseer_core::ConversationId::new();
+            let task_id = TaskId::new();
+            h.state
+                .store()
+                .create_conversation(&farseer_core::Conversation {
+                    conversation_id,
+                    title: title.into(),
+                    project_path: Some(project.into()),
+                    manager_runner: Some(runner.into()),
+                    created_ts: now,
+                    updated_ts: now,
+                    archived_ts: None,
+                })
+                .unwrap();
+            h.state
+                .store()
+                .create_task(&farseer_core::Task {
+                    task_id,
+                    conversation_id,
+                    goal: title.into(),
+                    title: title.into(),
+                    project_path: Some(project.into()),
+                    state: farseer_core::TaskState::Done,
+                    priority: 0,
+                    created_ts: now,
+                    updated_ts: now,
+                })
+                .unwrap();
+            fixtures.push((task_id, runner, model));
+        }
+        let (alpha, alpha_runner, alpha_model) = fixtures[0];
+        let (beta, beta_runner, beta_model) = fixtures[1];
+        let alpha_parent = RunId::new();
+        let alpha_retry = RunId::new();
+        let beta_run = RunId::new();
+        for (run_id, task_id, runner, model, outcome, tokens, usd_micros, started_ts) in [
+            (
+                alpha_parent,
+                alpha,
+                alpha_runner,
+                alpha_model,
+                Some("ok"),
+                10,
+                100,
+                now,
+            ),
+            (
+                alpha_retry,
+                alpha,
+                alpha_runner,
+                alpha_model,
+                Some("failed"),
+                2,
+                20,
+                now + 1,
+            ),
+            (
+                beta_run,
+                beta,
+                beta_runner,
+                beta_model,
+                Some("ok"),
+                5,
+                50,
+                now + 2,
+            ),
+        ] {
+            h.state
+                .store()
+                .upsert_run(&RunRow {
+                    run_id,
+                    task_id,
+                    cell_id: CellId::new("zero"),
+                    runner: runner.into(),
+                    model: model.into(),
+                    outcome: outcome.map(str::to_owned),
+                    usd_micros,
+                    tokens,
+                    operator_touched: false,
+                    started_ts,
+                    finished_ts: Some(started_ts + 10),
+                })
+                .unwrap();
+        }
+        h.state
+            .store()
+            .record_run_parent(alpha_retry, alpha_parent, "retry")
+            .unwrap();
+
+        let (status, alpha_detail) = h.get(&format!("/v1/tasks/{alpha}")).await;
+        assert_eq!(status, StatusCode::OK, "{alpha_detail}");
+        assert_eq!(alpha_detail["usage"]["runs"], 2);
+        assert_eq!(alpha_detail["usage"]["successful_runs"], 1);
+        assert_eq!(alpha_detail["usage"]["failed_runs"], 1);
+        assert_eq!(alpha_detail["usage"]["tokens"], 12);
+        assert_eq!(alpha_detail["usage"]["usd_micros"], 120);
+
+        let (status, beta_detail) = h.get(&format!("/v1/tasks/{beta}")).await;
+        assert_eq!(status, StatusCode::OK, "{beta_detail}");
+        assert_eq!(beta_detail["usage"]["runs"], 1);
+        assert_eq!(beta_detail["usage"]["tokens"], 5);
+        assert_eq!(beta_detail["usage"]["usd_micros"], 50);
+
+        let (status, first_page) = h.get("/v1/analytics/cost/page?limit=1").await;
+        assert_eq!(status, StatusCode::OK, "{first_page}");
+        assert_eq!(first_page["rows"].as_array().unwrap().len(), 1);
+        assert_eq!(first_page["rows"][0]["runner"], "pi");
+        assert_eq!(first_page["rows"][0]["model"], "model-alpha");
+        assert_eq!(first_page["rows"][0]["runs"], 1);
+        assert_eq!(first_page["rows"][0]["usd_micros"], 100);
+        assert_eq!(first_page["rows"][0]["tokens"], 10);
+        assert_eq!(first_page["next_offset"], 1);
+        assert_eq!(first_page["has_more"], true);
+
+        let (status, second_page) = h.get("/v1/analytics/cost/page?limit=1&offset=1").await;
+        assert_eq!(status, StatusCode::OK, "{second_page}");
+        assert_eq!(second_page["rows"].as_array().unwrap().len(), 1);
+        assert_eq!(second_page["rows"][0]["runner"], "omp");
+        assert_eq!(second_page["rows"][0]["model"], "model-beta");
+        assert_eq!(second_page["rows"][0]["usd_micros"], 50);
+        assert_eq!(second_page["next_offset"], serde_json::Value::Null);
+        assert_eq!(second_page["has_more"], false);
+
+        let (status, scoped) = h
+            .get("/v1/analytics/cost/page?project=C:/projects/alpha&limit=10")
+            .await;
+        assert_eq!(status, StatusCode::OK, "{scoped}");
+        assert_eq!(scoped["rows"].as_array().unwrap().len(), 1);
+        assert_eq!(scoped["rows"][0]["model"], "model-alpha");
+    }
+
+    #[tokio::test]
+    async fn task_pages_bound_results_and_reject_scope_reuse() {
+        let h = harness();
+        let now = now_ms();
+        let first = farseer_core::Conversation {
+            conversation_id: farseer_core::ConversationId::new(),
+            title: "First board".into(),
+            project_path: None,
+            manager_runner: Some("claude-code".into()),
+            created_ts: now,
+            updated_ts: now,
+            archived_ts: None,
+        };
+        let second = farseer_core::Conversation {
+            conversation_id: farseer_core::ConversationId::new(),
+            title: "Second board".into(),
+            project_path: None,
+            manager_runner: Some("claude-code".into()),
+            created_ts: now,
+            updated_ts: now,
+            archived_ts: None,
+        };
+        h.state.store().create_conversation(&first).unwrap();
+        h.state.store().create_conversation(&second).unwrap();
+        for (conversation_id, title) in [
+            (first.conversation_id, "first one"),
+            (first.conversation_id, "first two"),
+            (second.conversation_id, "second one"),
+        ] {
+            h.state
+                .store()
+                .create_task(&farseer_core::Task {
+                    task_id: TaskId::new(),
+                    conversation_id,
+                    goal: title.into(),
+                    title: title.into(),
+                    project_path: None,
+                    state: farseer_core::TaskState::Inbox,
+                    priority: 0,
+                    created_ts: now,
+                    updated_ts: now,
+                })
+                .unwrap();
+        }
+
+        let first_id = first.conversation_id;
+        let second_id = second.conversation_id;
+        let (status, page) = h
+            .get(&format!(
+                "/v1/tasks/page?conversation_id={first_id}&limit=1"
+            ))
+            .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(page["tasks"].as_array().unwrap().len(), 1);
+        assert_eq!(page["has_more"], true);
+        assert_eq!(page["freshness"], "eventual");
+        let cursor = page["next_cursor"].as_str().unwrap();
+
+        let (status, next) = h
+            .get(&format!(
+                "/v1/tasks/page?conversation_id={first_id}&limit=1&cursor={cursor}"
+            ))
+            .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(next["tasks"].as_array().unwrap().len(), 1);
+        assert_ne!(
+            page["tasks"][0]["task_id"], next["tasks"][0]["task_id"],
+            "keyset continuation must not repeat the boundary row"
+        );
+
+        let (status, _) = h
+            .get(&format!(
+                "/v1/tasks/page?conversation_id={second_id}&limit=1&cursor={cursor}"
+            ))
+            .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn task_board_scopes_global_and_project_rows_without_changing_task_facts() {
+        let h = harness();
+        let now = now_ms();
+        let root = tempfile::tempdir().unwrap();
+        let alpha = root.path().join("alpha");
+        let beta = root.path().join("beta");
+        std::fs::create_dir_all(&alpha).unwrap();
+        std::fs::create_dir_all(&beta).unwrap();
+        let root_path = std::fs::canonicalize(root.path()).unwrap();
+        let alpha_path = std::fs::canonicalize(&alpha).unwrap();
+        let beta_path = std::fs::canonicalize(&beta).unwrap();
+        h.state
+            .store()
+            .authorize_root(&projects::display(&root_path), now)
+            .unwrap();
+        let conversation_id = farseer_core::ConversationId::new();
+        h.state
+            .store()
+            .create_conversation(&farseer_core::Conversation {
+                conversation_id,
+                title: "Scoped board fixture".into(),
+                project_path: Some(projects::display(&alpha_path)),
+                manager_runner: Some("claude-code".into()),
+                created_ts: now,
+                updated_ts: now,
+                archived_ts: None,
+            })
+            .unwrap();
+        let alpha_task = TaskId::new();
+        let beta_task = TaskId::new();
+        for (task_id, title, project_path) in [
+            (alpha_task, "Alpha task", &alpha_path),
+            (beta_task, "Beta task", &beta_path),
+        ] {
+            h.state
+                .store()
+                .create_task(&farseer_core::Task {
+                    task_id,
+                    conversation_id,
+                    goal: title.into(),
+                    title: title.into(),
+                    project_path: Some(projects::display(project_path)),
+                    state: farseer_core::TaskState::Inbox,
+                    priority: 0,
+                    created_ts: now,
+                    updated_ts: now,
+                })
+                .unwrap();
+        }
+
+        let (status, global) = h.get("/v1/tasks/page?limit=10").await;
+        assert_eq!(status, StatusCode::OK, "{global}");
+        assert_eq!(global["tasks"].as_array().unwrap().len(), 2);
+        let (status, scoped) = h
+            .get(&format!(
+                "/v1/tasks/page?project={}&limit=10",
+                projects::display(&alpha_path)
+            ))
+            .await;
+        assert_eq!(status, StatusCode::OK, "{scoped}");
+        assert_eq!(scoped["tasks"].as_array().unwrap().len(), 1);
+        let global_alpha = global["tasks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|task| task["task_id"] == alpha_task.to_string())
+            .unwrap();
+        let scoped_alpha = &scoped["tasks"][0];
+        for field in [
+            "task_id",
+            "conversation_id",
+            "goal",
+            "title",
+            "project_path",
+            "state",
+        ] {
+            assert_eq!(global_alpha[field], scoped_alpha[field], "field {field}");
+        }
     }
 
     #[tokio::test]

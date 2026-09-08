@@ -320,7 +320,7 @@ fn send(
         budget,
         definition_of_done,
     });
-    match spawn_run(state, contract, RunRole::Manager, cell, None, None) {
+    match spawn_run(state, contract, RunRole::Manager, cell, None, None, None) {
         Ok(run_id) => ok(id, task_view(state, run_id)),
         Err(error) => err(id, StatusCode::BAD_REQUEST, -32006, &error.to_string()),
     }

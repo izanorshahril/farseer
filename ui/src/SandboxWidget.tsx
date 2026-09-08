@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import type { Bridge } from "./bridge";
+import { selectedSubject, snapshotComposerContext } from "./selection";
 
 /**
  * `28 operator surface` gate 3: a sandboxed render with a host bridge.
@@ -232,7 +233,7 @@ async function serve(
       return bridge.read(first);
     }
     case "ask":
-      return bridge.ask(anchor, first);
+      return bridge.ask(snapshotComposerContext(anchor, selectedSubject()), first);
     // Keyed by the widget's **id**, not its title. A title is a line in
     // `widget.json` that its author chose and can change; two widgets calling
     // themselves "Costs" would have shared one slice of state and quietly

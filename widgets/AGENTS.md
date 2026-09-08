@@ -1,11 +1,11 @@
 # Writing a farseer widget
 
 You are being asked for a widget on the operator's canvas.
-This file is the whole contract. Read it, write the two files, leave the branch.
+This file is the widget contract. Read it, write the required files, and leave the temporary widget branch for the operator to keep or undo.
 
 ## What a widget is
 
-A **face for a cell**, per [28 operator surface](../.scratch/farseer/issues/28-operator-surface.md).
+A **client face for a cell**, per [CORE.md](../CORE.md#capability-and-feature-seams).
 It renders. The cell behind it thinks.
 
 A widget **displays** a cell and never **addresses** one.
@@ -67,6 +67,19 @@ This is not advisory. The build refuses it and the widget does not mount.
 There is nothing else. No `fetch`, no token, no file system, no run verbs.
 Your code runs in a frame with an opaque origin, so a direct `fetch` fails and reading the host page throws.
 Write as if the network does not exist, because for you it does not.
+
+The sanctioned read responses used by the current examples are:
+
+| Path | JSON shape |
+| --- | --- |
+| `/runs` | an array of run rows with `run_id`, `cell_id`, `runner`, `lifecycle`, `outcome`, `usd_micros`, and `tokens` |
+| `/cells` | an array of cell summaries |
+| `/quota` | an object with `windows`, `sources`, and `source` |
+| `/analytics/cost` | an array of `{ runner, model, runs, usd_micros, tokens, usd_micros_per_run }` |
+| `/analytics/intervention` | an array of `{ cell_id, runs, touched }` |
+| `/events` | an array of record events |
+
+The Rust route handlers and these examples are the authority when a new read is added.
 
 Style: dark background, `#e6edf3` text, `#8b97a6` for secondary, `#58a6ff` for accent, `system-ui` at 13px.
 Inline styles are fine. Keep it under about 200px tall.

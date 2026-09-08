@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import type { Bridge } from "../bridge";
+import { ReadFailure } from "../ReadFailure";
+import { mask, RevealField, usePrivacy } from "../privacy";
 
 /**
  * Which harness stands in front of farseer.
@@ -28,10 +30,12 @@ type Runner = {
 };
 
 type TopManager = { cell_id: string; runner: string; file: string };
+type RuntimeStatus = { resource_monitor_enabled: boolean };
 
 type Skill = { name: string; declared_by: string[] };
 
 export function SettingsWidget({ bridge }: { bridge: Bridge }) {
+  const privacy = usePrivacy();
   const [runners, setRunners] = useState<Runner[] | null>(null);
   const [skills, setSkills] = useState<Skill[]>([]);
   const [current, setCurrent] = useState<TopManager | null>(null);
@@ -40,6 +44,8 @@ export function SettingsWidget({ bridge }: { bridge: Bridge }) {
   /** Which runner is expanded. `null` means "whichever is in use". */
   const [open, setOpen] = useState<string | null>(null);
   const [available, setAvailable] = useState(true);
+  const [readError, setReadError] = useState<string | null>(null);
+  const [resourceMonitor, setResourceMonitor] = useState<boolean | null>(null);
 
   const load = useCallback(async () => {
     try {
@@ -49,7 +55,9 @@ export function SettingsWidget({ bridge }: { bridge: Bridge }) {
       ]);
       setRunners(list);
       setCurrent(top);
-    } catch {
+      setReadError(null);
+    } catch (error) {
+      setReadError((error as Error).message);
       setAvailable(false);
     }
     // Separate from the two above: a settings surface that vanishes because the
@@ -59,6 +67,12 @@ export function SettingsWidget({ bridge }: { bridge: Bridge }) {
       setSkills(body.skills);
     } catch {
       setSkills([]);
+    }
+    try {
+      const status = await bridge.read<RuntimeStatus>("/runtime");
+      setResourceMonitor(status.resource_monitor_enabled);
+    } catch {
+      setResourceMonitor(null);
     }
   }, [bridge]);
 
@@ -94,6 +108,27 @@ export function SettingsWidget({ bridge }: { bridge: Bridge }) {
     }
   };
 
+  const toggleResourceMonitor = async () => {
+    if (resourceMonitor === null) return;
+    setBusy(true);
+    setNote(null);
+    try {
+      const status = await bridge.post("/runtime/resources", {
+        enabled: !resourceMonitor,
+      }) as RuntimeStatus;
+      setResourceMonitor(status.resource_monitor_enabled);
+      setNote(
+        status.resource_monitor_enabled
+          ? "resource sampling enabled for new supervised runs"
+          : "resource sampling disabled; run lifecycle is unchanged",
+      );
+    } catch (error) {
+      setNote((error as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
   if (!available)
     return (
       <p className="empty">
@@ -101,14 +136,34 @@ export function SettingsWidget({ bridge }: { bridge: Bridge }) {
         there is nothing here to write with.
       </p>
     );
-  if (!runners || !current) return <p className="empty">reading the definition...</p>;
+  if (!runners || !current) {
+    if (readError) return <ReadFailure capability="settings" error={readError} onRetry={() => void load()} />;
+    return <p className="empty">reading the definition...</p>;
+  }
 
   return (
     <>
+      {readError && <ReadFailure capability="settings" error={readError} stale onRetry={() => void load()} />}
       <p className="dim small" style={{ margin: "0 0 10px" }}>
         The harness in front of <b>{current.cell_id}</b>. Every request you type goes to it, and it
         decides where the work goes.
       </p>
+      {resourceMonitor !== null && (
+        <div className="settings-toggle">
+          <span className="grow">
+            <b>resource monitor</b>
+            <span className="dim small">periodic owned Job Object samples for new runs</span>
+          </span>
+          <button
+            className={resourceMonitor ? "chip on" : "chip"}
+            aria-pressed={resourceMonitor}
+            disabled={busy}
+            onClick={() => void toggleResourceMonitor()}
+          >
+            {resourceMonitor ? "on" : "off"}
+          </button>
+        </div>
+      )}
       <ul className="runners">
         {runners.map((runner) => {
           const chosen = runner.name === current.runner;
@@ -201,9 +256,9 @@ export function SettingsWidget({ bridge }: { bridge: Bridge }) {
         </>
       )}
       <p className="dim small" style={{ marginBottom: 0 }}>
-        {note ?? (
+        {note ? mask(note, "diagnostic", privacy) : (
           <>
-            Written to <span className="mono">{current.file}</span> and reloaded. A change here is a
+            Written to <span className="mono"><RevealField value={current.file} kind="path" fieldKey="settings:file" label="settings file path" /></span> and reloaded. A change here is a
             git diff, not a hidden setting.
           </>
         )}

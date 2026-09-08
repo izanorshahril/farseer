@@ -1,70 +1,69 @@
-//! Getting a farseer to talk to.
-//!
-//! `28 operator surface` made the desktop shell own the runtime, which is what
-//! demotes `farseer serve` from the way in to an option. Two cases, and the
-//! order matters: **attach to one that is already running**, then spawn.
-//!
-//! Attaching first is not politeness. `09 store decision` gives the record one
-//! writer by construction, and a second daemon on the same record would break
-//! that quietly - the operator would see two windows disagreeing rather than an
-//! error.
+//! Discover and authenticate the local farseer runtime before the UI connects.
 
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
 use std::time::{Duration, Instant};
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, anyhow};
 use serde::Deserialize;
 
-/// What `farseer serve` writes on startup, and `farseer where` prints.
+const STARTUP_TIMEOUT: Duration = Duration::from_secs(20);
+const OWNER_CONVERGENCE_TIMEOUT: Duration = Duration::from_secs(2);
+const CONNECT_TIMEOUT: Duration = Duration::from_millis(300);
+const IO_TIMEOUT: Duration = Duration::from_secs(1);
+const REQUIRED_FEATURES: &[&str] = &["health", "sse", "commands"];
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct Runtime {
     pub port: u16,
     pub token: String,
+    pub runtime_id: String,
+    pub data_dir_fingerprint: String,
+    pub api_version: String,
+    pub build_provenance: String,
+    pub features: Vec<String>,
+    #[serde(default)]
+    pub process_id: Option<u32>,
+    #[serde(default)]
+    pub process_creation_time: Option<u64>,
 }
 
-/// The daemon this shell is talking to, and whether it owns it.
+/// The daemon this shell is talking to.
 pub struct Attached {
     pub runtime: Runtime,
-    /// `Some` only when this shell started it. A daemon the operator started
-    /// outlives the window, which is `01 cell primitive`'s durability
-    /// requirement: the runtime outlives any UI restart.
-    child: Option<Child>,
+    /// `02 independent runtime lifecycle`: keep the process handle alive during
+    /// shell setup, but do not tie daemon lifetime to the UI; dropping `Child`
+    /// closes the handle without stopping the independently owned runtime.
+    _child: Option<Child>,
 }
 
-impl Drop for Attached {
-    fn drop(&mut self) {
-        if let Some(child) = self.child.as_mut() {
-            // Only ever the one this shell spawned. Reaping a daemon the
-            // operator started would take their fleet down with a window.
-            let _ = child.kill();
-            let _ = child.wait();
-        }
+/// Read and authenticate the runtime named by the discovery file.
+pub fn attach_existing(expected_data_dir: &str) -> Result<Option<Runtime>> {
+    attach_existing_at(
+        &farseer_api::security::runtime_file_path(),
+        expected_data_dir,
+    )
+}
+
+fn attach_existing_at(path: &Path, expected_data_dir: &str) -> Result<Option<Runtime>> {
+    let Some(runtime) = read_runtime_file(path)? else {
+        return Ok(None);
+    };
+    match verify_classified(&runtime, expected_data_dir) {
+        Ok(runtime) => Ok(Some(runtime)),
+        Err(VerifyError::Unauthenticated(error)) if retryable_discovery_error(&error) => Ok(None),
+        Err(VerifyError::Unauthenticated(error)) => Err(error),
+        Err(VerifyError::Incompatible(error)) => Err(error),
     }
 }
 
-/// Read the runtime file, and check the daemon it names is actually answering.
-///
-/// A stale file outlives a crashed daemon, so the file alone is a claim rather
-/// than a fact - and believing it produces the same connection-refused nobody
-/// can act on.
-pub fn attach_existing() -> Option<Runtime> {
+/// Start a daemon and wait for its authenticated health response.
+pub fn spawn(binary: &Path, cells: &Path, repo: &Path, record: &Path) -> Result<Attached> {
     let path = farseer_api::security::runtime_file_path();
-    let text = std::fs::read_to_string(&path).ok()?;
-    let runtime: Runtime = serde_json::from_str(&text).ok()?;
-    std::net::TcpStream::connect_timeout(
-        &(std::net::Ipv4Addr::LOCALHOST, runtime.port).into(),
-        Duration::from_millis(300),
-    )
-    .ok()?;
-    Some(runtime)
-}
-
-/// Start a daemon and wait for it to write its runtime file.
-pub fn spawn(binary: &Path, cells: &Path, repo: &Path) -> Result<Attached> {
-    let path = farseer_api::security::runtime_file_path();
-    let before = std::fs::metadata(&path).and_then(|m| m.modified()).ok();
-
+    let previous = read_runtime_file(&path)?;
+    let expected_data_dir =
+        farseer_api::security::data_dir_fingerprint(record.parent().unwrap_or(record));
     let child = Command::new(binary)
         .arg("serve")
         .arg("--port")
@@ -73,44 +72,327 @@ pub fn spawn(binary: &Path, cells: &Path, repo: &Path) -> Result<Attached> {
         .arg(cells)
         .arg("--repo")
         .arg(repo)
+        .arg("--record")
+        .arg(record)
         .spawn()
         .with_context(|| format!("starting {}", binary.display()))?;
 
-    // Port 0 means the OS chooses, so the file is the only place the real port
-    // appears - and it is written after the listener binds, which is exactly
-    // the moment there is something to connect to.
-    let deadline = Instant::now() + Duration::from_secs(20);
+    wait_for_startup(
+        child,
+        &path,
+        &expected_data_dir,
+        previous.as_ref(),
+        STARTUP_TIMEOUT,
+    )
+}
+
+fn wait_for_startup(
+    mut child: Child,
+    path: &Path,
+    expected_data_dir: &str,
+    previous: Option<&Runtime>,
+    timeout: Duration,
+) -> Result<Attached> {
+    let deadline = Instant::now() + timeout;
+    let mut last_observation = "runtime file not published".to_owned();
     while Instant::now() < deadline {
-        if let Ok(text) = std::fs::read_to_string(&path)
-            && let Ok(runtime) = serde_json::from_str::<Runtime>(&text)
+        if let Some(status) = child
+            .try_wait()
+            .context("checking the farseer child during startup")?
         {
-            let fresh = std::fs::metadata(&path)
-                .and_then(|m| m.modified())
-                .ok()
-                .zip(before)
-                .is_none_or(|(now, then)| now > then);
-            if fresh
-                && std::net::TcpStream::connect_timeout(
-                    &(std::net::Ipv4Addr::LOCALHOST, runtime.port).into(),
-                    Duration::from_millis(300),
-                )
-                .is_ok()
-            {
+            // Two shells can observe the same missing or stale discovery file
+            // and race to start a daemon.  The data-directory lease lets one
+            // child win; give that owner a short publication window before
+            // reporting the losing child exit, then attach only after the same
+            // authenticated handshake used by the normal path.
+            if let Some(existing) = wait_for_owner(
+                || attach_existing_at(path, expected_data_dir),
+                OWNER_CONVERGENCE_TIMEOUT,
+            )? {
                 return Ok(Attached {
-                    runtime,
-                    child: Some(child),
+                    runtime: existing,
+                    _child: None,
                 });
+            }
+            return fail_child(child, anyhow!("startup: child exited with {status}"));
+        }
+        match read_runtime_file(path) {
+            Ok(Some(runtime)) => {
+                if previous.is_some_and(|old| same_identity(old, &runtime)) {
+                    last_observation = "runtime file still names the previous runtime".to_owned();
+                    std::thread::sleep(Duration::from_millis(100));
+                    continue;
+                }
+                match verify_classified(&runtime, expected_data_dir) {
+                    Ok(runtime) => {
+                        if runtime_identity_differs_from_child(&runtime, child.id()) {
+                            // `01 verified startup` reaches this branch
+                            // before the loser can admit work, so killing the
+                            // launcher's own child cannot orphan a worker tree.
+                            let _ = child.kill();
+                            let _ = child.wait();
+                            return Ok(Attached {
+                                runtime,
+                                _child: None,
+                            });
+                        }
+                        return Ok(Attached {
+                            runtime,
+                            _child: Some(child),
+                        });
+                    }
+                    Err(VerifyError::Unauthenticated(error)) => {
+                        if !retryable_discovery_error(&error) {
+                            return fail_child(child, error);
+                        }
+                        last_observation = error.to_string();
+                    }
+                    Err(VerifyError::Incompatible(error)) => return fail_child(child, error),
+                }
+            }
+            Ok(None) => {}
+            Err(error) => {
+                last_observation = error.to_string();
             }
         }
         std::thread::sleep(Duration::from_millis(100));
     }
-    Ok(Attached {
-        runtime: Runtime {
-            port: 0,
-            token: String::new(),
-        },
-        child: Some(child),
-    })
+    fail_child(
+        child,
+        anyhow!(
+            "startup: timed out after {} seconds ({last_observation})",
+            timeout.as_secs()
+        ),
+    )
+}
+
+fn read_runtime_file(path: &Path) -> Result<Option<Runtime>> {
+    match std::fs::read_to_string(path) {
+        Ok(text) => serde_json::from_str::<Runtime>(&text)
+            .map(Some)
+            .with_context(|| {
+                format!(
+                    "startup: runtime discovery file is malformed ({})",
+                    path.display()
+                )
+            }),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(anyhow!(
+            "startup: cannot read runtime discovery file {}: {error}",
+            path.display()
+        )),
+    }
+}
+
+fn fail_child(mut child: Child, error: anyhow::Error) -> Result<Attached> {
+    let _ = child.kill();
+    let _ = child.wait();
+    Err(error)
+}
+
+fn wait_for_owner(
+    mut discover: impl FnMut() -> Result<Option<Runtime>>,
+    timeout: Duration,
+) -> Result<Option<Runtime>> {
+    let deadline = Instant::now() + timeout;
+    while Instant::now() < deadline {
+        if let Some(runtime) = discover()? {
+            return Ok(Some(runtime));
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    Ok(None)
+}
+
+fn retryable_discovery_error(error: &anyhow::Error) -> bool {
+    let text = error.to_string().to_ascii_lowercase();
+    text.contains("loopback endpoint did not answer")
+        || text.contains("connection refused")
+        || text.contains("actively refused")
+        || text.contains("timed out")
+}
+
+#[cfg(test)]
+fn verify(runtime: &Runtime, expected_data_dir: &str) -> Result<Runtime> {
+    verify_classified(runtime, expected_data_dir).map_err(VerifyError::into_error)
+}
+
+enum VerifyError {
+    Unauthenticated(anyhow::Error),
+    Incompatible(anyhow::Error),
+}
+
+#[cfg(test)]
+impl VerifyError {
+    fn into_error(self) -> anyhow::Error {
+        match self {
+            Self::Unauthenticated(error) => {
+                if error.to_string().starts_with("unauthorized:") {
+                    error
+                } else {
+                    anyhow!("startup: wrong listener: {error}")
+                }
+            }
+            Self::Incompatible(error) => error,
+        }
+    }
+}
+
+fn verify_classified(runtime: &Runtime, expected_data_dir: &str) -> Result<Runtime, VerifyError> {
+    if runtime.port == 0 {
+        return Err(VerifyError::Unauthenticated(anyhow!(
+            "startup: runtime advertised port 0"
+        )));
+    }
+    if runtime.token.is_empty() {
+        return Err(VerifyError::Unauthenticated(anyhow!(
+            "startup: runtime advertised an empty token"
+        )));
+    }
+
+    let health = health(runtime).map_err(VerifyError::Unauthenticated)?;
+    if runtime.data_dir_fingerprint != expected_data_dir {
+        return Err(VerifyError::Incompatible(anyhow!(
+            "startup: runtime data directory does not match this launch"
+        )));
+    }
+    if health["runtime_id"] != runtime.runtime_id {
+        return Err(VerifyError::Incompatible(anyhow!(
+            "startup: runtime identity mismatch"
+        )));
+    }
+    if health["data_dir_fingerprint"] != runtime.data_dir_fingerprint {
+        return Err(VerifyError::Incompatible(anyhow!(
+            "startup: runtime data directory identity mismatch"
+        )));
+    }
+    if health["api_version"] != runtime.api_version {
+        return Err(VerifyError::Incompatible(anyhow!(
+            "startup: runtime API identity mismatch"
+        )));
+    }
+    if runtime.api_version != "v1" {
+        return Err(VerifyError::Incompatible(anyhow!(
+            "startup: incompatible API version {}",
+            runtime.api_version
+        )));
+    }
+    if health["build_provenance"] != runtime.build_provenance {
+        return Err(VerifyError::Incompatible(anyhow!(
+            "startup: runtime build identity mismatch"
+        )));
+    }
+    if let Some(process_id) = runtime.process_id
+        && health["process_id"] != serde_json::json!(process_id)
+    {
+        return Err(VerifyError::Incompatible(anyhow!(
+            "startup: runtime process identity mismatch"
+        )));
+    }
+    if let Some(process_creation_time) = runtime.process_creation_time
+        && health["process_creation_time"] != serde_json::json!(process_creation_time)
+    {
+        return Err(VerifyError::Incompatible(anyhow!(
+            "startup: runtime process creation identity mismatch"
+        )));
+    }
+    if runtime.build_provenance != format!("farseer-api/{}", env!("CARGO_PKG_VERSION")) {
+        return Err(VerifyError::Incompatible(anyhow!(
+            "startup: incompatible runtime build {}",
+            runtime.build_provenance
+        )));
+    }
+    let features = health["features"].as_array().ok_or_else(|| {
+        VerifyError::Incompatible(anyhow!("startup: runtime did not report features"))
+    })?;
+    if runtime.features.len() != features.len()
+        || runtime
+            .features
+            .iter()
+            .any(|feature| !features.iter().any(|reported| reported == feature))
+    {
+        return Err(VerifyError::Incompatible(anyhow!(
+            "startup: runtime feature identity mismatch"
+        )));
+    }
+    for required in REQUIRED_FEATURES {
+        if !features.iter().any(|feature| feature == required) {
+            return Err(VerifyError::Incompatible(anyhow!(
+                "startup: required feature `{required}` is unavailable"
+            )));
+        }
+    }
+    Ok(runtime.clone())
+}
+
+fn runtime_identity_differs_from_child(runtime: &Runtime, child_pid: u32) -> bool {
+    let (Some(runtime_pid), Some(runtime_creation_time), Some(child_creation_time)) = (
+        runtime.process_id,
+        runtime.process_creation_time,
+        farseer_api::security::process_creation_time(child_pid),
+    ) else {
+        // Older discovery records and platforms without an OS creation-time
+        // query cannot support a PID-only decision.  The authenticated health
+        // handshake remains the authority in that case.
+        return false;
+    };
+    runtime_pid != child_pid || runtime_creation_time != child_creation_time
+}
+
+fn same_identity(left: &Runtime, right: &Runtime) -> bool {
+    left.runtime_id == right.runtime_id && left.token == right.token
+}
+
+fn health(runtime: &Runtime) -> Result<serde_json::Value> {
+    let address = (std::net::Ipv4Addr::LOCALHOST, runtime.port);
+    let mut stream = std::net::TcpStream::connect_timeout(&address.into(), CONNECT_TIMEOUT)
+        .context("loopback endpoint did not answer")?;
+    stream
+        .set_read_timeout(Some(IO_TIMEOUT))
+        .and_then(|_| stream.set_write_timeout(Some(IO_TIMEOUT)))?;
+    write!(
+        stream,
+        "GET /v1/health HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nAuthorization: Bearer {}\r\nConnection: close\r\n\r\n",
+        runtime.port, runtime.token
+    )?;
+    stream.flush()?;
+    // `01 verified startup`: `Connection: close` already bounds this response.
+    // On Windows, a local write-half shutdown can make hyper drop the response
+    // before this reader sees it, even though the same request succeeds when
+    // the write side stays open.  Keep the socket open until the server closes
+    // it.
+    let mut response = Vec::new();
+    stream.read_to_end(&mut response)?;
+    let (headers, body) = response
+        .split_once_bytes(b"\r\n\r\n")
+        .ok_or_else(|| anyhow!("listener returned an invalid HTTP response"))?;
+    let status = std::str::from_utf8(headers)
+        .ok()
+        .and_then(|headers| headers.lines().next())
+        .and_then(|line| line.split_whitespace().nth(1))
+        .and_then(|status| status.parse::<u16>().ok())
+        .ok_or_else(|| anyhow!("listener returned no HTTP status"))?;
+    if status == 401 || status == 403 {
+        return Err(anyhow!(
+            "unauthorized: runtime rejected the discovery token ({status})"
+        ));
+    }
+    if status != 200 {
+        return Err(anyhow!("listener returned HTTP {status}"));
+    }
+    serde_json::from_slice(body).context("health response was not JSON")
+}
+
+trait SplitOnceBytes {
+    fn split_once_bytes(&self, needle: &[u8]) -> Option<(&[u8], &[u8])>;
+}
+
+impl SplitOnceBytes for [u8] {
+    fn split_once_bytes(&self, needle: &[u8]) -> Option<(&[u8], &[u8])> {
+        self.windows(needle.len())
+            .position(|window| window == needle)
+            .map(|at| (&self[..at], &self[at + needle.len()..]))
+    }
 }
 
 /// Where the farseer binary is, next to this executable in an installed build
@@ -124,4 +406,290 @@ pub fn sidecar_path() -> Option<PathBuf> {
         "farseer"
     });
     candidate.exists().then_some(candidate)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::net::TcpListener;
+    use std::thread;
+
+    fn runtime(port: u16) -> Runtime {
+        Runtime {
+            port,
+            token: "token".into(),
+            runtime_id: "runtime".into(),
+            data_dir_fingerprint: "sha256:data".into(),
+            api_version: "v1".into(),
+            build_provenance: format!("farseer-api/{}", env!("CARGO_PKG_VERSION")),
+            features: REQUIRED_FEATURES
+                .iter()
+                .map(|feature| (*feature).into())
+                .collect(),
+            process_id: None,
+            process_creation_time: None,
+        }
+    }
+
+    fn listener(status: u16, body: serde_json::Value) -> u16 {
+        let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            // `01 verified startup`: the production Axum listener answers as
+            // soon as the HTTP header terminator arrives.  Waiting for EOF here
+            // would only work with the old client half-close and would miss
+            // the Windows behavior this seam is meant to cover.
+            let mut request = Vec::new();
+            let mut chunk = [0_u8; 512];
+            while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+                let read = stream.read(&mut chunk).unwrap();
+                if read == 0 {
+                    break;
+                }
+                request.extend_from_slice(&chunk[..read]);
+            }
+            let bytes = body.to_string();
+            let response = format!(
+                "HTTP/1.1 {status} OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{bytes}",
+                bytes.len()
+            );
+            stream.write_all(response.as_bytes()).unwrap();
+            stream.flush().unwrap();
+            stream.shutdown(std::net::Shutdown::Both).unwrap();
+        });
+        port
+    }
+
+    fn health_body(runtime: &Runtime) -> serde_json::Value {
+        serde_json::json!({
+            "api_version": runtime.api_version,
+            "runtime_id": runtime.runtime_id,
+            "data_dir_fingerprint": runtime.data_dir_fingerprint,
+            "build_provenance": runtime.build_provenance,
+            "features": runtime.features,
+            "process_id": runtime.process_id,
+            "process_creation_time": runtime.process_creation_time,
+        })
+    }
+
+    #[test]
+    fn health_keeps_the_write_side_open_until_the_listener_answers() {
+        let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let body = health_body(&runtime(port));
+        thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = Vec::new();
+            let mut chunk = [0_u8; 512];
+            while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+                let read = stream.read(&mut chunk).unwrap();
+                if read == 0 {
+                    return;
+                }
+                request.extend_from_slice(&chunk[..read]);
+            }
+            // `01 verified startup`: a client that half-closes before the
+            // response makes this read return zero.  The real Axum listener
+            // then drops the response; keep the test's refusal explicit so the
+            // regression stays local.
+            stream
+                .set_read_timeout(Some(Duration::from_millis(250)))
+                .unwrap();
+            let mut probe = [0_u8; 1];
+            if matches!(stream.read(&mut probe), Ok(0)) {
+                return;
+            }
+            let bytes = body.to_string();
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{bytes}",
+                bytes.len()
+            );
+            stream.write_all(response.as_bytes()).unwrap();
+        });
+        assert!(health(&runtime(port)).is_ok());
+    }
+
+    #[test]
+    fn a_matching_health_handshake_is_accepted() {
+        let mut runtime = runtime(0);
+        let body = health_body(&runtime);
+        runtime.port = listener(200, body);
+        let result = verify(&runtime, "sha256:data");
+        assert!(result.is_ok(), "{result:?}");
+    }
+
+    #[test]
+    fn a_wrong_listener_and_unauthorized_listener_are_distinct() {
+        let mut runtime = runtime(0);
+        runtime.port = listener(404, serde_json::json!({"answer": "other service"}));
+        let wrong = verify(&runtime, "sha256:data").unwrap_err().to_string();
+        assert!(wrong.contains("wrong listener"), "{wrong}");
+
+        runtime.port = listener(401, serde_json::json!({}));
+        let unauthorized = verify(&runtime, "sha256:data").unwrap_err().to_string();
+        assert!(unauthorized.contains("unauthorized"), "{unauthorized}");
+    }
+
+    #[test]
+    fn an_unreachable_listener_is_retryable_but_an_authenticated_mismatch_is_fatal() {
+        let unreachable = runtime(9);
+        assert!(matches!(
+            verify_classified(&unreachable, "sha256:data"),
+            Err(VerifyError::Unauthenticated(_))
+        ));
+
+        let mut runtime = runtime(0);
+        let body = health_body(&runtime);
+        runtime.port = listener(200, body);
+        assert!(matches!(
+            verify_classified(&runtime, "sha256:other"),
+            Err(VerifyError::Incompatible(_))
+        ));
+    }
+
+    #[test]
+    fn identity_fingerprint_and_features_are_required() {
+        let mut runtime = runtime(0);
+        assert!(verify(&runtime, "sha256:other").is_err());
+        runtime.port = 0;
+        assert!(
+            verify(&runtime, "sha256:data")
+                .unwrap_err()
+                .to_string()
+                .contains("port 0")
+        );
+
+        runtime.port = listener(
+            200,
+            serde_json::json!({
+                "api_version": "v1",
+                "runtime_id": "runtime",
+                "data_dir_fingerprint": "sha256:data",
+                "build_provenance": format!("farseer-api/{}", env!("CARGO_PKG_VERSION")),
+                "features": ["health"],
+            }),
+        );
+        let error = verify(&runtime, "sha256:data").unwrap_err().to_string();
+        assert!(error.contains("feature"), "{error}");
+    }
+
+    #[test]
+    fn process_identity_is_checked_when_present() {
+        let mut runtime = runtime(0);
+        runtime.process_id = Some(41);
+        let mut body = health_body(&runtime);
+        body["process_id"] = serde_json::json!(42);
+        runtime.port = listener(200, body);
+        let error = verify(&runtime, "sha256:data").unwrap_err().to_string();
+        assert!(error.contains("process identity"), "{error}");
+    }
+
+    #[test]
+    fn process_creation_identity_is_checked_when_present() {
+        let mut runtime = runtime(0);
+        runtime.process_creation_time = Some(41);
+        let mut body = health_body(&runtime);
+        body["process_creation_time"] = serde_json::json!(42);
+        runtime.port = listener(200, body);
+        let error = verify(&runtime, "sha256:data").unwrap_err().to_string();
+        assert!(error.contains("process creation identity"), "{error}");
+    }
+
+    #[test]
+    fn startup_never_makes_a_pid_only_identity_decision() {
+        let mut runtime = runtime(0);
+        runtime.process_id = Some(std::process::id());
+        assert!(!runtime_identity_differs_from_child(
+            &runtime,
+            std::process::id()
+        ));
+    }
+
+    #[test]
+    fn a_losing_launch_reuses_the_verified_owner_after_its_child_exits() {
+        let expected = runtime(42);
+        let mut attempts = 0;
+        let found = wait_for_owner(
+            || {
+                attempts += 1;
+                Ok((attempts >= 2).then_some(expected.clone()))
+            },
+            Duration::from_millis(250),
+        )
+        .unwrap();
+        assert_eq!(found.unwrap().runtime_id, "runtime");
+        assert!(attempts >= 2);
+    }
+
+    #[test]
+    fn a_malformed_discovery_file_is_an_actionable_startup_error() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(file.path(), b"not-json").unwrap();
+        let error = read_runtime_file(file.path()).unwrap_err().to_string();
+        assert!(
+            error.contains("runtime discovery file is malformed"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn only_unreachable_discovery_errors_are_retryable() {
+        assert!(retryable_discovery_error(&anyhow!(
+            "loopback endpoint did not answer"
+        )));
+        assert!(retryable_discovery_error(&anyhow!("operation timed out")));
+        assert!(!retryable_discovery_error(&anyhow!(
+            "unauthorized: runtime rejected the discovery token (401)"
+        )));
+        assert!(!retryable_discovery_error(&anyhow!(
+            "listener returned HTTP 404"
+        )));
+    }
+
+    fn command_shell(command: &str) -> Child {
+        // These are startup-observation fixtures, not supervised runtime
+        // processes.  The production daemon is supervised by the runner's Job
+        // Object; this helper only gives wait_for_startup a short-lived child
+        // whose exit and timeout can be asserted without a real daemon.
+        let shell = std::env::var_os("ComSpec").unwrap_or_else(|| "cmd.exe".into());
+        Command::new(shell)
+            .args(["/C", command])
+            .spawn()
+            .expect("test command shell")
+    }
+
+    #[test]
+    fn a_child_exit_is_distinct_and_owned_child_is_cleaned_up() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("runtime.json");
+        let error = match wait_for_startup(
+            command_shell("exit 7"),
+            &path,
+            "sha256:test",
+            None,
+            Duration::from_secs(1),
+        ) {
+            Ok(_) => panic!("child exit unexpectedly attached"),
+            Err(error) => error.to_string(),
+        };
+        assert!(error.contains("startup: child exited"), "{error}");
+    }
+
+    #[test]
+    fn a_startup_deadline_is_distinct_and_cleans_up_the_owned_child() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("runtime.json");
+        let error = match wait_for_startup(
+            command_shell("ping -n 8 127.0.0.1 >NUL"),
+            &path,
+            "sha256:test",
+            None,
+            Duration::from_millis(50),
+        ) {
+            Ok(_) => panic!("startup deadline unexpectedly attached"),
+            Err(error) => error.to_string(),
+        };
+        assert!(error.contains("startup: timed out"), "{error}");
+    }
 }

@@ -21,6 +21,13 @@ pub struct CostRow {
     pub usd_micros_per_run: i64,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct CostPage {
+    pub rows: Vec<CostRow>,
+    pub next_offset: Option<usize>,
+    pub has_more: bool,
+}
+
 /// Q2: intervention rate, by cell.
 ///
 /// `11 analytics questions` chose this as the headline metric, and `12 autonomy and deny list` noted the metric only means
@@ -74,6 +81,60 @@ impl Store {
         })?;
         rows.collect::<std::result::Result<_, _>>()
             .map_err(Into::into)
+    }
+
+    /// Bounded cost breakdown for Capacity and focused work views.
+    ///
+    /// The project and time predicates are optional, but the row budget is
+    /// always enforced in SQL so a large record never becomes a large JSON
+    /// response by default.
+    pub fn cost_page(
+        &self,
+        limit: usize,
+        offset: usize,
+        project: Option<&str>,
+        from_ts: Option<i64>,
+        to_ts: Option<i64>,
+    ) -> Result<CostPage> {
+        let limit = limit.clamp(1, 500);
+        let mut stmt = self.conn().prepare_cached(
+            "SELECT r.runner, r.model, COUNT(*), SUM(r.usd_micros), SUM(r.tokens)
+             FROM runs r LEFT JOIN tasks t ON t.task_id = r.task_id
+             WHERE r.outcome = 'ok'
+               AND (?1 IS NULL OR r.started_ts >= ?1)
+               AND (?2 IS NULL OR r.started_ts <= ?2)
+               AND (?3 IS NULL OR t.project_path = ?3)
+             GROUP BY r.runner, r.model
+             ORDER BY SUM(r.usd_micros) DESC, r.runner, r.model
+             LIMIT ?4 OFFSET ?5",
+        )?;
+        let rows = stmt
+            .query_map(
+                rusqlite::params![from_ts, to_ts, project, (limit + 1) as i64, offset as i64],
+                |row| {
+                    let runs: i64 = row.get(2)?;
+                    let usd_micros: i64 = row.get(3)?;
+                    Ok(CostRow {
+                        runner: row.get(0)?,
+                        model: row.get(1)?,
+                        runs,
+                        usd_micros,
+                        tokens: row.get(4)?,
+                        usd_micros_per_run: usd_micros / runs.max(1),
+                    })
+                },
+            )?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        let has_more = rows.len() > limit;
+        let mut rows = rows;
+        if has_more {
+            rows.truncate(limit);
+        }
+        Ok(CostPage {
+            rows,
+            next_offset: has_more.then_some(offset + limit),
+            has_more,
+        })
     }
 
     /// Q2.

@@ -120,21 +120,32 @@ fn poll(state: &AppState, cursor: &mut Seq, warned: &mut HashSet<RunId>) -> Vec<
             // hook on - the agent has said its piece and is waiting on a person.
             out.push(Notification {
                 title: "farseer: answered".to_string(),
-                body: format!("run {} is waiting for you", short(event.run_id)),
+                body: format!(
+                    "record event {}: an active run is waiting for you",
+                    event.seq
+                ),
                 priority: 3,
             });
             continue;
         }
         // A finished run also stops being hung, so anything held for it goes.
         warned.remove(&event.run_id);
-        let outcome = event
+        let outcome = match event
             .payload
             .get("outcome")
             .and_then(serde_json::Value::as_str)
-            .unwrap_or("finished");
+        {
+            Some("ok" | "success" | "succeeded") => "ok",
+            Some("cancelled" | "canceled") => "cancelled",
+            Some("failed" | "error") => "failed",
+            _ => "finished",
+        };
         out.push(Notification {
             title: format!("farseer: {outcome}"),
-            body: format!("run {} {outcome}", short(event.run_id)),
+            // `09 privacy presentation` makes external notifications use the
+            // record sequence for correlation without exporting a provider-owned
+            // session/run identifier into a phone or webhook.
+            body: format!("record event {}: {outcome}", event.seq),
             // Failure is the one an operator wants pushed through a quiet hour.
             priority: if outcome == "ok" { 3 } else { 4 },
         });
@@ -158,8 +169,7 @@ fn poll(state: &AppState, cursor: &mut Seq, warned: &mut HashSet<RunId>) -> Vec<
             out.push(Notification {
                 title: "farseer: likely hung".to_string(),
                 body: format!(
-                    "run {} has produced nothing for {}s",
-                    short(*run_id),
+                    "an active run has produced nothing for {}s",
                     state.thresholds.likely_hung_secs
                 ),
                 priority: 4,
@@ -187,11 +197,6 @@ fn is_root_run(state: &AppState, run_id: RunId) -> bool {
         Ok(Some(first)) => first == run_id,
         _ => true,
     }
-}
-
-/// The first segment of an id, which is what the operator's own tooling prints.
-fn short(run_id: RunId) -> String {
-    run_id.to_string()[..8].to_string()
 }
 
 /// Best-effort, and deliberately so.
@@ -252,5 +257,58 @@ mod tests {
         assert!(!warned.insert(run), "the second says nothing");
         warned.retain(|r| *r != run);
         assert!(warned.insert(run), "a run that recovered may hang again");
+    }
+
+    #[test]
+    fn external_notifications_correlate_by_record_event_without_exporting_run_ids() {
+        let cells = tempfile::tempdir().unwrap();
+        let runs_dir = tempfile::tempdir().unwrap();
+        let repo = tempfile::tempdir().unwrap();
+        let state = AppState::new(
+            farseer_store::Store::open_in_memory().unwrap(),
+            cells.path(),
+            crate::RuntimeToken::generate(),
+            runs_dir.path(),
+            repo.path(),
+        );
+        let run = RunId::new();
+        let task = farseer_core::TaskId::new();
+        state
+            .store()
+            .upsert_run(&farseer_store::RunRow {
+                run_id: run,
+                task_id: task,
+                cell_id: farseer_core::CellId::new("zero"),
+                runner: "pi".into(),
+                model: String::new(),
+                outcome: Some("ok".into()),
+                usd_micros: 0,
+                tokens: 0,
+                operator_touched: false,
+                started_ts: 100,
+                finished_ts: Some(200),
+            })
+            .unwrap();
+        let event_seq = state
+            .store()
+            .append(&farseer_core::NewEvent::new(
+                farseer_core::CellId::new("zero"),
+                run,
+                EventKind::new(EventKind::RUN_FINISHED),
+                farseer_core::Actor::System,
+                200,
+                serde_json::json!({ "outcome": "C:\\Users\\operator\\private.txt" }),
+            ))
+            .unwrap();
+        let mut cursor = 0;
+        let notifications = poll(&state, &mut cursor, &mut HashSet::new());
+        assert_eq!(notifications.len(), 1);
+        let body = &notifications[0].body;
+        assert_eq!(cursor, event_seq);
+        assert!(body.contains(&format!("record event {event_seq}")));
+        assert!(!body.contains(&run.to_string()));
+        assert!(!body.contains("run "));
+        assert_eq!(notifications[0].title, "farseer: finished");
+        assert!(!body.contains("private.txt"));
     }
 }

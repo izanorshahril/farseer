@@ -19,6 +19,7 @@ schemars.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
+toml.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 tokio-stream = "0.1.17"
@@ -31,6 +32,9 @@ windows = { version = "0.62.2", features = [
     "Win32_Security_Authorization",
     "Win32_System_Threading",
 ] }
+
+[target.'cfg(unix)'.dependencies]
+libc = "=0.2.189"
 
 [dev-dependencies]
 http-body-util = "0.1.3"

@@ -13,7 +13,13 @@
 //!   secrets on disk and one query bug away from exposure.
 
 use rusqlite::{Connection, OptionalExtension, params_from_iter};
-use std::path::Path;
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+use std::fmt::Write as _;
+use std::fs;
+use std::io::{Read, Write};
+use std::path::{Path, PathBuf};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use farseer_core::{
     Actor, CellId, Event, EventId, EventKind, NewEvent, RunId, Seq, scrub::scrub_value,
@@ -21,20 +27,32 @@ use farseer_core::{
 
 mod analytics;
 mod lifecycle;
+pub mod maintenance;
 mod memory;
 mod quota;
+mod resource;
 mod roots;
 mod schema;
 mod ui_state;
 mod work;
 
-pub use analytics::{CostRow, InterventionRow, LessonRow, ReworkRow};
+/// Storage format understood by this binary.
+pub const STORE_FORMAT_VERSION: i64 = 1;
+const BACKUP_FORMAT_VERSION: u32 = 1;
+const BACKUP_DATABASE: &str = "record.sqlite3";
+const BACKUP_MANIFEST: &str = "manifest.json";
+
+pub use analytics::{CostPage, CostRow, InterventionRow, LessonRow, ReworkRow};
 pub use farseer_core::MemoryId;
 pub use lifecycle::{Lifecycle, Purged};
 pub use memory::{MemoryCaps, MemoryClaim, MemoryScope, NewMemory, Promotion};
 pub use quota::WindowRow;
+pub use resource::ResourceSample;
 pub use ui_state::{UI_STATE_CAP_BYTES, UI_STATE_KEY_CAP_BYTES};
-pub use work::{RunParent, SimilarityEdge, TaskFilter, TranscriptAttachment};
+pub use work::{
+    ArtifactRow, GraphEdge, GraphFilter, GraphNode, GraphPage, IndexedTranscript, RunParent,
+    SessionRow, SimilarityEdge, TaskCursor, TaskFilter, TranscriptAttachment, TranscriptProjection,
+};
 
 #[derive(Debug, thiserror::Error)]
 pub enum StoreError {
@@ -42,6 +60,22 @@ pub enum StoreError {
     Sqlite(#[from] rusqlite::Error),
     #[error(transparent)]
     Json(#[from] serde_json::Error),
+    #[error(transparent)]
+    Io(#[from] std::io::Error),
+    #[error(
+        "record schema version {found} is newer than this binary supports (maximum {supported})"
+    )]
+    UnsupportedSchemaVersion { found: i64, supported: i64 },
+    #[error(
+        "backup format version {found} is newer than this binary supports (maximum {supported})"
+    )]
+    UnsupportedBackupVersion { found: u32, supported: u32 },
+    #[error("backup attachment `{digest}` is missing or changed")]
+    InvalidBackupAttachment { digest: String },
+    #[error("backup destination already exists: {0}")]
+    DestinationExists(PathBuf),
+    #[error("backup manifest is missing `{0}`")]
+    MissingBackupFile(&'static str),
     #[error(
         "memory tier `{tier}` for cell `{cell_id}` holds {used} of {cap} characters; \
          this write needs {wanted} more. Consolidate or retract first."
@@ -76,9 +110,28 @@ pub enum StoreError {
     UiStateKeyTooLong { size: usize, cap: usize },
     #[error("record holds an unreadable {field}: {value}")]
     Corrupt { field: &'static str, value: String },
+    #[error("transcript source changed before its projection was committed")]
+    StaleTranscriptProjection,
 }
 
 pub type Result<T> = std::result::Result<T, StoreError>;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BackupManifest {
+    pub format_version: u32,
+    pub schema_version: i64,
+    pub attachments: Vec<BackupAttachment>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BackupAttachment {
+    pub digest: String,
+    pub run_id: String,
+    pub source: String,
+    pub path: Option<String>,
+    pub size: Option<u64>,
+    pub sha256: Option<String>,
+}
 
 /// Which slice of the log a reader wants. `16 local api surface` chose one stream endpoint scoped
 /// **server-side**, rather than a firehose every client reimplements filtering
@@ -126,14 +179,268 @@ impl Store {
         Self::from_connection(Connection::open_in_memory()?)
     }
 
-    fn from_connection(conn: Connection) -> Result<Self> {
+    fn from_connection(mut conn: Connection) -> Result<Self> {
+        let found: i64 = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
+        if found > STORE_FORMAT_VERSION {
+            return Err(StoreError::UnsupportedSchemaVersion {
+                found,
+                supported: STORE_FORMAT_VERSION,
+            });
+        }
         conn.execute_batch(schema::PRAGMAS)?;
-        conn.execute_batch(schema::SCHEMA)?;
-        Self::migrate_transcript_attachments(&conn)?;
+        Self::migrate_schema(&mut conn, found)?;
         Ok(Self {
             conn,
             caps: MemoryCaps::default(),
         })
+    }
+
+    /// Apply ordered, recoverable schema steps as one transaction.
+    ///
+    /// `schema::SCHEMA` stays idempotent because older binaries already
+    /// stamped databases with version one while later slices added tables;
+    /// the explicit dispatch keeps the next incompatible change reviewable
+    /// rather than hiding it in an ever-growing open path.
+    fn migrate_schema(conn: &mut Connection, found: i64) -> Result<()> {
+        conn.execute_batch("BEGIN IMMEDIATE;")?;
+        let result = (|| {
+            conn.execute_batch(schema::SCHEMA)?;
+            match found {
+                0 | 1 => Self::migrate_transcript_attachments(conn)?,
+                _ => unreachable!("future schema versions are rejected before migration"),
+            }
+            conn.execute_batch(&format!("PRAGMA user_version = {STORE_FORMAT_VERSION};"))?;
+            Ok(())
+        })();
+        match result {
+            Ok(()) => conn.execute_batch("COMMIT;").map_err(Into::into),
+            Err(error) => {
+                let _ = conn.execute_batch("ROLLBACK;");
+                Err(error)
+            }
+        }
+    }
+
+    /// Write a consistent SQLite snapshot and all copied transcript bytes to a new directory.
+    /// The manifest is published last, so a failed snapshot cannot look complete to a restore.
+    pub fn backup_to(&self, destination: &Path, attachment_root: &Path) -> Result<BackupManifest> {
+        if destination.exists() {
+            return Err(StoreError::DestinationExists(destination.to_path_buf()));
+        }
+        let parent = destination.parent().unwrap_or_else(|| Path::new("."));
+        fs::create_dir_all(parent)?;
+        let staging = unique_path(parent, ".farseer-backup");
+        fs::create_dir(&staging)?;
+        let result: Result<BackupManifest> = (|| {
+            // Read attachment rows from the copied database, not the live connection. This
+            // keeps the manifest aligned with the exact SQLite snapshot produced by backup.
+            let database = staging.join(BACKUP_DATABASE);
+            backup_database(&self.conn, &database)?;
+            let snapshot_store = Store::open(&database)?;
+            let attachments = snapshot_store.transcript_attachments(None)?;
+            let snapshot: Result<BackupManifest> = (|| {
+                let mut manifest = BackupManifest {
+                    format_version: BACKUP_FORMAT_VERSION,
+                    schema_version: STORE_FORMAT_VERSION,
+                    attachments: Vec::with_capacity(attachments.len()),
+                };
+                let attachment_dir = staging.join("attachments");
+                fs::create_dir(&attachment_dir)?;
+                for attachment in attachments {
+                    let Some(stored_path) = attachment.stored_path else {
+                        manifest.attachments.push(BackupAttachment {
+                            digest: attachment.digest,
+                            run_id: attachment.run_id.to_string(),
+                            source: attachment.source,
+                            path: None,
+                            size: None,
+                            sha256: None,
+                        });
+                        continue;
+                    };
+                    let source = PathBuf::from(&stored_path);
+                    let source = if source.is_absolute() {
+                        source
+                    } else {
+                        attachment_root.join(source)
+                    };
+                    let target_name = safe_attachment_name(&attachment.digest)?;
+                    let target = attachment_dir.join(target_name);
+                    let (size, digest) = copy_digest(&source, &target)?;
+                    manifest.attachments.push(BackupAttachment {
+                        digest: attachment.digest,
+                        run_id: attachment.run_id.to_string(),
+                        source: attachment.source,
+                        path: Some(format!(
+                            "attachments/{}",
+                            target.file_name().unwrap().to_string_lossy()
+                        )),
+                        size: Some(size),
+                        sha256: Some(digest),
+                    });
+                }
+                let bytes = serde_json::to_vec_pretty(&manifest)?;
+                let mut file = fs::File::create(staging.join(BACKUP_MANIFEST))?;
+                file.write_all(&bytes)?;
+                file.sync_all()?;
+                Ok(manifest)
+            })();
+            drop(snapshot_store);
+            let manifest = snapshot?;
+            // Windows may keep SQLite directory handles alive briefly after backup.  Publish
+            // the files with the manifest last; an incomplete directory is never restorable.
+            fs::create_dir(destination)?;
+            fs::rename(&database, destination.join(BACKUP_DATABASE))?;
+            fs::rename(staging.join("attachments"), destination.join("attachments"))?;
+            fs::rename(
+                staging.join(BACKUP_MANIFEST),
+                destination.join(BACKUP_MANIFEST),
+            )?;
+            fs::remove_dir(&staging)?;
+            Ok(manifest)
+        })();
+        if result.is_err() {
+            let _ = fs::remove_dir_all(&staging);
+            let _ = fs::remove_dir_all(destination);
+        }
+        result
+    }
+
+    /// Restore a backup into a new record and attachment directory, validating the recovered
+    /// record through the normal open path before returning.
+    pub fn restore_from(
+        backup: &Path,
+        record: &Path,
+        attachment_root: &Path,
+    ) -> Result<BackupManifest> {
+        if record.exists() {
+            return Err(StoreError::DestinationExists(record.to_path_buf()));
+        }
+        let manifest_path = backup.join(BACKUP_MANIFEST);
+        let database = backup.join(BACKUP_DATABASE);
+        if !manifest_path.is_file() {
+            return Err(StoreError::MissingBackupFile(BACKUP_MANIFEST));
+        }
+        if !database.is_file() {
+            return Err(StoreError::MissingBackupFile(BACKUP_DATABASE));
+        }
+        let manifest: BackupManifest = serde_json::from_slice(&fs::read(manifest_path)?)?;
+        if manifest.format_version > BACKUP_FORMAT_VERSION {
+            return Err(StoreError::UnsupportedBackupVersion {
+                found: manifest.format_version,
+                supported: BACKUP_FORMAT_VERSION,
+            });
+        }
+        if manifest.schema_version > STORE_FORMAT_VERSION {
+            return Err(StoreError::UnsupportedSchemaVersion {
+                found: manifest.schema_version,
+                supported: STORE_FORMAT_VERSION,
+            });
+        }
+        let parent = record.parent().unwrap_or_else(|| Path::new("."));
+        fs::create_dir_all(parent)?;
+        let staged = unique_path(parent, ".farseer-restore");
+        let attachment_parent = attachment_root.parent().unwrap_or_else(|| Path::new("."));
+        fs::create_dir_all(attachment_parent)?;
+        let attachment_staging = unique_path(attachment_parent, ".farseer-restore-attachments");
+        let mut published_attachments = Vec::new();
+        let result = (|| {
+            let source = Connection::open(&database)?;
+            backup_database(&source, &staged)?;
+            let store = Store::open(&staged)?;
+            fs::create_dir(&attachment_staging)?;
+            let mut attachment_targets = Vec::new();
+            for attachment in &manifest.attachments {
+                let Some(path) = &attachment.path else {
+                    continue;
+                };
+                let relative = Path::new(path);
+                if relative.is_absolute()
+                    || relative.components().count() != 2
+                    || relative.components().next().is_none_or(|component| {
+                        component != std::path::Component::Normal("attachments".as_ref())
+                    })
+                {
+                    return Err(StoreError::InvalidBackupAttachment {
+                        digest: attachment.digest.clone(),
+                    });
+                }
+                let source = backup.join(relative);
+                let target = attachment_root.join(safe_attachment_name(&attachment.digest)?);
+                let staged_target =
+                    attachment_staging.join(safe_attachment_name(&attachment.digest)?);
+                let (size, digest) = copy_digest(&source, &staged_target)?;
+                if Some(size) != attachment.size
+                    || Some(digest.as_str()) != attachment.sha256.as_deref()
+                {
+                    return Err(StoreError::InvalidBackupAttachment {
+                        digest: attachment.digest.clone(),
+                    });
+                }
+                store.set_attachment_path(&attachment.digest, &attachment.run_id, &target)?;
+                attachment_targets.push((staged_target, target, size, digest));
+            }
+            drop(store);
+            let restored = Store::open(&staged)?;
+            if restored.transcript_attachments(None)?.len() != manifest.attachments.len() {
+                return Err(StoreError::InvalidBackupAttachment {
+                    digest: "manifest association count".into(),
+                });
+            }
+            drop(restored);
+            fs::create_dir_all(attachment_root)?;
+            for (staged_target, target, size, digest) in attachment_targets {
+                if target.exists() {
+                    let existing = digest_file(&target)?;
+                    if existing != (size, digest) {
+                        return Err(StoreError::InvalidBackupAttachment {
+                            digest: target
+                                .file_name()
+                                .and_then(|name| name.to_str())
+                                .unwrap_or_default()
+                                .to_owned(),
+                        });
+                    }
+                    let _ = fs::remove_file(&staged_target);
+                } else {
+                    fs::rename(&staged_target, &target)?;
+                    published_attachments.push(target);
+                }
+            }
+            fs::remove_dir(&attachment_staging)?;
+            fs::rename(&staged, record)?;
+            Ok(manifest)
+        })();
+        if result.is_err() {
+            let _ = fs::remove_file(&staged);
+            let _ = fs::remove_dir_all(&attachment_staging);
+            for path in published_attachments.drain(..) {
+                let _ = fs::remove_file(path);
+            }
+        }
+        result
+    }
+
+    fn set_attachment_path(&self, digest: &str, run_id: &str, path: &Path) -> Result<()> {
+        let run_id = run_id
+            .parse::<RunId>()
+            .map_err(|_| StoreError::InvalidBackupAttachment {
+                digest: digest.into(),
+            })?;
+        let changed = self.conn.execute(
+            "UPDATE transcript_attachments SET stored_path = ?3 WHERE digest = ?1 AND run_id = ?2",
+            rusqlite::params![
+                digest,
+                &run_id.as_bytes()[..],
+                path.to_string_lossy().as_ref()
+            ],
+        )?;
+        if changed != 1 {
+            return Err(StoreError::InvalidBackupAttachment {
+                digest: digest.into(),
+            });
+        }
+        Ok(())
     }
 
     /// Upgrade the first unreleased `40 work model and session explorer` schema,
@@ -152,8 +459,7 @@ impl Store {
             return Ok(());
         }
         conn.execute_batch(
-            "BEGIN IMMEDIATE;
-         DROP INDEX IF EXISTS transcript_attachments_run;
+            "DROP INDEX IF EXISTS transcript_attachments_run;
          ALTER TABLE transcript_attachments RENAME TO transcript_attachments_legacy;
          CREATE TABLE transcript_attachments (
              digest       TEXT NOT NULL,
@@ -169,8 +475,7 @@ impl Store {
          SELECT digest, run_id, custody, source, stored_path, created_ts
          FROM transcript_attachments_legacy;
          DROP TABLE transcript_attachments_legacy;
-         CREATE INDEX transcript_attachments_run ON transcript_attachments(run_id);
-         COMMIT;",
+         CREATE INDEX transcript_attachments_run ON transcript_attachments(run_id);",
         )?;
         Ok(())
     }
@@ -424,6 +729,83 @@ impl Store {
     pub(crate) fn conn(&self) -> &Connection {
         &self.conn
     }
+}
+
+fn unique_path(parent: &Path, prefix: &str) -> PathBuf {
+    let stamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or_default();
+    parent.join(format!("{prefix}-{}-{stamp}", std::process::id()))
+}
+
+fn backup_database(source: &Connection, destination: &Path) -> Result<()> {
+    let mut destination = Connection::open(destination)?;
+    rusqlite::backup::Backup::new(source, &mut destination)?.run_to_completion(
+        100,
+        Duration::from_millis(10),
+        None,
+    )?;
+    Ok(())
+}
+
+fn safe_attachment_name(digest: &str) -> Result<&str> {
+    let path = Path::new(digest);
+    if digest.is_empty()
+        || path.file_name().and_then(|name| name.to_str()) != Some(digest)
+        || path.components().count() != 1
+    {
+        return Err(StoreError::InvalidBackupAttachment {
+            digest: digest.to_owned(),
+        });
+    }
+    Ok(digest)
+}
+
+fn copy_digest(source: &Path, target: &Path) -> Result<(u64, String)> {
+    let mut input = fs::File::open(source)?;
+    if let Some(parent) = target.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let mut output = fs::File::create(target)?;
+    let mut hasher = Sha256::new();
+    let mut bytes = [0_u8; 64 * 1024];
+    let mut size = 0_u64;
+    loop {
+        let read = input.read(&mut bytes)?;
+        if read == 0 {
+            break;
+        }
+        output.write_all(&bytes[..read])?;
+        hasher.update(&bytes[..read]);
+        size += read as u64;
+    }
+    output.sync_all()?;
+    let mut digest = String::with_capacity(64);
+    for byte in hasher.finalize() {
+        write!(&mut digest, "{byte:02x}").expect("writing to String cannot fail");
+    }
+    Ok((size, digest))
+}
+
+fn digest_file(path: &Path) -> Result<(u64, String)> {
+    let mut input = fs::File::open(path)?;
+    let mut hasher = Sha256::new();
+    let mut bytes = [0_u8; 64 * 1024];
+    let mut size = 0_u64;
+    loop {
+        let read = input.read(&mut bytes)?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&bytes[..read]);
+        size += read as u64;
+    }
+    let mut digest = String::with_capacity(64);
+    for byte in hasher.finalize() {
+        write!(&mut digest, "{byte:02x}").expect("writing to String cannot fail");
+    }
+    Ok((size, digest))
 }
 
 fn uuid_bytes(raw: &[u8], field: &'static str) -> Result<[u8; 16]> {
@@ -896,5 +1278,238 @@ mod tests {
 
         assert_eq!(store.transcript_attachments(Some(first)).unwrap().len(), 1);
         assert_eq!(store.transcript_attachments(Some(second)).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn a_migrated_store_reopens_without_losing_work_lineage_or_associations() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("record.sqlite3");
+        let first_run = RunId::new();
+        let attachment = "same-content";
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE transcript_attachments (
+                     digest TEXT PRIMARY KEY,
+                     run_id BLOB NOT NULL,
+                     custody TEXT NOT NULL,
+                     source TEXT NOT NULL,
+                     stored_path TEXT,
+                     created_ts INTEGER NOT NULL
+                 );",
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO transcript_attachments
+                     (digest, run_id, custody, source, stored_path, created_ts)
+                 VALUES (?1, ?2, 'copy', 'legacy.jsonl', NULL, 1)",
+                rusqlite::params![attachment, &first_run.as_bytes()[..]],
+            )
+            .unwrap();
+        }
+
+        let task_id = TaskId::new();
+        let conversation_id = farseer_core::ConversationId::new();
+        let second_run = RunId::new();
+        {
+            let store = Store::open(&path).unwrap();
+            store
+                .create_conversation(&farseer_core::Conversation {
+                    conversation_id,
+                    title: "migrated".into(),
+                    project_path: None,
+                    manager_runner: Some("goose".into()),
+                    created_ts: 1,
+                    updated_ts: 1,
+                    archived_ts: None,
+                })
+                .unwrap();
+            store
+                .create_task(&farseer_core::Task {
+                    task_id,
+                    conversation_id,
+                    goal: "preserve lineage".into(),
+                    title: "preserve lineage".into(),
+                    project_path: None,
+                    state: farseer_core::TaskState::Inbox,
+                    priority: 0,
+                    created_ts: 1,
+                    updated_ts: 1,
+                })
+                .unwrap();
+            store
+                .upsert_run(&RunRow {
+                    run_id: second_run,
+                    task_id,
+                    cell_id: CellId::new("zero"),
+                    runner: "goose".into(),
+                    model: "model".into(),
+                    outcome: Some("ok".into()),
+                    usd_micros: 1,
+                    tokens: 2,
+                    operator_touched: false,
+                    started_ts: 1,
+                    finished_ts: Some(2),
+                })
+                .unwrap();
+            store
+                .record_transcript_attachment(&TranscriptAttachment {
+                    digest: attachment.into(),
+                    run_id: second_run,
+                    custody: farseer_core::TranscriptCustody::Copy,
+                    source: "second.jsonl".into(),
+                    stored_path: None,
+                    created_ts: 2,
+                })
+                .unwrap();
+            store
+                .append(&event("zero", second_run, "lineage", 2))
+                .unwrap();
+        }
+
+        let reopened = Store::open(&path).unwrap();
+        assert_eq!(
+            reopened.task(task_id).unwrap().unwrap().conversation_id,
+            conversation_id
+        );
+        assert_eq!(reopened.run(second_run).unwrap().unwrap().task_id, task_id);
+        assert_eq!(reopened.transcript_attachments(None).unwrap().len(), 2);
+        assert_eq!(reopened.latest_seq().unwrap(), 1);
+        let version: i64 = reopened
+            .conn
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, STORE_FORMAT_VERSION);
+    }
+
+    #[test]
+    fn a_failed_migration_rolls_back_to_the_original_fixture() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("record.sqlite3");
+        let run = RunId::new();
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE transcript_attachments (
+                     digest TEXT NOT NULL,
+                     run_id BLOB NOT NULL,
+                     custody TEXT NOT NULL,
+                     source TEXT NOT NULL,
+                     stored_path TEXT,
+                     created_ts INTEGER NOT NULL
+                 );",
+            )
+            .unwrap();
+            for source in ["one.jsonl", "two.jsonl"] {
+                conn.execute(
+                    "INSERT INTO transcript_attachments
+                         (digest, run_id, custody, source, stored_path, created_ts)
+                     VALUES ('duplicate', ?1, 'copy', ?2, NULL, 1)",
+                    rusqlite::params![&run.as_bytes()[..], source],
+                )
+                .unwrap();
+            }
+        }
+
+        assert!(matches!(Store::open(&path), Err(StoreError::Sqlite(_))));
+        let conn = Connection::open(&path).unwrap();
+        let rows: i64 = conn
+            .query_row("SELECT COUNT(*) FROM transcript_attachments", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(rows, 2);
+        let legacy: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE name = 'transcript_attachments_legacy'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(legacy, 0);
+        let events: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE name = 'events'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            events, 0,
+            "failed migration must not publish new schema tables"
+        );
+    }
+
+    #[test]
+    fn a_newer_schema_is_refused_before_opening_the_record() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("future.sqlite3");
+        let conn = Connection::open(&path).unwrap();
+        conn.execute_batch("PRAGMA user_version = 99;").unwrap();
+        drop(conn);
+
+        assert!(matches!(
+            Store::open(&path),
+            Err(StoreError::UnsupportedSchemaVersion {
+                found: 99,
+                supported: STORE_FORMAT_VERSION
+            })
+        ));
+    }
+
+    #[test]
+    fn a_backup_restores_record_and_copied_attachment() {
+        let source = tempfile::tempdir().unwrap();
+        let record = source.path().join("record.sqlite3");
+        let transcripts = source.path().join("transcripts");
+        fs::create_dir(&transcripts).unwrap();
+        let bytes_path = transcripts.join("attachment");
+        fs::write(&bytes_path, b"recover me").unwrap();
+        let (size, digest) = copy_digest(&bytes_path, &source.path().join("unused")).unwrap();
+        fs::remove_file(source.path().join("unused")).unwrap();
+        let run_id = RunId::new();
+        {
+            let store = Store::open(&record).unwrap();
+            store.append(&event("zero", run_id, "observed", 1)).unwrap();
+            store
+                .record_transcript_attachment(&TranscriptAttachment {
+                    digest: digest.clone(),
+                    run_id,
+                    custody: farseer_core::TranscriptCustody::Copy,
+                    source: "input.jsonl".into(),
+                    stored_path: Some(bytes_path.to_string_lossy().into_owned()),
+                    created_ts: 1,
+                })
+                .unwrap();
+        }
+        assert_eq!(size, 10);
+
+        let backup = source.path().join("backup");
+        Store::open(&record)
+            .unwrap()
+            .backup_to(&backup, &transcripts)
+            .unwrap();
+        let mismatched_record = source.path().join("mismatched.sqlite3");
+        let mismatched_transcripts = source.path().join("mismatched-transcripts");
+        fs::create_dir(&mismatched_transcripts).unwrap();
+        fs::write(mismatched_transcripts.join(&digest), b"do not overwrite").unwrap();
+        assert!(matches!(
+            Store::restore_from(&backup, &mismatched_record, &mismatched_transcripts),
+            Err(StoreError::InvalidBackupAttachment { .. })
+        ));
+        assert_eq!(
+            fs::read(mismatched_transcripts.join(&digest)).unwrap(),
+            b"do not overwrite"
+        );
+        assert!(!mismatched_record.exists());
+        let restored = source.path().join("restored.sqlite3");
+        let restored_transcripts = source.path().join("restored-transcripts");
+        Store::restore_from(&backup, &restored, &restored_transcripts).unwrap();
+        let store = Store::open(&restored).unwrap();
+        assert_eq!(store.latest_seq().unwrap(), 1);
+        let attachments = store.transcript_attachments(None).unwrap();
+        assert_eq!(attachments.len(), 1);
+        let path = attachments[0].stored_path.as_ref().unwrap();
+        assert_eq!(fs::read(path).unwrap(), b"recover me");
     }
 }

@@ -1,9 +1,11 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useState, type ReactNode } from "react";
 import type { Bridge } from "../bridge";
 import { follow, type RecordEvent } from "../stream";
+import { exportPresentation, mask, RevealField, usePrivacy } from "../privacy";
 import { onSelection, selectRun, selectedRun } from "../selection";
 import { confirmVerb } from "../confirm";
 import { meaningOf } from "../meaning";
+import { ReadFailure } from "../ReadFailure";
 
 /**
  * One run, whole: what it was told to do, everything it did, and how it ended.
@@ -33,10 +35,26 @@ type Run = {
   operator_touched: boolean;
   started_ts: number;
   finished_ts: number | null;
+  duration_ms?: number;
+  cost_basis?: "reported" | "estimated" | "unknown";
+  usage_scope?: string;
   liveness: "live" | "stalled" | "likely_hung" | null;
   title: string | null;
   role: string | null;
   finished_reason: string | null;
+};
+
+type ResourceSample = {
+  source: string;
+  scope: string;
+  cpu_time_100ns: number | null;
+  memory_high_water_bytes: number | null;
+  cpu_unit: string;
+  memory_unit: string;
+  timestamp_ms: number;
+  collector_version: string;
+  status: "measured" | "unavailable" | string;
+  final_sample: boolean;
 };
 
 /**
@@ -127,7 +145,7 @@ const TONE: Record<string, string> = {
  */
 
 /** A labelled fact, absent-aware, because a blank and a zero are not the same. */
-function Fact({ label, value }: { label: string; value: string | undefined }) {
+function Fact({ label, value }: { label: string; value: ReactNode }) {
   return (
     <span className={value ? "" : "absent"}>
       <i title={meaningOf(label)}>{label}</i>
@@ -137,9 +155,11 @@ function Fact({ label, value }: { label: string; value: string | undefined }) {
 }
 
 export function RunWidget({ bridge }: { bridge: Bridge }) {
+  const privacy = usePrivacy();
   const [runId, setRunId] = useState<string | null>(selectedRun());
   const [run, setRun] = useState<Run | null>(null);
   const [events, setEvents] = useState<RecordEvent[]>([]);
+  const [resources, setResources] = useState<ResourceSample[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [note, setNote] = useState<string | null>(null);
@@ -152,12 +172,16 @@ export function RunWidget({ bridge }: { bridge: Bridge }) {
   const load = useCallback(
     async (id: string) => {
       try {
-        const [row, trajectory] = await Promise.all([
+        const [row, trajectory, samples] = await Promise.all([
           bridge.read<Run>(`/runs/${id}`),
           bridge.read<RecordEvent[]>(`/events?run=${id}`),
+          // Resource collection is optional. A read failure must leave the
+          // run detail usable, per `21 optional supervised resource monitor`.
+          bridge.read<ResourceSample[]>(`/runs/${id}/resources`).catch(() => []),
         ]);
         setRun(row);
         setEvents(trajectory);
+        setResources(samples);
         setError(null);
       } catch (e) {
         setError((e as Error).message);
@@ -170,6 +194,7 @@ export function RunWidget({ bridge }: { bridge: Bridge }) {
     if (!runId) {
       setRun(null);
       setEvents([]);
+      setResources([]);
       setNote(null);
       setDraft(null);
       return;
@@ -213,6 +238,21 @@ export function RunWidget({ bridge }: { bridge: Bridge }) {
     }
   };
 
+  const exportReport = async () => {
+    if (!run) return;
+    const report = exportPresentation({
+      run_id: { value: run.run_id, kind: "session" },
+      title: { value: run.title ?? "", kind: "diagnostic" },
+      goal: { value: typeof contract.goal === "string" ? contract.goal : "", kind: "diagnostic" },
+    }, privacy);
+    try {
+      await navigator.clipboard?.writeText(report);
+      setNote(privacy ? "masked report copied" : "report copied");
+    } catch (e) {
+      setNote((e as Error).message);
+    }
+  };
+
   if (!runId)
     return (
       <p className="empty">
@@ -220,20 +260,32 @@ export function RunWidget({ bridge }: { bridge: Bridge }) {
         contract, everything it did, and the verbs that need both on screen.
       </p>
     );
-  if (error) return <p className="empty bad">{error}</p>;
+  if (error && !run) return <ReadFailure capability="run detail" error={error} onRetry={() => runId ? void load(runId) : undefined} />;
   if (!run) return <p className="empty">reading the run...</p>;
 
   const queued = events.find((event) => event.kind === "run_queued");
   const contract = (queued?.payload ?? {}) as Contract;
   const took = durations(events);
   const running = run.lifecycle === "running";
+  const latestResource = resources.at(-1);
+  const resourceStale = latestResource && Date.now() - latestResource.timestamp_ms > 15_000;
+  const resourceState = !latestResource
+    ? "unavailable"
+    : latestResource.status !== "measured"
+      ? "unavailable"
+      : resourceStale
+        ? "stale"
+        : "measured";
+  const memory = latestResource?.memory_high_water_bytes;
 
   return (
     <>
+      {error && <ReadFailure capability="run detail" error={error} stale onRetry={() => runId ? void load(runId) : undefined} />}
       <div className="row" style={{ marginBottom: 8 }}>
-        <b>{run.title ?? run.run_id.slice(0, 8)}</b>
+        <b>{run.title ? <RevealField value={run.title} kind="diagnostic" fieldKey={`run-title:${run.run_id}`} label="run title" /> : mask(run.run_id.slice(0, 8), "session", privacy)}</b>
         <span className="grow" />
-        <span className="faint mono small">{run.run_id.slice(0, 8)}</span>
+        <span className="faint mono small">{mask(run.run_id.slice(0, 8), "session", privacy)}</span>
+        <button className="chip" onClick={() => void exportReport()} title="copy a JSON report using the current privacy presentation">export report</button>
         <button className="chip" onClick={() => selectRun(null)} title="close this run">
           close
         </button>
@@ -247,7 +299,22 @@ export function RunWidget({ bridge }: { bridge: Bridge }) {
         <Fact label="state" value={running ? (run.liveness ?? "running") : (run.outcome ?? "")} />
         <Fact label="took" value={elapsed(run, now)} />
         <Fact label="cost" value={run.usd_micros > 0 ? usd(run.usd_micros) : undefined} />
+        <Fact label="cost basis" value={run.cost_basis} />
+        <Fact label="usage scope" value={run.usage_scope} />
         <Fact label="tokens" value={run.tokens > 0 ? run.tokens.toLocaleString() : undefined} />
+      </div>
+
+      <div className="meta resource-facts" title="Optional supervised-job observations; this is not host-wide telemetry">
+        <Fact label="resources" value={resourceState} />
+        <Fact
+          label="cpu time"
+          value={latestResource?.cpu_time_100ns == null ? undefined : `${latestResource.cpu_time_100ns} × 100ns`}
+        />
+        <Fact
+          label="memory high water"
+          value={memory == null ? undefined : `${(memory / (1024 * 1024)).toFixed(1)} MiB`}
+        />
+        <Fact label="resource scope" value={latestResource?.scope} />
       </div>
 
       {/* Why it ended that way, when the record says. A screen of `failed`
@@ -265,7 +332,7 @@ export function RunWidget({ bridge }: { bridge: Bridge }) {
       </h4>
       {queued ? (
         <>
-          <p className="asked">{contract.goal ?? "no goal recorded"}</p>
+          <p className="asked">{mask(contract.goal ?? "no goal recorded", "diagnostic", privacy)}</p>
           <div className="meta">
             <Fact label="tool level" value={contract.tool_level} />
             <Fact label="ceiling" value={contract.autonomy_ceiling} />
@@ -276,7 +343,14 @@ export function RunWidget({ bridge }: { bridge: Bridge }) {
             {/* Paths, because that is what reached the argv - see `32`. */}
             <Fact
               label="skills"
-              value={contract.skills?.length ? contract.skills.join(", ") : undefined}
+              value={contract.skills?.length ? (
+                <RevealField
+                  value={contract.skills.join(", ")}
+                  kind="path"
+                  fieldKey={`run-skills:${run.run_id}`}
+                  label="sealed skill paths"
+                />
+              ) : undefined}
             />
             <Fact
               label="budget"
@@ -289,7 +363,10 @@ export function RunWidget({ bridge }: { bridge: Bridge }) {
                   : undefined
               }
             />
-            <Fact label="done when" value={contract.definition_of_done || undefined} />
+            <Fact
+              label="done when"
+              value={contract.definition_of_done ? mask(contract.definition_of_done, "diagnostic", privacy) : undefined}
+            />
           </div>
         </>
       ) : (
@@ -307,7 +384,7 @@ export function RunWidget({ bridge }: { bridge: Bridge }) {
           <li key={event.event_id}>
             <span className="mono faint">{time(event.ts)}</span>
             <span className={`kind ${TONE[event.kind] ?? ""}`}>{event.kind}</span>
-            <span className="summary">{summarise(event)}</span>
+            <span className="summary">{mask(summarise(event), "diagnostic", privacy)}</span>
             {took.has(event.event_id) && (
               <span className="mono faint">{(took.get(event.event_id)! / 1000).toFixed(1)}s</span>
             )}
@@ -321,7 +398,7 @@ export function RunWidget({ bridge }: { bridge: Bridge }) {
             className="chip danger"
             disabled={busy !== null}
             onClick={() => {
-              if (confirmVerb("cancel", run.title ?? run.run_id.slice(0, 8))) void act("cancel");
+              if (confirmVerb("cancel", run.title ? mask(run.title, "diagnostic", privacy) : mask(run.run_id.slice(0, 8), "session", privacy))) void act("cancel");
             }}
           >
             {busy === "cancel" ? "..." : "cancel"}

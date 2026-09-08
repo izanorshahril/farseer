@@ -31,10 +31,13 @@ fn run() -> anyhow::Result<()> {
         anyhow::anyhow!("no canvas build found - run `bun run --cwd ui build` first")
     })?;
 
+    let record = default_record_path();
+    let expected_data_dir =
+        farseer_api::security::data_dir_fingerprint(record.parent().unwrap_or(&record));
     // Attach before spawning. `09 store decision` gives the record one writer
     // by construction, and a second daemon on the same record would break that
     // quietly rather than loudly.
-    let attached = match runtime::attach_existing() {
+    let attached = match runtime::attach_existing(&expected_data_dir)? {
         Some(existing) => {
             println!("farseer-shell: attached to farseer on {}", existing.port);
             AttachedRuntime {
@@ -45,9 +48,15 @@ fn run() -> anyhow::Result<()> {
         }
         None => {
             let binary = runtime::sidecar_path().ok_or_else(|| {
-                anyhow::anyhow!("no farseer binary beside this executable, and none running")
+                if cfg!(debug_assertions) {
+                    anyhow::anyhow!(
+                        "no farseer binary beside this executable, and none running; run `cargo build -p farseer --bin farseer` first"
+                    )
+                } else {
+                    anyhow::anyhow!("no farseer binary beside this executable, and none running")
+                }
             })?;
-            let owned = runtime::spawn(&binary, &cells_dir(), &repo_root())?;
+            let owned = runtime::spawn(&binary, &cells_dir(), &repo_root(), &record)?;
             println!("farseer-shell: started farseer on {}", owned.runtime.port);
             AttachedRuntime {
                 port: owned.runtime.port,
@@ -100,8 +109,9 @@ fn run() -> anyhow::Result<()> {
         })
         .run(tauri::generate_context!())?;
 
-    // Held until the window closes: dropping it reaps a daemon this shell
-    // started, and leaves alone one it merely attached to.
+    // `02 independent runtime lifecycle`: hold it until the window closes so
+    // the shell keeps its process handle while running; dropping it leaves the
+    // independently owned daemon running.
     drop(attached.owned);
     drop(tokio);
     Ok(())
@@ -176,6 +186,13 @@ struct AttachedRuntime {
 
 fn repo_root() -> PathBuf {
     std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
+}
+
+fn default_record_path() -> PathBuf {
+    farseer_api::runtime_file_path()
+        .parent()
+        .unwrap_or_else(|| std::path::Path::new("."))
+        .join("record.sqlite3")
 }
 
 fn repo_relative(name: &str) -> PathBuf {

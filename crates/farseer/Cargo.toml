@@ -13,6 +13,7 @@ path = "src/main.rs"
 [dependencies]
 farseer-api.workspace = true
 farseer-core.workspace = true
+farseer-runner.workspace = true
 farseer-store.workspace = true
 
 anyhow.workspace = true
@@ -20,3 +21,7 @@ clap.workspace = true
 reqwest = { workspace = true }
 serde_json.workspace = true
 tokio.workspace = true
+
+[dev-dependencies]
+rusqlite.workspace = true
+tempfile = "3.23.0"

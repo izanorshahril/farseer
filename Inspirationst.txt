@@ -8,6 +8,7 @@ https://github.com/cline/cline (terminal kanban? I never try, sounds good idea)
 https://github.com/block/buzz (agents communication platform idea)
 https://github.com/traycerai/traycer (unified context & agent-to-agent, I never try, the agent auto spawn can be not always hit)
 https://github.com/kunchenguid/firstmate (talk to one agent only, it will delegate all tasks to crewmates automatically, though many issues to run this on windows)
+https://github.com/kunchenguid/no-mistakes (agent review all)
 https://github.com/kunchenguid/gnhf (similar like other kunchen projects, but more toward dnd idea)
 https://github.com/kunchenguid/axi (agent principle toward context saving and accuracy, ditch MCP idea)
 https://github.com/kunchenguid/treehouse (auto worktree creation without the need to think of the naming)
@@ -20,3 +21,4 @@ https://github.com/HKUDS/RAG-Anything (hybrid RAG, can be useful compared to gra
 https://claude.com/blog/introducing-dynamic-workflows-in-claude-code (dynamic workflow idea)
 https://github.com/multica-ai/multica (agent orchestration in kanban way)
 https://github.com/stablyai/orca (the most complete orchestration platform & the closest like i want, with computer use, design & emulator, mature community driven compared to tracer or t3code, though you still need to mental manage multiple projects)
+https://github.com/block/berd 

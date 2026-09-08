@@ -6,8 +6,12 @@
 //! through DNS rebinding. **A token alone does not save you**, because the
 //! browser attaches it for the attacker.
 
+use std::fs::{File, OpenOptions};
 use std::io;
 use std::path::{Path, PathBuf};
+
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 /// The bearer token, generated at runtime start.
 ///
@@ -152,6 +156,116 @@ pub(crate) fn write_user_only_file(path: &Path, contents: &[u8]) -> io::Result<(
 pub fn write_runtime_file(path: &Path, port: u16, token: &RuntimeToken) -> io::Result<()> {
     let body = serde_json::json!({ "port": port, "token": token.as_str() });
     write_user_only_file(path, &serde_json::to_vec(&body)?)
+}
+
+/// The authenticated startup identity written beside the loopback endpoint.
+/// The token remains the only secret; these fields let a client reject a
+/// reachable but unrelated or incompatible process.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RuntimeIdentity {
+    pub runtime_id: String,
+    pub data_dir_fingerprint: String,
+    pub api_version: String,
+    pub build_provenance: String,
+    pub features: Vec<String>,
+    /// The process that owns the data-directory lease and published this
+    /// record.  `01 verified startup` uses it to distinguish this launch from
+    /// an unrelated process.  Optional for records written by older runtimes.
+    #[serde(default)]
+    pub process_id: Option<u32>,
+    /// Windows process creation time, paired with `process_id` so a recycled
+    /// PID can never authenticate as the same runtime.  Optional for records
+    /// written by older runtimes and non-Windows builds.
+    #[serde(default)]
+    pub process_creation_time: Option<u64>,
+}
+
+/// Return the OS creation timestamp for a process identity.
+///
+/// `01 verified startup` requires `(pid, creation_time)` rather than a PID
+/// alone because Windows recycles process IDs.  Failure is represented as
+/// `None`; callers must then avoid making a PID-only decision.
+#[cfg(windows)]
+pub fn process_creation_time(pid: u32) -> Option<u64> {
+    use windows::Win32::Foundation::FILETIME;
+    use windows::Win32::System::Threading::{
+        GetProcessTimes, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+    };
+
+    let process = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid).ok()? };
+    let mut creation = FILETIME::default();
+    let mut exit = FILETIME::default();
+    let mut kernel = FILETIME::default();
+    let mut user = FILETIME::default();
+    unsafe {
+        GetProcessTimes(process, &mut creation, &mut exit, &mut kernel, &mut user).ok()?;
+    }
+    Some((u64::from(creation.dwHighDateTime) << 32) | u64::from(creation.dwLowDateTime))
+}
+
+#[cfg(not(windows))]
+pub fn process_creation_time(_pid: u32) -> Option<u64> {
+    None
+}
+
+pub fn write_runtime_file_with_identity(
+    path: &Path,
+    port: u16,
+    token: &RuntimeToken,
+    identity: &RuntimeIdentity,
+) -> io::Result<()> {
+    let mut body = serde_json::to_value(identity)?;
+    body["port"] = serde_json::json!(port);
+    body["token"] = serde_json::json!(token.as_str());
+    write_user_only_file(path, &serde_json::to_vec(&body)?)
+}
+
+/// Stable, non-reversible identity for the runtime's data directory.
+pub fn data_dir_fingerprint(path: &Path) -> String {
+    let normalized = path
+        .canonicalize()
+        .unwrap_or_else(|_| path.to_path_buf())
+        .to_string_lossy()
+        .to_ascii_lowercase();
+    let mut digest = Sha256::new();
+    digest.update(normalized.as_bytes());
+    format!("sha256:{:x}", digest.finalize())
+}
+
+/// An OS-held exclusive owner for one canonical data directory.
+///
+/// `01 verified startup` chose a handle lease rather than a stale PID file:
+/// the operating system releases ownership when the process exits.
+///
+/// The file intentionally remains after a normal exit: the operating system
+/// releases ownership with the handle, so a crash cannot leave a stale lock
+/// that blocks the next daemon.
+pub struct DataDirectoryLease {
+    _file: File,
+}
+
+/// Acquire the per-data-directory lease before opening the record.
+pub fn acquire_data_directory_lease(data_dir: &Path) -> io::Result<DataDirectoryLease> {
+    let data_dir = data_dir.canonicalize()?;
+    let path = data_dir.join("farseer.data-dir.lock");
+    let mut options = OpenOptions::new();
+    options.read(true).write(true).create(true);
+    #[cfg(windows)]
+    std::os::windows::fs::OpenOptionsExt::share_mode(&mut options, 0);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+    let file = options.open(path)?;
+    #[cfg(unix)]
+    if unsafe {
+        libc::flock(
+            std::os::fd::AsRawFd::as_raw_fd(&file),
+            libc::LOCK_EX | libc::LOCK_NB,
+        )
+    } != 0
+    {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(DataDirectoryLease { _file: file })
 }
 
 /// Replace the file's DACL with one entry: full control for the current user.
@@ -332,6 +446,24 @@ mod tests {
             serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
         assert_eq!(read["port"], 9000);
         assert_eq!(read["token"], token.as_str());
+    }
+
+    #[test]
+    fn a_data_directory_fingerprint_is_stable_without_exposing_the_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let fingerprint = data_dir_fingerprint(dir.path());
+        assert_eq!(fingerprint, data_dir_fingerprint(dir.path()));
+        assert!(fingerprint.starts_with("sha256:"));
+        assert!(!fingerprint.contains(&dir.path().to_string_lossy().to_string()));
+    }
+
+    #[test]
+    fn a_data_directory_lease_is_exclusive_until_the_owner_drops_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let lease = acquire_data_directory_lease(dir.path()).unwrap();
+        assert!(acquire_data_directory_lease(dir.path()).is_err());
+        drop(lease);
+        assert!(acquire_data_directory_lease(dir.path()).is_ok());
     }
 
     /// The DACL is the point of the exercise, so read it back rather than

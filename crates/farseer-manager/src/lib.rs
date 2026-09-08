@@ -4,7 +4,7 @@
 //! `farseer-api` exposes `delegate_to_worker` through MCP, then calls this same synchronous engine for the selected roster worker.
 //! The four verbs from [Run state model and control semantics] also call this engine.
 //!
-//! [Run state model and control semantics]: ../../../.scratch/farseer/issues/05-run-state-model.md
+//! [Run state model and control semantics]: ../../../CORE.md#invariants
 //!
 //! **The watchdog only reports.**
 //! [Hang detection prior art] and [Run state model and control semantics] make `120s` stalled, `600s` likely-hung, and no auto-kill.
@@ -17,7 +17,7 @@
 //! Cancellation before any terminal result carries unknown report values and records zero usage.
 //! This keeps the record honest about a human choosing not to proceed rather than something breaking.
 //!
-//! [Hang detection prior art]: ../../../.scratch/farseer/issues/18-hang-detection-prior-art.md
+//! [Hang detection prior art]: ../../../CORE.md#terminal-and-observations
 //!
 //! Windows only, like the runner it drives - `farseer-runner`'s `spawn` and
 //! `drive` modules are themselves `cfg(windows)`, so this crate would fail to
@@ -39,7 +39,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use farseer_core::run::{ActivityClock, Liveness, LivenessThresholds, WorkerContract};
 use farseer_core::{Actor, CellDefinition, EventKind, NewEvent, Outcome, Seq};
@@ -48,6 +48,13 @@ use farseer_runner::drive::drive;
 use farseer_runner::resolve::resolve;
 use farseer_runner::spawn::{CancelToken, SpawnError, StdinHandle, StdinMode, SupervisedProcess};
 use farseer_store::{RunRow, Store, StoreError};
+
+fn wall_clock_ms() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis().min(i64::MAX as u128) as i64)
+        .unwrap_or_default()
+}
 
 /// Where a run's events and row land. One method per write `run_worker`
 /// makes - never a whole `Store`, so the caller decides how (or whether) to
@@ -70,6 +77,15 @@ pub trait RunSink {
         observation: &farseer_core::WindowObservation,
         ts: i64,
     ) -> Result<bool, StoreError>;
+
+    /// Optional resource evidence. A disabled or failed observer must not
+    /// alter the run lifecycle, per `21 optional supervised resource monitor`.
+    fn observe_resource(
+        &self,
+        _observation: &farseer_runner::resource::ResourceObservation,
+    ) -> Result<(), StoreError> {
+        Ok(())
+    }
 }
 
 impl RunSink for Store {
@@ -258,6 +274,9 @@ pub struct RunOptions {
     /// discovering the operator's own installed skills, and a run bounded by
     /// `12 autonomy and deny list` should not silently inherit them.
     pub skills: Vec<PathBuf>,
+    /// Whether this run may collect optional Job Object resource samples.
+    /// A disabled observer must not change launch, cancellation, or finalization.
+    pub resource_monitor: bool,
 }
 
 impl Default for RunOptions {
@@ -277,6 +296,7 @@ impl Default for RunOptions {
             extensions: Vec::new(),
             skills: Vec::new(),
             project: None,
+            resource_monitor: true,
         }
     }
 }
@@ -433,6 +453,8 @@ pub struct StartedWorker {
     /// How this run's manager reaches farseer's MCP face, if its protocol takes
     /// that in the handshake. `31 manager delegation reach`.
     mcp: Option<McpReach>,
+    /// Whether optional Job Object observations are enabled for this run.
+    resource_monitor: bool,
 }
 
 /// A cloneable handle that writes a steer message into a run's live process,
@@ -531,6 +553,7 @@ impl StartedWorker {
             failed_mcp: Vec::new(),
             loaded_mcp: Vec::new(),
             mcp: None,
+            resource_monitor: true,
         })
     }
 
@@ -776,6 +799,16 @@ impl StartedWorker {
         let cancel_on_store_failure = self.proc.cancel_token();
         let activity = Arc::clone(&self.activity);
         let monotonic_start = self.monotonic_start;
+
+        // Ownership is the job handle, never a PID. The initial, periodic,
+        // and final snapshots are best-effort; the observer is optional and
+        // cannot block or fail lifecycle writes.
+        if self.resource_monitor {
+            let first_resource =
+                self.proc
+                    .resource_observation(contract.run_id.to_string(), now_ms(), false);
+            let _ = sink.observe_resource(&first_resource);
+        }
 
         // What the ACP handshake learned, replayed into the read loop as though
         // the agent had announced it mid-stream - which is how Claude Code and
@@ -1045,25 +1078,80 @@ impl StartedWorker {
             on_line(Ok(vec![RunnerSignal::Session(info)]));
         }
 
-        if ends_at_terminal {
-            // A conversational runner stays alive after the work is done, so
-            // end of stream never comes. `29 harness protocol`'s first live run
-            // waited for it anyway and hung.
-            while let Some(line) = self.proc.read_line()? {
-                let parsed = (self.parse)(&line);
-                let ended = parsed.as_ref().is_ok_and(|signals| {
-                    signals
-                        .iter()
-                        .any(|signal| matches!(signal, RunnerSignal::Finished(_)))
-                });
-                on_line(parsed);
-                if ended {
-                    break;
+        // Keep the final resource observation on every exit path, including a
+        // reader/protocol error. A scoped sampler keeps collection off the
+        // store writer's path and never delays the read loop when disabled or
+        // unavailable.
+        const RESOURCE_SAMPLE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(5);
+        let stop_sampling = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let sampled = Arc::new(Mutex::new(Vec::new()));
+        let (wake_sampler, sampler_wakeup) = std::sync::mpsc::channel();
+        let stream_result: Result<(), ManagerError> = std::thread::scope(|scope| {
+            let sampler = self.resource_monitor.then(|| {
+                let stop = Arc::clone(&stop_sampling);
+                let handle = self.proc.resource_handle();
+                let run_id = contract.run_id.to_string();
+                let sampled = Arc::clone(&sampled);
+                let sampler_wakeup = sampler_wakeup;
+                scope.spawn(move || {
+                    loop {
+                        match sampler_wakeup.recv_timeout(RESOURCE_SAMPLE_INTERVAL) {
+                            Ok(()) | Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+                            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+                        }
+                        if stop.load(Ordering::Acquire) {
+                            break;
+                        }
+                        let sample = handle.observation(run_id.clone(), wall_clock_ms(), false);
+                        let mut pending = sampled.lock().unwrap_or_else(|e| e.into_inner());
+                        if pending.len() < 32 {
+                            pending.push(sample);
+                        }
+                    }
+                })
+            });
+            let result: Result<(), ManagerError> = (|| {
+                if ends_at_terminal {
+                    // A conversational runner stays alive after the work is done, so
+                    // end of stream never comes. `29 harness protocol`'s first live run
+                    // waited for it anyway and hung.
+                    while let Some(line) = self.proc.read_line()? {
+                        let parsed = (self.parse)(&line);
+                        let ended = parsed.as_ref().is_ok_and(|signals| {
+                            signals
+                                .iter()
+                                .any(|signal| matches!(signal, RunnerSignal::Finished(_)))
+                        });
+                        on_line(parsed);
+                        if ended {
+                            break;
+                        }
+                    }
+                } else {
+                    drive(&mut self.proc, self.parse, on_line)?;
                 }
+                Ok(())
+            })();
+            stop_sampling.store(true, Ordering::Release);
+            let _ = wake_sampler.send(());
+            if let Some(sampler) = sampler {
+                let _ = sampler.join();
             }
-        } else {
-            drive(&mut self.proc, self.parse, on_line)?;
+            result
+        });
+
+        for sample in sampled.lock().unwrap_or_else(|e| e.into_inner()).drain(..) {
+            let _ = sink.observe_resource(&sample);
         }
+
+        if self.resource_monitor {
+            let final_resource =
+                self.proc
+                    .resource_observation(contract.run_id.to_string(), now_ms(), true);
+            let _ = sink.observe_resource(&final_resource);
+        }
+
+        stream_result?;
 
         if let Some(e) = store_err {
             return Err(e.into());
@@ -1291,9 +1379,9 @@ fn deny_discovered_tools(runner: &str) -> &'static [&'static str] {
     }
 }
 
-/// `contract.runner` selects a native stream-json dialect - Claude Code, Codex,
-/// cursor-agent or Goose - or an ACP runner, which `29 harness protocol` wired
-/// and `20 worker control channel` asked for. Anything else is
+/// `contract.runner` selects one of the verified native and conversational faces:
+/// Claude Code, Codex exec or app-server, cursor-agent, Goose, pi, omp, agy or
+/// an ACP runner, which `29 harness protocol` wired. Anything else is
 /// `UnsupportedRunner`.
 ///
 /// A Claude Code manager bootstraps the goal onto live stdin before exposing its steer handle.
@@ -1481,6 +1569,7 @@ pub fn start_worker(
     started.pinned_effort = options.effort.clone();
     started.identity = options.append_system_prompt.clone();
     started.mcp = options.mcp.clone();
+    started.resource_monitor = options.resource_monitor;
     started.bootstrap(&contract.goal, cwd)?;
     Ok(started)
 }

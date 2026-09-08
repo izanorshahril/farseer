@@ -70,6 +70,14 @@ impl EventKind {
     pub const RUN_STARTED: &'static str = "run_started";
     pub const RUN_FINISHED: &'static str = "run_finished";
 
+    /// The deterministic route and its observed pressure, sealed before a
+    /// process is spawned.
+    ///
+    /// `13 explainable routing` keeps this separate from `run_queued`: the
+    /// queue payload reconstructs the immutable contract, while this event
+    /// explains why this candidate was selected at that moment.
+    pub const ROUTING_SEALED: &'static str = "routing_sealed";
+
     // The three progress kinds. `05 run state model` made these a hard disqualifier for any
     // control channel that cannot emit them.
     pub const TOOL_CALL_STARTED: &'static str = "tool_call_started";
@@ -79,6 +87,13 @@ impl EventKind {
     // Provenance, per `07 attach semantics` and `05 run state model`.
     pub const OPERATOR_INTERVENED: &'static str = "operator_intervened";
     pub const MANAGER_STEERED: &'static str = "manager_steered";
+
+    /// The explicit UI context accepted with an operator instruction.
+    ///
+    /// The request still enters through the top manager, but the operator's
+    /// project, conversation, task, widget anchor, and selected runner are
+    /// durable provenance rather than prose hidden in the goal.
+    pub const OPERATOR_CONTEXT: &'static str = "operator_context";
 
     /// A manager finished a turn and said something.
     ///
@@ -178,6 +193,10 @@ impl EventKind {
     /// forward over this one does remove it, which is the honest behaviour: it
     /// is a record entry like any other, and purge is defined over the record.
     pub const CELL_PURGED: &'static str = "cell_purged";
+
+    /// The operator changed the runtime's admission or shutdown mode, per
+    /// `02 independent runtime lifecycle`.
+    pub const RUNTIME_LIFECYCLE: &'static str = "runtime_lifecycle";
 
     /// A permanent hole, per `17 cell lifecycle` section 5.
     ///

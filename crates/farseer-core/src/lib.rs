@@ -1,5 +1,4 @@
-//! Farseer's domain model, as locked by the decision tickets under
-//! `.scratch/farseer/issues/`.
+//! Farseer's pure domain model, governed by [CORE.md](../../../CORE.md).
 //!
 //! This crate is pure: no clock, no filesystem, no network. Anything needing
 //! those takes them as arguments so the rules stay testable.

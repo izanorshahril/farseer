@@ -3,6 +3,8 @@ import type { Bridge } from "../bridge";
 import { currentProject, onProject, setProject } from "../project";
 import { confirmGrantWithdrawal } from "../confirm";
 import { meaningOf } from "../meaning";
+import { mask, RevealField, usePrivacy } from "../privacy";
+import { ReadFailure } from "../ReadFailure";
 
 /**
  * The folders farseer may work in, and the projects inside them.
@@ -23,7 +25,16 @@ import { meaningOf } from "../meaning";
  * - Removing a root removes the **grant**, not the directory. The button says
  *   so, because "remove" beside a folder path reads like a delete.
  */
-type Project = { name: string; path: string; git: boolean };
+type TeamProfile = {
+  valid: boolean;
+  source: "file" | "default";
+  coordinating_cell: string;
+  specialist_cells: string[];
+  history?: { old?: string; new: string; actor: string; reason: string; ts: number }[];
+  cell?: { name: string; manager: { runners: string[] }; roster: { name: string; kind: string; runner?: string }[] };
+  error?: string;
+};
+type Project = { name: string; path: string; git: boolean; profile?: TeamProfile };
 type Root = { path: string; missing: boolean; projects: Project[] };
 
 /**
@@ -62,8 +73,10 @@ function isInside(root: string, project: string): boolean {
 type Arrangement = { order: string[]; collapsed: string[] };
 
 export function ProjectsWidget({ bridge }: { bridge: Bridge }) {
+  const privacy = usePrivacy();
   const [roots, setRoots] = useState<Root[] | null>(null);
   const [note, setNote] = useState<string | null>(null);
+  const [readError, setReadError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [rootPath, setRootPath] = useState("");
   /** Which root the new-project field is open under, or `null` for none. */
@@ -87,8 +100,11 @@ export function ProjectsWidget({ bridge }: { bridge: Bridge }) {
     () =>
       bridge
         .read<Root[]>("/projects")
-        .then(setRoots)
-        .catch((e: Error) => setNote(e.message)),
+        .then((next) => {
+          setRoots(next);
+          setReadError(null);
+        })
+        .catch((e: Error) => setReadError(e.message)),
     [bridge],
   );
 
@@ -166,7 +182,12 @@ export function ProjectsWidget({ bridge }: { bridge: Bridge }) {
    */
   const withdraw = (root: Root) => {
     const losing = selected && isInside(root.path, selected) ? selected : null;
-    if (!confirmGrantWithdrawal(root.path, losing)) return;
+    if (!confirmGrantWithdrawal(
+      root.path,
+      losing,
+      mask(root.path, "path", privacy),
+      losing ? mask(losing, "path", privacy) : null,
+    )) return;
     if (losing) setProject(null);
     // A withdrawn root leaves nothing behind in the arrangement either, so
     // re-authorizing it later starts where a new root starts rather than in a
@@ -191,7 +212,7 @@ export function ProjectsWidget({ bridge }: { bridge: Bridge }) {
     }
   };
 
-  if (!roots && note) return <p className="empty bad">{note}</p>;
+  if (!roots && readError) return <ReadFailure capability="project roots" error={readError} onRetry={() => void load()} />;
   if (!roots) return <p className="empty">reading folders...</p>;
 
   // A root the operator never arranged sorts after every one they did, and
@@ -206,6 +227,8 @@ export function ProjectsWidget({ bridge }: { bridge: Bridge }) {
 
   return (
     <div className="projects">
+      {readError && <ReadFailure capability="project roots" error={readError} stale onRetry={() => void load()} />}
+      {note && <p className="empty bad" role="alert">{note}</p>}
       {roots.length === 0 && (
         <p className="empty">
           Farseer has no folder to work in yet. Add one below - everything it builds stays inside
@@ -247,8 +270,8 @@ export function ProjectsWidget({ bridge }: { bridge: Bridge }) {
               >
                 {folded ? "▸" : "▾"}
               </button>
-              <b className="mono root-path" title={root.path}>
-                {root.path}
+              <b className="mono root-path" title={mask(root.path, "path", privacy)}>
+                <RevealField value={root.path} kind="path" fieldKey={`project-root:${root.path}`} label="project root path" />
               </b>
               {folded && root.projects.length > 0 && (
                 <span className="dim small">
@@ -268,7 +291,7 @@ export function ProjectsWidget({ bridge }: { bridge: Bridge }) {
               <button
                 className="chip move"
                 disabled={place === 0}
-                aria-label={`move ${root.path} up`}
+                aria-label={`move ${mask(root.path, "path", privacy)} up`}
                 title="move this folder up"
                 onClick={() => move(paths, root.path, -1)}
               >
@@ -277,7 +300,7 @@ export function ProjectsWidget({ bridge }: { bridge: Bridge }) {
               <button
                 className="chip move"
                 disabled={place === paths.length - 1}
-                aria-label={`move ${root.path} down`}
+                aria-label={`move ${mask(root.path, "path", privacy)} down`}
                 title="move this folder down"
                 onClick={() => move(paths, root.path, 1)}
               >
@@ -356,7 +379,7 @@ export function ProjectsWidget({ bridge }: { bridge: Bridge }) {
             {!folded && root.projects.length > FILTER_AT && (
               <div className="row project-filter">
                 <input
-                  aria-label={`filter projects in ${root.path}`}
+                  aria-label={`filter projects in ${mask(root.path, "path", privacy)}`}
                   placeholder={`filter ${root.projects.length} projects`}
                   value={filter}
                   onChange={(e) => setFilter(e.currentTarget.value)}
@@ -385,9 +408,19 @@ export function ProjectsWidget({ bridge }: { bridge: Bridge }) {
                       tabIndex={index === Math.min(stop, shown.length - 1) ? 0 : -1}
                       onFocus={() => setCursor((current) => ({ ...current, [root.path]: index }))}
                       onClick={() => setProject(on ? null : project.path)}
-                      title={project.path}
+                      title={mask(project.path, "path", privacy)}
                     >
-                      <span className="project-name">{project.name}</span>
+                      <span className="project-name">{mask(project.name, "diagnostic", privacy)}</span>
+                      {project.profile?.valid && project.profile.cell && (
+                        <span className="dim small" title={`manager ${project.profile.cell.manager.runners.join(", ")}`}>
+                          {project.profile.cell.name} · {project.profile.cell.roster.length} roster
+                        </span>
+                      )}
+                      {project.profile && !project.profile.valid && (
+                        <span className="dim small bad" title={project.profile.error ? mask(project.profile.error, "diagnostic", privacy) : "profile needs repair"}>
+                          profile needs repair
+                        </span>
+                      )}
                       {/* Reported, not filtered. A `worktree` cell needs a
                           repository, and a project farseer hid because it has
                           none is worse than one shown with the reason. */}
@@ -397,6 +430,30 @@ export function ProjectsWidget({ bridge }: { bridge: Bridge }) {
                         </span>
                       )}
                     </button>
+                    {on && project.profile?.valid && project.profile.cell && (
+                      <details className="project-team-detail">
+                        <summary className="dim small">team details</summary>
+                        <p className="dim small">
+                          manager: {project.profile.cell.manager.runners.join(", ") || "none"}
+                        </p>
+                        <ul className="plain-list">
+                          {project.profile.cell.roster.map((entry) => (
+                            <li key={`${entry.kind}:${entry.name}`} className="dim small">
+                              {entry.kind}: {entry.name}{entry.runner ? ` · ${entry.runner}` : ""}
+                            </li>
+                          ))}
+                        </ul>
+                        {project.profile.history && project.profile.history.length > 0 && (
+                          <ul className="plain-list">
+                            {project.profile.history.slice(-3).map((change) => (
+                              <li key={`${change.ts}:${change.new}`} className="dim small">
+                                profile {change.old ?? "none"} → {change.new} · {change.actor} · {change.reason}
+                              </li>
+                            ))}
+                          </ul>
+                        )}
+                      </details>
+                    )}
                   </li>
                 );
               })}
@@ -441,7 +498,7 @@ export function ProjectsWidget({ bridge }: { bridge: Bridge }) {
       <p className="dim small">
         {selected ? (
           <>
-            Work goes to <span className="mono">{selected}</span>.
+            Work goes to <span className="mono">{mask(selected, "path", privacy)}</span>.
           </>
         ) : roots.length > 0 ? (
           // Said here rather than only in the footer: an operator who has just

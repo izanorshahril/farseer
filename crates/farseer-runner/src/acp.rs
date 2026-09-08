@@ -1,8 +1,7 @@
 //! The ACP runner: one adapter for every harness that speaks the Agent Client Protocol.
 //!
-//! `20 worker control channel` chose an ACP runner as the default path and it was never built, so
-//! farseer grew four native adapters instead. `29 harness protocol` asked what
-//! everyone else does and found the answer is this: no host of these binaries
+//! `20 worker control channel` chose an ACP runner as the default path.
+//! `29 harness protocol` completed that path and found the answer is this: no host of these binaries
 //! parses per-harness dialects, because ACP is JSON-RPC 2.0 over stdio and one
 //! parser admits Gemini CLI, opencode, Amp, Droid, Copilot, Qwen, pi, OpenClaw
 //! and Aider at once.

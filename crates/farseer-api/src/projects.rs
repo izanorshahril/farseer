@@ -18,6 +18,7 @@ use axum::extract::State;
 use axum::http::StatusCode;
 use serde::{Deserialize, Serialize};
 
+use crate::project_profiles::ProfileProjection;
 use crate::{ApiError, ApiResult, AppState, now_ms};
 
 #[derive(Debug, Serialize)]
@@ -31,6 +32,7 @@ pub struct ProjectView {
     /// because a directory the operator made and farseer silently hid is worse
     /// than one shown with the reason it will not do.
     pub git: bool,
+    pub profile: ProfileProjection,
 }
 
 #[derive(Debug, Serialize)]
@@ -65,7 +67,9 @@ pub(crate) async fn list_projects(
     State(state): State<Arc<AppState>>,
 ) -> ApiResult<Json<Vec<RootView>>> {
     let roots = state.store().roots()?;
-    Ok(Json(roots.iter().map(|r| describe_root(r)).collect()))
+    Ok(Json(
+        roots.iter().map(|r| describe_root(&state, r)).collect(),
+    ))
 }
 
 /// Authorize a directory.
@@ -79,7 +83,7 @@ pub(crate) async fn add_root(
     let path = canonical_dir(&body.path)?;
     let text = display(&path);
     state.store().authorize_root(&text, now_ms())?;
-    Ok((StatusCode::CREATED, Json(describe_root(&text))))
+    Ok((StatusCode::CREATED, Json(describe_root(&state, &text))))
 }
 
 /// Withdraw a grant. **Nothing on disk is touched.**
@@ -123,7 +127,7 @@ pub(crate) async fn create_project(
             return Err(ApiError::Workspace("git init failed".into()));
         }
     }
-    Ok((StatusCode::CREATED, Json(describe_project(&dir))))
+    Ok((StatusCode::CREATED, Json(describe_project(&state, &dir))))
 }
 
 /// Resolve a project a caller named, or refuse.
@@ -195,7 +199,7 @@ fn single_segment(name: &str) -> ApiResult<&str> {
     }
 }
 
-fn describe_root(path: &str) -> RootView {
+fn describe_root(state: &AppState, path: &str) -> RootView {
     let dir = Path::new(path);
     let mut projects = Vec::new();
     let mut missing = true;
@@ -211,7 +215,7 @@ fn describe_root(path: &str) -> RootView {
                     .and_then(|n| n.to_str())
                     .is_some_and(|n| n.starts_with('.'))
                 {
-                    projects.push(describe_project(&child));
+                    projects.push(describe_project(state, &child));
                 }
             }
         }
@@ -224,7 +228,7 @@ fn describe_root(path: &str) -> RootView {
     }
 }
 
-fn describe_project(dir: &Path) -> ProjectView {
+fn describe_project(state: &AppState, dir: &Path) -> ProjectView {
     ProjectView {
         name: dir
             .file_name()
@@ -233,6 +237,7 @@ fn describe_project(dir: &Path) -> ProjectView {
             .to_string(),
         path: display(dir),
         git: dir.join(".git").exists(),
+        profile: crate::project_profiles::projection(state, dir),
     }
 }
 

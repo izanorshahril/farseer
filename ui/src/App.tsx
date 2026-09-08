@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { createBridge, type Anchor } from "./bridge";
+import { createBridge } from "./bridge";
 import {
   DEFAULT_WIDGET_SPAN,
   DEFAULT_WIDGET_UNIT,
@@ -17,10 +17,11 @@ import {
   resized,
   toggleMounted,
   type CanvasLayout,
+  type FocusOrigin,
   type Span,
   type WidgetUnit,
 } from "./layout";
-import { onSelection } from "./selection";
+import { onSelection, onSubjectSelection, selectSubject, selectedSubject, snapshotComposerContext, type ComposerAnchor, type SubjectSelection } from "./selection";
 import { restoreProject } from "./project";
 import { QuotaWidget } from "./widgets/quota";
 import { ClockWidget } from "./widgets/clock";
@@ -36,6 +37,8 @@ import { DelegationWidget } from "./widgets/delegation";
 import { RunWidget } from "./widgets/run";
 import { SandboxWidget } from "./SandboxWidget";
 import { GateBar } from "./GateBar";
+import { WidgetBoundary } from "./WidgetBoundary";
+import { mask, onPrivacy, togglePrivacy } from "./privacy";
 
 /**
  * The canvas.
@@ -50,6 +53,18 @@ import { GateBar } from "./GateBar";
  * up the layout for free.
  */
 const bridge = createBridge();
+
+// A development-only seam for the browser recovery smoke. The packaged build
+// never reads this query flag, so it cannot turn into an operator-facing fault
+// switch. `06 widget recovery` uses it to prove one boundary can fail while
+// the canvas and the runtime stay usable.
+const DEV_RENDER_PROBE = import.meta.env.DEV
+  ? new URLSearchParams(window.location.search).get("farseer_probe")
+  : null;
+
+function RenderFailureProbe({ id }: { id: string }): null {
+  throw new Error(`synthetic render failure for ${id}`);
+}
 
 /**
  * The widgets this build knows how to render.
@@ -99,6 +114,12 @@ type WidgetId = string;
  * import allowlist at compile, the sandboxed render, and keep-or-undo per turn.
  */
 type AgentWidget = { id: string; title: string; subtitle: string; cell?: string };
+type ProjectRoot = { projects: { name: string; path: string }[] };
+type ContextConversation = { conversation_id: string; title: string; project_path?: string; manager_runner?: string };
+type ContextTask = { task_id: string; title: string; conversation_id: string; project_path?: string };
+type ManagerCell = { manager: { runners: string[] } };
+type RuntimeSummary = { state: string; active_runs: number; resource_monitor_enabled: boolean };
+type QuotaSummary = { windows: { status: string; used_percent?: number }[] };
 
 
 const LAYOUT_VERSION = 8;
@@ -117,6 +138,7 @@ const DEFAULT_LAYOUT: CanvasLayout = {
     capacity: DEFAULT_WIDGET_SPAN,
   },
   unit: DEFAULT_WIDGET_UNIT,
+  theme: "system",
 };
 
 /**
@@ -327,13 +349,30 @@ export function App() {
   const layoutRef = useRef<CanvasLayout | null>(null);
   const saveQueue = useRef(Promise.resolve());
   const [agentWidgets, setAgentWidgets] = useState<AgentWidget[]>([]);
-  const [anchor, setAnchor] = useState<Anchor>({ widget: "canvas" });
+  const [anchor, setAnchor] = useState<ComposerAnchor>({ widget: "canvas" });
+  const [subject, setSubject] = useState<SubjectSelection>(selectedSubject());
+  const [contextProjects, setContextProjects] = useState<{ name: string; path: string }[]>([]);
+  const [contextConversations, setContextConversations] = useState<ContextConversation[]>([]);
+  const [contextTasks, setContextTasks] = useState<ContextTask[]>([]);
+  const [managerRunners, setManagerRunners] = useState<string[]>([]);
   const [asking, setAsking] = useState(false);
   const [lastRun, setLastRun] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+  const [theme, setTheme] = useState<"system" | "light" | "dark">("system");
+  const [composerContextOpen, setComposerContextOpen] = useState(false);
+  const [usageOpen, setUsageOpen] = useState(false);
+  const [runtimeStatus, setRuntimeStatus] = useState<RuntimeSummary | null>(null);
+  const [quotaSummary, setQuotaSummary] = useState<QuotaSummary | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [privacy, setPrivacy] = useState(true);
+  const [focusedId, setFocusedId] = useState<WidgetId | null>(null);
+  const [focusPane, setFocusPane] = useState<"navigation" | "main" | "inspector" | "comparison">("inspector");
+  const [comparisonId, setComparisonId] = useState<WidgetId | null>(null);
+  const focusReturn = useRef<HTMLButtonElement | null>(null);
+  const focusOpenButtons = useRef<Record<string, HTMLButtonElement | null>>({});
+  const pendingFocusWidget = useRef<string | null>(null);
   // Pointer capture works in both Chromium and the desktop WebView2. Native
   // HTML drag-and-drop did not: WebView2 emitted dragover but no drop for the
   // same grip gesture that completed in the browser.
@@ -352,6 +391,41 @@ export function App() {
     x: number;
     y: number;
   } | null>(null);
+  const contextMenuFirst = useRef<HTMLDivElement | null>(null);
+  const contextMenuReturn = useRef<HTMLElement | null>(null);
+
+  const pinContext = useCallback((widget: string, subjectName?: string) => {
+    setAnchor({
+      widget,
+      subject: subjectName,
+      project: subject.project,
+      conversation: subject.conversation,
+      task: subject.task,
+      managerRunner: subject.managerRunner,
+    });
+  }, [subject]);
+
+  const openWidgetMenu = useCallback((id: WidgetId, title: string, target: HTMLElement) => {
+    const rect = target.getBoundingClientRect();
+    contextMenuReturn.current = target;
+    pinContext(title);
+    setContextMenu({
+      id,
+      title,
+      x: Math.max(8, Math.min(rect.right - 188, window.innerWidth - 196)),
+      y: Math.max(8, Math.min(rect.bottom + 6, window.innerHeight - 174)),
+    });
+  }, [pinContext]);
+
+  useEffect(() => {
+    if (!contextMenu) return;
+    requestAnimationFrame(() => contextMenuFirst.current?.focus());
+  }, [contextMenu]);
+
+  const clearContext = useCallback(() => {
+    setAnchor({ widget: "canvas" });
+    selectSubject({ conversation: null, task: null, run: null, project: null, managerRunner: null });
+  }, []);
 
   const gridStep = useCallback(() => {
     const element = board.current;
@@ -371,6 +445,16 @@ export function App() {
         const next = normalizeLayout(stored, DEFAULT_LAYOUT);
         layoutRef.current = next;
         setLayout(next);
+        setSidebarCollapsed(next.sidebarCollapsed ?? false);
+        setTheme(next.theme ?? "system");
+        setFocusedId(next.focused ?? null);
+        setFocusPane(next.focusPane ?? "inspector");
+        setComparisonId(next.comparison ?? null);
+        if (next.focusOrigin) {
+          selectSubject(next.focusOrigin.subject);
+          setAnchor({ widget: next.focusOrigin.anchor });
+          pendingFocusWidget.current = next.focusOrigin.widget;
+        }
       })
       .catch(() => {
         layoutRef.current = DEFAULT_LAYOUT;
@@ -389,24 +473,35 @@ export function App() {
   }, []);
 
   useEffect(() => {
-    const closeOverlays = (event: KeyboardEvent) => {
-      if (event.key !== "Escape") return;
-      setSidebarOpen(false);
-      setContextMenu(null);
-      setSettingsOpen(false);
-    };
-    const closeContextMenu = (event: PointerEvent) => {
-      if (!(event.target instanceof Element) || !event.target.closest(".widget-context-menu")) {
-        setContextMenu(null);
-      }
-    };
-    document.addEventListener("keydown", closeOverlays);
-    document.addEventListener("pointerdown", closeContextMenu);
-    return () => {
-      document.removeEventListener("keydown", closeOverlays);
-      document.removeEventListener("pointerdown", closeContextMenu);
-    };
+    Promise.all([
+      bridge.read<ProjectRoot[]>("/projects"),
+      bridge.read<ContextConversation[]>("/conversations?limit=500"),
+      bridge.read<{ tasks: ContextTask[] }>("/tasks/page?limit=500"),
+      bridge.read<ManagerCell>("/cells/zero"),
+    ]).then(([roots, conversations, page, cell]) => {
+      setContextProjects(roots.flatMap((root) => root.projects));
+      setContextConversations(conversations);
+      setContextTasks(page.tasks);
+      setManagerRunners(cell.manager.runners);
+    }).catch(() => undefined);
   }, []);
+
+  const refreshRuntime = useCallback(async () => {
+    try {
+      setRuntimeStatus(await bridge.read<RuntimeSummary>("/runtime"));
+    } catch {
+      setRuntimeStatus(null);
+    }
+  }, []);
+
+  useEffect(() => {
+    void refreshRuntime();
+    const timer = window.setInterval(() => void refreshRuntime(), 10000);
+    return () => window.clearInterval(timer);
+  }, [refreshRuntime]);
+
+  useEffect(() => onSubjectSelection(setSubject), []);
+  useEffect(() => onPrivacy(setPrivacy), []);
 
   /**
    * Compose layout edits synchronously, then serialize their opaque PUTs.
@@ -427,6 +522,62 @@ export function App() {
       .catch((e: Error) => setError(e.message));
   }, []);
 
+  const leaveFocus = useCallback(() => {
+    const origin = layoutRef.current?.focusOrigin;
+    if (origin) {
+      selectSubject(origin.subject);
+      setAnchor({ widget: origin.anchor });
+    }
+    setFocusedId(null);
+    persist((current) => current.focused == null && current.focusOrigin == null
+      ? current
+      : { ...current, focused: null, focusOrigin: null });
+    const target = focusReturn.current;
+    requestAnimationFrame(() => target?.focus() ?? (origin && focusOpenButtons.current[origin.widget]?.focus()));
+  }, [persist]);
+
+  useEffect(() => {
+    const widget = pendingFocusWidget.current;
+    if (!widget || !focusedId) return;
+    const target = focusOpenButtons.current[widget];
+    if (!target) return;
+    pendingFocusWidget.current = null;
+    requestAnimationFrame(() => target.focus());
+  }, [focusedId, layout]);
+
+  useEffect(() => {
+    const closeOverlays = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      if (contextMenu) {
+        setContextMenu(null);
+        requestAnimationFrame(() => contextMenuReturn.current?.focus());
+        return;
+      }
+      setSidebarOpen(false);
+      setContextMenu(null);
+      setSettingsOpen(false);
+      leaveFocus();
+    };
+    const closeContextMenu = (event: PointerEvent) => {
+      if (!(event.target instanceof Element) || !event.target.closest(".widget-context-menu")) {
+        setContextMenu(null);
+      }
+    };
+    document.addEventListener("keydown", closeOverlays);
+    document.addEventListener("pointerdown", closeContextMenu);
+    return () => {
+      document.removeEventListener("keydown", closeOverlays);
+      document.removeEventListener("pointerdown", closeContextMenu);
+    };
+  }, [contextMenu, leaveFocus]);
+
+  // A removed or failed authored face must never leave the canvas in a blank
+  // focused route. Return to the last valid face and preserve execution state.
+  useEffect(() => {
+    const known = new Set([...Object.keys(REGISTRY), ...agentWidgets.map((widget) => widget.id)]);
+    if (focusedId && (!known.has(focusedId) || !layoutRef.current?.mounted.includes(focusedId))) leaveFocus();
+  }, [focusedId, agentWidgets, layout, leaveFocus]);
+
   // Selecting a run has to *show* one. A click that opens a widget the operator
   // has unmounted looks like a click that did nothing, which is the same class
   // of failure as the grip that rendered a handle and moved nothing.
@@ -445,17 +596,18 @@ export function App() {
 
   const ask = useCallback(
     async (text: string) => {
+      const context = snapshotComposerContext(anchor, subject);
       setAsking(true);
       setError(null);
       try {
-        setLastRun(await bridge.ask(anchor, text));
+        setLastRun(await bridge.ask(context, text));
       } catch (e) {
         setError((e as Error).message);
       } finally {
         setAsking(false);
       }
     },
-    [anchor],
+    [anchor, subject],
   );
 
   if (!layout) return <main className="loading">loading the canvas...</main>;
@@ -469,13 +621,16 @@ export function App() {
   const authored = agentWidgets.map((widget) => ({ ...widget, agent: true as const }));
   const available = [...built, ...authored];
   const contextIndex = contextMenu ? layout.mounted.indexOf(contextMenu.id) : -1;
+  const focusedWidget = focusedId ? available.find((candidate) => candidate.id === focusedId) : null;
 
   return (
     <div
       className={[
         "app",
+        "theme-" + theme,
         sidebarOpen ? "sidebar-open" : "",
         sidebarCollapsed ? "sidebar-collapsed" : "",
+        focusedId ? "focus-mode" : "",
       ]
         .filter(Boolean)
         .join(" ")}
@@ -497,7 +652,11 @@ export function App() {
           <button
             className="icon-button collapse-sidebar"
             aria-label={sidebarCollapsed ? "Expand sidebar" : "Collapse sidebar"}
-            onClick={() => setSidebarCollapsed((current) => !current)}
+            onClick={() => {
+              const next = !sidebarCollapsed;
+              setSidebarCollapsed(next);
+              persist((current) => ({ ...current, sidebarCollapsed: next }));
+            }}
           >
             <svg viewBox="0 0 24 24" aria-hidden>
               <path d={sidebarCollapsed ? "m9.5 6 6 6-6 6" : "m14.5 6-6 6 6 6"} />
@@ -569,10 +728,36 @@ export function App() {
           </button>
           <div className="crumb">
             <b>Home</b>
-            <span>live canvas</span>
+            <span>{focusedWidget ? `canvas / ${focusedWidget.title}` : "live canvas"}</span>
           </div>
+          {focusedWidget && (
+            <button className="chip focus-back" onClick={leaveFocus} aria-label="Back to canvas">
+              back to canvas
+            </button>
+          )}
           <div className="top-actions">
             <span className="saved-state"><span className="status-orb" aria-hidden />arrangement saved</span>
+            <button
+              className="icon-button theme-toggle"
+              aria-label={"Theme: " + theme + ". Change theme"}
+              title={"Theme: " + theme}
+              onClick={() => {
+                const next = theme === "system" ? "dark" : theme === "dark" ? "light" : "system";
+                setTheme(next);
+                persist((current) => ({ ...current, theme: next }));
+              }}
+            >
+              {theme === "dark" ? "☾" : theme === "light" ? "☀" : "◐"}
+            </button>
+            <button
+              className="icon-button"
+              aria-pressed={privacy}
+              aria-label={privacy ? "Disable presentation privacy mode" : "Enable presentation privacy mode"}
+              title={privacy ? "Disable privacy mode" : "Enable privacy mode"}
+              onClick={togglePrivacy}
+            >
+              {privacy ? "••" : "◌"}
+            </button>
             <button
               className="icon-button"
               aria-pressed={layout.mounted.includes("clock")}
@@ -618,7 +803,7 @@ export function App() {
         <GateBar />
 
         <main
-          className="canvas"
+          className={focusedId ? "canvas focus-mode" : "canvas"}
           ref={board}
           style={
             {
@@ -639,6 +824,7 @@ export function App() {
               className={[
                 "widget",
                 `widget-${id}`,
+                focusedId === id ? "focused" : "",
                 dragging === id ? "dragging" : "",
                 over === id && dragging !== id ? "drop-target" : "",
               ]
@@ -652,18 +838,12 @@ export function App() {
                   "--h": span.h,
                 } as React.CSSProperties
               }
-              onFocus={() => setAnchor({ widget: widget.title })}
-              onMouseEnter={() => setAnchor({ widget: widget.title })}
-              onPointerDown={() => setAnchor({ widget: widget.title })}
+              // Hover and focus never retarget a request. Context changes only
+              // on an explicit click or context-menu action.
+              onClick={() => pinContext(widget.title)}
               onContextMenu={(event) => {
                 event.preventDefault();
-                setAnchor({ widget: widget.title });
-                setContextMenu({
-                  id,
-                  title: widget.title,
-                  x: Math.max(8, Math.min(event.clientX, window.innerWidth - 196)),
-                  y: Math.max(8, Math.min(event.clientY, window.innerHeight - 174)),
-                });
+                openWidgetMenu(id, widget.title, event.currentTarget);
               }}
             >
               <div className="head">
@@ -756,6 +936,39 @@ export function App() {
                   </span>
                 )}
                 <span className="grow" />
+                <button
+                  type="button"
+                  className="chip focus-open"
+                  aria-label={`Open ${widget.title} in focused workspace`}
+                  title={`Open ${widget.title} in focused workspace`}
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    focusReturn.current = event.currentTarget;
+                    setFocusedId(id);
+                    setFocusPane("inspector");
+                    const origin: FocusOrigin = {
+                      widget: id,
+                      anchor: anchor.widget,
+                      subject: { ...subject },
+                    };
+                    persist((current) => ({ ...current, focused: id, focusPane: "inspector", focusOrigin: origin }));
+                  }}
+                  ref={(node) => { focusOpenButtons.current[id] = node; }}
+                >
+                  focus
+                </button>
+                <button
+                  type="button"
+                  className="icon-button widget-menu-button"
+                  aria-label={"Open " + widget.title + " actions"}
+                  title="Widget actions"
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    openWidgetMenu(id, widget.title, event.currentTarget);
+                  }}
+                >
+                  ⋯
+                </button>
                 <select
                   className="badge size"
                   aria-label={`Size of ${widget.title} widget`}
@@ -779,19 +992,21 @@ export function App() {
                 </select>
               </div>
               <div className="body">
-                {widget.agent ? (
-                  <SandboxWidget
-                    id={widget.id}
-                    title={widget.title}
-                    bridge={bridge}
-                    {...("cell" in widget && widget.cell ? { cell: widget.cell } : {})}
-                  />
-                ) : (
-                  (() => {
-                    const Render = REGISTRY[widget.id as keyof typeof REGISTRY].render;
-                    return <Render bridge={bridge} />;
-                  })()
-                )}
+                <WidgetBoundary id={widget.id}>
+                  {DEV_RENDER_PROBE === `render:${widget.id}` ? <RenderFailureProbe id={widget.id} /> : widget.agent ? (
+                    <SandboxWidget
+                      id={widget.id}
+                      title={widget.title}
+                      bridge={bridge}
+                      {...("cell" in widget && widget.cell ? { cell: widget.cell } : {})}
+                    />
+                  ) : (
+                    (() => {
+                      const Render = REGISTRY[widget.id as keyof typeof REGISTRY].render;
+                      return <Render bridge={bridge} />;
+                    })()
+                  )}
+                </WidgetBoundary>
               </div>
               <ResizeHandle
                 id={id}
@@ -807,14 +1022,102 @@ export function App() {
         {layout.mounted.length === 0 && (
           <p className="empty">Nothing is visible. Show a widget from the sidebar.</p>
         )}
+        {focusedWidget && (
+          <aside className="focus-pane" aria-label={`${focusedWidget.title} focused workspace pane`}>
+            <div className="row focus-pane-tabs">
+              {(["navigation", "main", "inspector", "comparison"] as const).map((pane) => (
+                <button key={pane} className={focusPane === pane ? "chip active" : "chip"} onClick={() => { setFocusPane(pane); persist((current) => ({ ...current, focusPane: pane })); }}>{pane}</button>
+              ))}
+            </div>
+            {focusPane === "navigation" ? (
+              <nav aria-label="Focused widget navigation">
+                {layout.mounted.map((id) => {
+                  const item = available.find((candidate) => candidate.id === id);
+                  return item ? <button key={id} className={id === focusedId ? "focus-nav-item active" : "focus-nav-item"} onClick={() => { setFocusedId(id); persist((current) => ({ ...current, focused: id })); }}>{item.title}</button> : null;
+                })}
+              </nav>
+            ) : focusPane === "main" ? (
+              <div className="focus-main-summary">
+                <b>{focusedWidget.title}</b>
+                <p className="dim small">The focused face is the main pane. Its card above remains the same live widget and command surface.</p>
+              </div>
+            ) : focusPane === "comparison" ? (
+              <div className="focus-comparison">
+                <label>compare with
+                  <select value={comparisonId ?? ""} onChange={(event) => { const value = event.currentTarget.value || null; setComparisonId(value); persist((current) => ({ ...current, comparison: value })); }}>
+                    <option value="">none</option>
+                    {available.filter((item) => item.id !== focusedId).map((item) => <option key={item.id} value={item.id}>{item.title}</option>)}
+                  </select>
+                </label>
+                {comparisonId && <p className="dim small">Comparison uses the same selected project, subject, and runtime state.</p>}
+              </div>
+            ) : (
+              <div className="focus-inspector">
+                <b>{focusedWidget.title}</b>
+                <p className="dim small">The focused view uses the same widget, subject, and runtime commands as the canvas.</p>
+                <dl>
+                  <dt>project</dt><dd>{subject.project ? mask(subject.project, "path", privacy) : "global"}</dd>
+                  <dt>conversation</dt><dd>{subject.conversation ? mask(subject.conversation, "session", privacy) : "none"}</dd>
+                  <dt>task</dt><dd>{subject.task ? mask(subject.task, "session", privacy) : "none"}</dd>
+                  <dt>anchor</dt><dd>{anchor.widget ?? "canvas"}</dd>
+                </dl>
+              </div>
+            )}
+          </aside>
+        )}
       </main>
+        <div className="status-bar" aria-label="Runtime and usage status">
+          <button
+            type="button"
+            className="status-action"
+            aria-expanded={usageOpen}
+            onClick={() => {
+              setUsageOpen((current) => !current);
+              if (!quotaSummary) void bridge.read<QuotaSummary>("/quota").then(setQuotaSummary).catch(() => setQuotaSummary(null));
+              persist((current) => current.mounted.includes("capacity") ? current : toggleMounted(current, "capacity"));
+            }}
+          >
+            <span className="status-orb" aria-hidden />
+            usage {runtimeStatus ? runtimeStatus.active_runs + " active" : "unavailable"}
+          </button>
+          <span className="status-item">project: {subject.project ? mask(subject.project.split(/[\\/]/).at(-1) ?? subject.project, "path", privacy) : "global"}</span>
+          <span className="status-item">harnesses: {managerRunners.length}</span>
+          <span className="status-item">runtime: {runtimeStatus?.state ?? "offline"}</span>
+          {usageOpen && (
+            <div className="status-popover" role="dialog" aria-label="Usage and resource breakdown">
+              <b>Usage and resources</b>
+              <p>{runtimeStatus ? runtimeStatus.active_runs + " active run" + (runtimeStatus.active_runs === 1 ? "" : "s") : "Runtime status unavailable"}</p>
+              <p>resource monitor: {runtimeStatus ? (runtimeStatus.resource_monitor_enabled ? "on" : "off") : "unknown"}</p>
+              <p>quota windows: {quotaSummary ? quotaSummary.windows.length : "reading..."}</p>
+              {quotaSummary && <p>provider meters: {quotaSummary.windows.filter((window) => window.used_percent !== undefined).length}</p>}
+              <button
+                type="button"
+                className="chip"
+                onClick={() => {
+                  setUsageOpen(false);
+                  persist((current) => current.mounted.includes("capacity") ? current : toggleMounted(current, "capacity"));
+                }}
+              >
+                open capacity breakdown
+              </button>
+            </div>
+          )}
+        </div>
         {contextMenu && (
           <div
             className="widget-context-menu"
+            ref={contextMenuFirst}
+            tabIndex={-1}
             role="menu"
             aria-label={`${contextMenu.title} widget actions`}
             style={{ left: contextMenu.x, top: contextMenu.y }}
             onContextMenu={(event) => event.preventDefault()}
+            onKeyDown={(event) => {
+              if (event.key !== "Escape") return;
+              event.preventDefault();
+              setContextMenu(null);
+              requestAnimationFrame(() => contextMenuReturn.current?.focus());
+            }}
           >
             <p>{contextMenu.title}</p>
             <button
@@ -891,15 +1194,128 @@ export function App() {
               <span className="route-chip" title="every request goes to the top manager">
                 to top manager
               </span>
+              <span className="route-chip" title="the selected widget is sent as request context">
+                {anchor.widget}
+              </span>
+              {subject.project && <span className="route-chip" title={mask(subject.project, "path", privacy)}>project: {mask(subject.project.split(/[\\/]/).at(-1) ?? subject.project, "path", privacy)}</span>}
+              {subject.conversation && <span className="route-chip" title={mask(subject.conversation, "session", privacy)}>conversation: {mask(subject.conversation.slice(0, 8), "session", privacy)}</span>}
+              <button
+                type="button"
+                className="context-toggle"
+                aria-expanded={composerContextOpen}
+                title="Choose project, session, task, or manager runner"
+                onClick={() => setComposerContextOpen((current) => !current)}
+              >
+                {composerContextOpen ? "hide context" : "context"}
+              </button>
               <button
                 type="button"
                 className="anchor-chip"
-                title="reset the request context to the canvas"
-                onClick={() => setAnchor({ widget: "canvas" })}
+                title="clear the pinned request context"
+                onClick={clearContext}
               >
-                about {anchor.widget}
+                {anchor.widget === "canvas" ? "global context" : `clear ${anchor.widget}`}
               </button>
             </div>
+            <div className="composer-controls" aria-label="Composer routing and context controls">
+              <label className="composer-control">
+                <span>harness / agent</span>
+                <select
+                  aria-label="composer harness or agent"
+                  value={subject.managerRunner ?? ""}
+                  onChange={(event) => selectSubject({ managerRunner: event.currentTarget.value || null })}
+                >
+                  <option value="">automatic</option>
+                  {subject.managerRunner && !managerRunners.includes(subject.managerRunner) && <option value={subject.managerRunner}>{subject.managerRunner} (current)</option>}
+                  {managerRunners.map((runner) => <option key={runner}>{runner}</option>)}
+                </select>
+              </label>
+              <span className="composer-policy" title="Model selection is owned by the selected harness runner configuration.">model: runner config</span>
+              <span className="composer-policy" title="Reasoning effort is owned by the selected harness runner configuration.">reasoning: runner config</span>
+              <span
+                className={composerContextOpen ? "composer-context-info context-open" : "composer-context-info"}
+                title={"project: " + (subject.project ? mask(subject.project, "path", privacy) : "global") + "; conversation: " + (subject.conversation ? mask(subject.conversation, "session", privacy) : "new") + "; task: " + (subject.task ? mask(subject.task, "session", privacy) : "none") + "; anchor: " + anchor.widget}
+              >
+                {subject.project ? "project: " + mask(subject.project.split(/[\\/]/).at(-1) ?? subject.project, "path", privacy) : "global"}
+                {" · "}
+                {subject.conversation ? "session: " + mask(subject.conversation.slice(0, 8), "session", privacy) : "new session"}
+                {subject.task ? " · task: " + mask(subject.task.slice(0, 8), "session", privacy) : ""}
+              </span>
+            </div>
+            {composerContextOpen && (
+              <div className="composer-pickers" aria-label="Explicit composer context">
+              <label>
+                <span>face</span>
+                <select
+                  aria-label="composer face"
+                  value={anchor.widget}
+                  onChange={(event) => setAnchor({ widget: event.currentTarget.value })}
+                >
+                  <option value="canvas">canvas</option>
+                  {available.map((widget) => <option key={widget.id} value={widget.title}>{widget.title}</option>)}
+                </select>
+              </label>
+              <label>
+                <span>project</span>
+                <select
+                  aria-label="composer project"
+                  value={subject.project ?? ""}
+                  onChange={(event) => {
+                    const project = event.currentTarget.value || null;
+                    const conversation = contextConversations.find((item) => item.conversation_id === subject.conversation);
+                    if (conversation?.project_path && conversation.project_path !== project) {
+                      selectSubject({ project, conversation: null, task: null });
+                    } else {
+                      selectSubject({ project, task: null });
+                    }
+                  }}
+                >
+                  <option value="">global</option>
+                  {contextProjects.map((project) => <option key={project.path} value={project.path}>{mask(project.name, "path", privacy)}</option>)}
+                  {subject.project && !contextProjects.some((project) => project.path === subject.project) && <option value={subject.project}>{mask(subject.project, "path", privacy)}</option>}
+                </select>
+              </label>
+              <label>
+                <span>conversation</span>
+                <select
+                  aria-label="composer conversation"
+                  value={subject.conversation ?? ""}
+                  onChange={(event) => {
+                    const conversation = contextConversations.find((item) => item.conversation_id === event.currentTarget.value);
+                    selectSubject({
+                      conversation: conversation?.conversation_id ?? null,
+                      project: conversation?.project_path ?? subject.project,
+                      task: null,
+                      managerRunner: conversation?.manager_runner ?? subject.managerRunner,
+                    });
+                  }}
+                >
+                  <option value="">none</option>
+                  {contextConversations.map((conversation) => <option key={conversation.conversation_id} value={conversation.conversation_id}>{mask(conversation.title, "diagnostic", privacy)}</option>)}
+                  {subject.conversation && !contextConversations.some((conversation) => conversation.conversation_id === subject.conversation) && <option value={subject.conversation}>{mask(subject.conversation.slice(0, 8), "session", privacy)}</option>}
+                </select>
+              </label>
+              <label>
+                <span>task</span>
+                <select
+                  aria-label="composer task"
+                  value={subject.task ?? ""}
+                  onChange={(event) => {
+                    const task = contextTasks.find((item) => item.task_id === event.currentTarget.value);
+                    selectSubject({
+                      task: task?.task_id ?? null,
+                      conversation: task?.conversation_id ?? subject.conversation,
+                      project: task?.project_path ?? subject.project,
+                    });
+                  }}
+                >
+                  <option value="">none</option>
+                  {contextTasks.map((task) => <option key={task.task_id} value={task.task_id}>{mask(task.title, "diagnostic", privacy)}</option>)}
+                  {subject.task && !contextTasks.some((task) => task.task_id === subject.task) && <option value={subject.task}>{mask(subject.task.slice(0, 8), "session", privacy)}</option>}
+                </select>
+              </label>
+              </div>
+            )}
             <textarea
               name="ask"
               rows={1}
@@ -914,10 +1330,10 @@ export function App() {
                   <span className="bad">{error}</span>
                 ) : lastRun ? (
                   <>
-                    accepted as run <span className="mono">{lastRun.slice(0, 8)}</span>
+                    accepted as run <span className="mono">{mask(lastRun.slice(0, 8), "session", privacy)}</span>
                   </>
                 ) : (
-                  "Point to a widget to change context."
+                  "Click a widget to pin composer context."
                 )}
               </p>
               <button

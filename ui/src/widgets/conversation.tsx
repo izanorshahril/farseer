@@ -2,6 +2,8 @@ import { useEffect, useRef, useState } from "react";
 import type { Bridge } from "../bridge";
 import { onSubjectSelection, selectedSubject } from "../selection";
 import { follow, type RecordEvent } from "../stream";
+import { mask, RevealField, usePrivacy } from "../privacy";
+import { ReadFailure } from "../ReadFailure";
 /**
  * What the top manager said, as a conversation.
  *
@@ -149,11 +151,13 @@ function turnFrom(event: RecordEvent): Turn | null {
 
 
 export function ConversationWidget({ bridge }: { bridge: Bridge }) {
+  const privacy = usePrivacy();
   const initial = selectedSubject();
   const [subject, setSubject] = useState(initial);
   const [turns, setTurns] = useState<Turn[]>([]);
   const [meta, setMeta] = useState<Meta>({ sessions: [] });
   const [error, setError] = useState<string | null>(null);
+  const [retry, setRetry] = useState(0);
   const [showSilent, setShowSilent] = useState(false);
   const thread = useRef<HTMLOListElement>(null);
 
@@ -269,7 +273,7 @@ export function ConversationWidget({ bridge }: { bridge: Bridge }) {
       subscription.close();
       selectedSubscription.close();
     };
-  }, [bridge, subject.conversation, subject.task, subject.run]);
+  }, [bridge, retry, subject.conversation, subject.task, subject.run]);
 
   // The newest turn is the one being waited for, and a thread that keeps its
   // scroll at the top hides exactly the line the operator is here to read.
@@ -313,7 +317,7 @@ export function ConversationWidget({ bridge }: { bridge: Bridge }) {
         // it will reach for, and farseer never sets it, so calling it the level
         // this turn used would be a claim nobody made.
         ["configured effort", meta.effort],
-        ["sessions", meta.sessions.length ? meta.sessions.map((session) => `${session.kind}:${session.id.slice(0, 8)}`).join(", ") : undefined],
+        ["sessions", meta.sessions.length ? meta.sessions.map((session) => `${session.kind}:${mask(session.id.slice(0, 8), "session", privacy)}`).join(", ") : undefined],
         ["context", context(meta)],
         ["tokens", meta.tokens?.toLocaleString()],
         ["cost", typeof meta.cost === "number" ? usd(meta.cost) : undefined],
@@ -357,12 +361,12 @@ export function ConversationWidget({ bridge }: { bridge: Bridge }) {
     </div>
   );
 
-  if (error) return <p className="empty bad">{error}</p>;
   if (!subject.conversation)
     return <p className="empty">Start or select a conversation in Work, then use the canvas composer.</p>;
   if (turns.length === 0)
     return (
       <>
+        {error && <ReadFailure capability="conversation" error={error} onRetry={() => setRetry((current) => current + 1)} />}
         {strip}
         <p className="empty">Nothing said in this conversation yet.</p>
       </>
@@ -370,6 +374,7 @@ export function ConversationWidget({ bridge }: { bridge: Bridge }) {
 
   return (
     <>
+      {error && <ReadFailure capability="conversation" error={error} stale onRetry={() => setRetry((current) => current + 1)} />}
       {strip}
       <ol className="thread" ref={thread}>
       {turns.map((turn) => (
@@ -377,7 +382,7 @@ export function ConversationWidget({ bridge }: { bridge: Bridge }) {
           <div className="row small">
             <b>{turn.who === "operator" ? "you" : turn.who === "farseer" ? "farseer" : "top manager"}</b>
             <span className="faint mono">{time(turn.ts)}</span>
-            <span className="faint mono">{turn.run.slice(0, 8)}</span>
+            <span className="faint mono">{mask(turn.run.slice(0, 8), "session", privacy)}</span>
             {turn.outcome && turn.outcome !== "ok" && (
               <span className={`badge ${turn.outcome === "failed" ? "bad" : ""}`}>
                 {turn.outcome}
@@ -388,7 +393,7 @@ export function ConversationWidget({ bridge }: { bridge: Bridge }) {
               <span className="faint mono">{usd(turn.cost)}</span>
             )}
           </div>
-          <p>{turn.text}</p>
+          <p><RevealField value={turn.text} kind="diagnostic" fieldKey={`conversation:${turn.seq}`} label="conversation text" /></p>
         </li>
         ))}
       </ol>

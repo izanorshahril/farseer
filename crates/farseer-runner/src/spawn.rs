@@ -1,6 +1,6 @@
 //! A runner's child process, reaped as one tree.
 //!
-//! `jobspike` (`.scratch/farseer/spikes/jobspike`) proved a Win32 Job Object
+//! the Windows process evidence summarized in `CORE.md` proved a Win32 Job Object
 //! with `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` reaps a five-deep process tree in
 //! 300-400us on handle close with zero survivors, against five of six
 //! surviving a root-only `TerminateProcess`. This is that mechanism, wired to
@@ -42,6 +42,8 @@ use windows::Win32::System::Threading::{
     CREATE_NO_WINDOW, CREATE_SUSPENDED, OpenThread, ResumeThread, THREAD_SUSPEND_RESUME,
 };
 use windows::core::PCWSTR;
+
+use crate::resource::{self, ResourceObservation};
 
 #[derive(Debug, thiserror::Error)]
 pub enum SpawnError {
@@ -125,10 +127,16 @@ fn close(job: &Mutex<Option<RawJobHandle>>) {
 pub struct StdinHandle(Arc<Mutex<ChildStdin>>);
 
 impl StdinHandle {
-    pub fn write_line(&self, line: &str) -> std::io::Result<()> {
+    pub fn write(&self, bytes: &[u8]) -> std::io::Result<()> {
         let mut stdin = self.0.lock().unwrap_or_else(|e| e.into_inner());
-        writeln!(stdin, "{line}")?;
+        stdin.write_all(bytes)?;
         stdin.flush()
+    }
+
+    pub fn write_line(&self, line: &str) -> std::io::Result<()> {
+        let mut bytes = line.as_bytes().to_vec();
+        bytes.push(b'\n');
+        self.write(&bytes)
     }
 }
 
@@ -145,6 +153,34 @@ pub struct SupervisedProcess {
     stdout: BufReader<ChildStdout>,
     /// `None` for a runner nobody is going to steer.
     stdin: Option<Arc<Mutex<ChildStdin>>>,
+}
+
+/// A cloneable view of the Job Object owned by a supervised process.
+///
+/// The handle is duplicated by sharing the same owner slot, never by looking
+/// up a PID again.  That keeps periodic observations tied to the process tree
+/// farseer actually launched, even after Windows recycles the process id.
+#[derive(Clone)]
+pub struct ResourceHandle {
+    job: Arc<Mutex<Option<RawJobHandle>>>,
+}
+
+impl ResourceHandle {
+    /// Read cumulative metrics from the still-owned Job Object.
+    pub fn observation(
+        &self,
+        run_id: impl Into<String>,
+        timestamp_ms: i64,
+        final_sample: bool,
+    ) -> ResourceObservation {
+        let metrics = self
+            .job
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .as_ref()
+            .and_then(|RawJobHandle(raw)| resource::query_job(HANDLE(*raw as *mut _)).ok());
+        resource::observation(run_id, metrics, timestamp_ms, final_sample)
+    }
 }
 
 /// Whether the child gets a stdin at all.
@@ -302,6 +338,27 @@ impl SupervisedProcess {
         CancelToken(Arc::clone(&self.job), Arc::clone(&self.cancelled))
     }
 
+    /// Read cumulative metrics from this process's owned job.
+    ///
+    /// The job handle is never reconstructed from a PID, so a recycled PID or
+    /// an unrelated parent/child cannot transfer ownership of an observation.
+    pub fn resource_observation(
+        &self,
+        run_id: impl Into<String>,
+        timestamp_ms: i64,
+        final_sample: bool,
+    ) -> ResourceObservation {
+        self.resource_handle()
+            .observation(run_id, timestamp_ms, final_sample)
+    }
+
+    /// Return a sampling view that remains valid while the process is driven.
+    pub fn resource_handle(&self) -> ResourceHandle {
+        ResourceHandle {
+            job: Arc::clone(&self.job),
+        }
+    }
+
     /// A handle that can write to this process's stdin from another thread.
     /// Fetch it before calling a blocking read, same reason as
     /// [`Self::cancel_token`].
@@ -340,6 +397,15 @@ impl SupervisedProcess {
             }
         }
         Ok(Some(line))
+    }
+
+    /// Poll the supervised process without weakening the Job Object boundary.
+    /// `18 safe staged runtime promotion` uses this for bounded fixture
+    /// commands while the owning job still handles descendant cleanup.
+    /// The returned status is the root status; dropping this value still
+    /// reaps any descendants through the owning job.
+    pub fn try_wait(&mut self) -> std::io::Result<Option<std::process::ExitStatus>> {
+        self.child.try_wait()
     }
 
     /// Kill-on-close: closing the job handle is a kernel guarantee that

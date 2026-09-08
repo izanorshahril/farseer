@@ -1,0 +1,19 @@
+feedback 2026-09-07
+- sidebar can shrink, but cant expand back.
+- change mouseover effect to useful mini menu or tooltip, instead of motion animation.
+- no dark mode, no right click menu for useful actions.
+- main chat, no need to show face, task or project, manager should know the list of projects from registry or subfolders.
+- to many frictions of multiple widgets for similar purpose, either combine them into a widget with multi face/views.
+- global kanban open per project kanban in the same widget window, it's ok but may not able to scale later when we have more projects, better change view to per project when clicked.
+- the home screen still not versatile like berd (https://github.com/block/berd).
+  - there's already berd install in this pc, try to use berdctl to test.
+  - if needed, clone or check its repo for its playwright and vitest.
+  - browser use on berd vite or dev.
+  - computer use on goose serve or tauri driver.
+  - other workaround that can be used to compare the UI/UX of our project and berd.
+- Per project chat/workspace should similar UI/UX like orca (https://github.com/stablyai/orca) or Desktop mode of Claude Code or ChatGPT Codex.
+  - can add mutiple harness on its own terminal, can add empty terminal and split terminal
+  - has its own window for git/source control, explore/file search, session hiistory
+  - right click menu for useful actions on any sidebar/pane/window.
+  - resource monitor & usage status on bottom status bar, shows usage menu on clicked, with breakdown of usage, stats & analytics. (t3code & orca)
+  - check orca UX/UI with orca serve or its own cli command, orca is installed in this pc.

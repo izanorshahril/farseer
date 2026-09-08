@@ -2,6 +2,8 @@ import { useCallback, useEffect, useState } from "react";
 import type { Bridge } from "../bridge";
 import { follow, type RecordEvent } from "../stream";
 import { confirmVerb } from "../confirm";
+import { mask, RevealField, usePrivacy } from "../privacy";
+import { ReadFailure } from "../ReadFailure";
 
 /**
  * Every runner process farseer has alive right now.
@@ -80,6 +82,7 @@ const time = (ts: number) => new Date(ts).toLocaleTimeString(undefined, { hour12
  * a payload with no text shows its shape instead of being dropped.
  */
 function Thread({ bridge, run, onBack }: { bridge: Bridge; run: Run; onBack: () => void }) {
+  const privacy = usePrivacy();
   const [events, setEvents] = useState<RecordEvent[] | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -110,14 +113,14 @@ function Thread({ bridge, run, onBack }: { bridge: Bridge; run: Run; onBack: () 
         <button className="chip" onClick={onBack}>
           back
         </button>
-        <b>{run.title ?? run.runner}</b>
+        <b>{run.title ? mask(run.title, "diagnostic", privacy) : run.runner}</b>
         <span className="dim small mono">{run.runner}</span>
         <span className="dim small">{run.model || "model not reported"}</span>
         {run.role && <span className="badge">{run.role}</span>}
         <span className="grow" />
-        <span className="mono faint small">{run.run_id.slice(0, 8)}</span>
+        <span className="mono faint small">{mask(run.run_id.slice(0, 8), "session", privacy)}</span>
       </div>
-      {error && <p className="empty bad">{error}</p>}
+      {error && <ReadFailure capability="runner thread" error={error} stale={Boolean(events)} onRetry={() => void load()} />}
       {!events && !error && <p className="empty">reading the thread...</p>}
       {events && shown.length === 0 && (
         <p className="empty">
@@ -137,12 +140,12 @@ function Thread({ bridge, run, onBack }: { bridge: Bridge; run: Run; onBack: () 
                 <span className="dim small">{event.actor}</span>
               </div>
               {typeof text === "string" && text.trim() ? (
-                <p className="thread-text">{text}</p>
+                <p className="thread-text"><RevealField value={text} kind="diagnostic" fieldKey={`runner-event:${event.seq}`} label="runner event text" /></p>
               ) : (
                 // Shape rather than nothing: this view exists to show what
                 // crossed the wire, and an event with no prose still did.
                 Object.keys(payload).length > 0 && (
-                  <pre className="thread-payload">{JSON.stringify(payload, null, 1)}</pre>
+                  <pre className="thread-payload"><RevealField value={JSON.stringify(payload, null, 1)} kind="diagnostic" fieldKey={`runner-payload:${event.seq}`} label="runner event payload" /></pre>
                 )
               )}
             </li>
@@ -154,9 +157,11 @@ function Thread({ bridge, run, onBack }: { bridge: Bridge; run: Run; onBack: () 
 }
 
 export function RunnersWidget({ bridge }: { bridge: Bridge }) {
+  const privacy = usePrivacy();
   const [runs, setRuns] = useState<Run[] | null>(null);
   const [facts, setFacts] = useState<Record<string, RunnerFacts>>({});
   const [note, setNote] = useState<string | null>(null);
+  const [readError, setReadError] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   /** The run whose thread is showing, or `null` for the list. */
   const [open, setOpen] = useState<string | null>(null);
@@ -169,8 +174,11 @@ export function RunnersWidget({ bridge }: { bridge: Bridge }) {
     () =>
       bridge
         .read<Run[]>("/runs?limit=50")
-        .then(setRuns)
-        .catch((e: Error) => setNote(e.message)),
+        .then((next) => {
+          setRuns(next);
+          setReadError(null);
+        })
+        .catch((e: Error) => setReadError(e.message)),
     [bridge],
   );
 
@@ -207,7 +215,7 @@ export function RunnersWidget({ bridge }: { bridge: Bridge }) {
     }
   };
 
-  if (note && !runs) return <p className="empty bad">{note}</p>;
+  if (!runs && readError) return <ReadFailure capability="active runners" error={readError} onRetry={() => void load()} />;
   if (!runs) return <p className="empty">reading runners...</p>;
 
   const opened = runs.find((run) => run.run_id === open);
@@ -246,15 +254,16 @@ export function RunnersWidget({ bridge }: { bridge: Bridge }) {
 
   return (
     <>
+      {readError && <ReadFailure capability="active runners" error={readError} stale onRetry={() => void load()} />}
       <ul className="runners-live">
         {tasks.map((task) => (
           <li key={task.task_id}>
             <div className="row dim small">
               {/* The task's name is its first process's goal - the operator
                   asked for one thing, and everything under it is how. */}
-              <b className="task-title">{task.runs[0]?.title ?? "untitled"}</b>
+              <b className="task-title">{task.runs[0]?.title ? mask(task.runs[0].title, "diagnostic", privacy) : "untitled"}</b>
               <span className="grow" />
-              <span className="mono faint">{task.task_id.slice(0, 8)}</span>
+              <span className="mono faint">{mask(task.task_id.slice(0, 8), "session", privacy)}</span>
               <span>
                 {task.runs.length} process{task.runs.length === 1 ? "" : "es"}
               </span>
@@ -305,7 +314,7 @@ export function RunnersWidget({ bridge }: { bridge: Bridge }) {
                         className="chip danger"
                         disabled={busy !== null}
                         onClick={() => {
-                          if (confirmVerb("cancel", run.title ?? run.run_id.slice(0, 8))) {
+                          if (confirmVerb("cancel", run.title ? mask(run.title, "diagnostic", privacy) : mask(run.run_id.slice(0, 8), "session", privacy))) {
                             void cancel(run);
                           }
                         }}
